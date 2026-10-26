@@ -107,7 +107,7 @@ test "sign in with Codegraff: the device flow keeps graff's key, and signing out
     var kb: [256]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, try std.Io.Dir.cwd().readFile(io, file, &kb), "\"api_key\": \"cg_sk_test\"") != null);
     const st = try std.Io.Dir.cwd().statFile(io, file, .{});
-    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(st.permissions) & 0o777)));
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@backingInt(st.permissions) & 0o777)));
 
     // A new launch finds it.
     var again: codegraff.Account = .init(gpa, io, dir ++ "/home", &env);
@@ -158,6 +158,7 @@ test "the Settings page: account, agents, appearance, updates" {
     t.settle(1);
     try std.testing.expect(t.hasText("Sign in with Codegraff"));
     try std.testing.expect(t.hasText("Codex") and t.hasText("opencode") and t.hasText("Hermes"));
+    try std.testing.expect(t.hasText("Pi") and t.hasText("fx"));
     try std.testing.expect(t.hasText("Default"));
     // graff installed: its providers, as Harness lists them.
     try std.testing.expect(t.hasText("graff providers"));
