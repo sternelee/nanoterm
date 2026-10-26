@@ -6,7 +6,7 @@
 
 <p align="center">A terminal of blocks with a coding agent beside you, drawn on the GPU.</p>
 
-<p align="center">Built on <a href="https://github.com/justrach/nanoui"><strong>nanoui</strong></a>. The agent speaks ACP, as in <a href="https://github.com/justrach/harness">Harness</a>: graff or Claude Code.</p>
+<p align="center">Built on <a href="https://github.com/justrach/nanoui"><strong>nanoui</strong></a>. The agent speaks ACP, as in <a href="https://github.com/justrach/harness">Harness</a>, or Pi's RPC mode: graff, Claude Code, Codex, Pi, fx and others.</p>
 
 <p align="center">
   <img alt="macOS · Linux" src="https://img.shields.io/badge/macOS%20·%20Linux-555">
@@ -177,7 +177,16 @@ under their own avatars.
 
 The agent is **graff** (`graff acp --yolo`) or
 **Claude Code** (its ACP adapter `claude-agent-acp`: Zed's install, else
-`npx -y @zed-industries/claude-agent-acp`).
+`npx -y @zed-industries/claude-agent-acp`). Settings also offers **Codex**,
+**opencode**, **Grok**, **Devin**, **Hermes**, **Pi** and **fx**, each
+through its own ACP command or adapter; the agent picker (⌘⇧M) switches
+the pane to any installed one. fx runs `fx acp`, with the chosen model as
+`--model`.
+
+Pi speaks its own RPC mode, not ACP: nanoterm runs `pi --mode rpc
+--no-session` and reads the same JSON lines Pi's SDK does
+(`src/pi.zig`). Its model, thinking level, slash commands and tool calls
+are Pi's, and the chosen model goes as `--provider` and `--model`.
 
 graff is kept current as Harness keeps it: nanoterm keeps its own copy
 (`~/Library/Application Support/nanoterm/bin/graff`) and replaces it from
@@ -199,6 +208,15 @@ nanoterm is the ACP client:
 - `fs/read_text_file`, `fs/write_text_file`;
 - `terminal/create` … `release`: the commands the agent runs show as blocks
   in its turn, as in Warp.
+
+For Pi it is an RPC client instead (`src/pi.zig`): `get_state`,
+`get_available_models`, `get_available_thinking_levels`, `get_commands`,
+`prompt`, `set_model`, `set_thinking_level`, `abort`, and Pi's own events
+(`message_update`, `tool_execution_*`, `agent_settled`). Pi runs its tools
+itself, so those show in its turn too, but it has no ACP permission
+prompts and runs no commands in nanoterm's terminal. Its visuals
+(`show_visual`) would need an MCP server entry in Pi's own configuration,
+which nanoterm does not write.
 
 ## Visuals
 
@@ -298,8 +316,9 @@ and each platform gets its own, in the menus, the keys and the labels shown.
 | ⌃C | Ctrl+C | stop the command or the agent's turn |
 | ↑ ↓ | ↑ ↓ | history |
 
-Launch options: `--cwd DIR`, `--run CMD` (repeat), `--agent graff|claude`,
-`--ask PROMPT`, `--split right|down` (repeat).
+Launch options: `--cwd DIR`, `--run CMD` (repeat), `--agent NAME`
+(`graff`, `claude`, `codex`, `opencode`, `grok`, `devin`, `hermes`, `pi`,
+`fx`), `--ask PROMPT`, `--split right|down` (repeat).
 
 From a shell, [`tools/nt`](tools/nt) (copy it to `~/.local/bin`) opens a
 window here, `nt DIR` in a folder, and `nt FILE` in the file's folder showing

@@ -14,10 +14,28 @@ pub fn installed(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ
 
 /// How to start each agent in ACP mode, as Harness does: `graff acp`,
 /// Claude Code and Codex through their ACP adapters, the others' own ACP
-/// commands. Agents are looked for on PATH and where installers put them.
+/// commands. Pi is the exception: its own RPC mode (`pi.zig`). Agents are
+/// looked for on PATH and where installers put them.
 pub fn argv(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, which: agent_mod.Which, model: ?[]const u8) ![*:null]const ?[*:0]const u8 {
     const path = agents.searchPath(arena, env.get("PATH") orelse "", env.get("HOME") orelse "/");
     switch (which) {
+        .pi => {
+            // Pi's own RPC mode (`pi.zig`), not ACP: no adapter, no npx.
+            // Its session is new each start (`--no-session`), like an ACP
+            // session: the conversation lives in this pane.
+            const bin = proc.which(arena, io, path, "pi") orelse return error.NotInstalled;
+            if (model) |m| {
+                const p = @import("pi.zig").providerId(m, "");
+                if (p.provider.len > 0) return proc.cStrings(arena, &.{ bin, "--mode", "rpc", "--no-session", "--provider", p.provider, "--model", p.id });
+                return proc.cStrings(arena, &.{ bin, "--mode", "rpc", "--no-session", "--model", p.id });
+            }
+            return proc.cStrings(arena, &.{ bin, "--mode", "rpc", "--no-session" });
+        },
+        .fx => {
+            const bin = proc.which(arena, io, path, "fx") orelse return error.NotInstalled;
+            if (model) |m| return proc.cStrings(arena, &.{ bin, "acp", "--model", m });
+            return proc.cStrings(arena, &.{ bin, "acp" });
+        },
         .codex => {
             if (proc.which(arena, io, path, "codex-acp")) |bin| return proc.cStrings(arena, &.{bin});
             if (proc.which(arena, io, path, "codex") == null) return error.NotInstalled;
@@ -67,4 +85,48 @@ fn graff(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     if (env.get("GRAFF_EXECUTABLE")) |own| if (own.len > 0) return own;
     const managed = graff_update.managedPath(arena, env.get("HOME") orelse "/") catch return null;
     return graff_update.resolve(arena, io, path, managed);
+}
+
+test "Pi starts in RPC mode, fx as an ACP server, with the chosen model" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A PATH of stand-ins, so the test never starts a real agent.
+    const dir = "/tmp/nanoterm-test-agent-launch";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir ++ "/bin");
+    for ([_][]const u8{ "pi", "npx", "fx" }) |name| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(arena, "{s}/bin/{s}", .{ dir, name }), .data = "#!/bin/sh\n", .flags = .{ .permissions = .executable_file } });
+    }
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", dir);
+    try env.put("PATH", dir ++ "/bin");
+
+    const fx = try argv(arena, io, &env, .fx, "glm-5.3");
+    try std.testing.expectEqualStrings(dir ++ "/bin/fx", std.mem.span(fx[0].?));
+    try std.testing.expectEqualStrings("acp", std.mem.span(fx[1].?));
+    try std.testing.expectEqualStrings("--model", std.mem.span(fx[2].?));
+    try std.testing.expectEqualStrings("glm-5.3", std.mem.span(fx[3].?));
+    try std.testing.expect(fx[4] == null);
+
+    // Pi is its own RPC client: `pi --mode rpc`, never an ACP adapter.
+    const pi = try argv(arena, io, &env, .pi, null);
+    try std.testing.expectEqualStrings(dir ++ "/bin/pi", std.mem.span(pi[0].?));
+    try std.testing.expectEqualStrings("--mode", std.mem.span(pi[1].?));
+    try std.testing.expectEqualStrings("rpc", std.mem.span(pi[2].?));
+    try std.testing.expectEqualStrings("--no-session", std.mem.span(pi[3].?));
+    try std.testing.expect(pi[4] == null);
+    try std.testing.expectEqualStrings(dir ++ "/bin/fx", proc.which(arena, io, agents.searchPath(arena, dir ++ "/bin", dir), "fx").?);
+
+    // A chosen model goes as Pi's own flags: provider and id apart.
+    const pi_model = try argv(arena, io, &env, .pi, "openai/gpt-5");
+    try std.testing.expectEqualStrings("--provider", std.mem.span(pi_model[4].?));
+    try std.testing.expectEqualStrings("openai", std.mem.span(pi_model[5].?));
+    try std.testing.expectEqualStrings("--model", std.mem.span(pi_model[6].?));
+    try std.testing.expectEqualStrings("gpt-5", std.mem.span(pi_model[7].?));
+    try std.testing.expect(pi_model[8] == null);
+
+    try std.Io.Dir.cwd().deleteTree(io, dir);
 }

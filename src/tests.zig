@@ -37,6 +37,8 @@ test {
     _ = @import("web.zig");
     _ = @import("marks.zig");
     _ = @import("agents.zig");
+    _ = @import("agent_launch.zig");
+    _ = @import("pi.zig");
     _ = @import("tests_settings.zig");
     _ = @import("tests_onboarding.zig");
     _ = @import("tests_followup.zig");
@@ -71,7 +73,6 @@ test {
     _ = @import("tests_agent.zig");
     _ = @import("tests_stream.zig");
 }
-
 
 /// Runs the main run loop (and so the dispatch sources) until `done`.
 fn pumpUntil(ctx: anytype, comptime done: fn (@TypeOf(ctx)) bool) !void {

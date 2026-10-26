@@ -48,8 +48,9 @@ nanoterm; it includes no code from Luau.
 
 The model picker and Settings show monochrome marks, drawn to PNG
 (`src/marks/`). The agents' marks and those of Anthropic, OpenAI and xAI are
-Harness's (its `crates/ui/assets/icons`). The other model makers' marks are
+Harness's (its `crates/ui/assets/icons`). Pi's mark is from [Pi](https://pi.dev)'s
+favicon and fx's from [fx](https://fx.sh)'s icon; each identifies its agent
+and implies no affiliation or endorsement. The other model makers' marks are
 from [LobeHub Icons](https://github.com/lobehub/lobe-icons), as Harness ships
 them; LobeHub Icons is MIT licensed, Copyright (c) 2023 LobeHub, and its
-license is kept at `src/marks/LICENSE.lobehub`. The marks identify each agent
-and each model's maker and imply no affiliation or endorsement.
+license is kept at `src/marks/LICENSE.lobehub`.
