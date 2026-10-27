@@ -132,8 +132,8 @@ pub const Actions = struct {
         a.w.sidebar = if (@import("view_sidebar.zig").shown(a.w)) .hidden else .shown;
         a.done();
     }
-    fn graff(a: *Actions, _: *Item) void {
-        a.w.focused().choose(.graff);
+    fn nativeAgent(a: *Actions, _: *Item) void {
+        a.w.focused().choose(.agent);
         a.done();
     }
     fn claude(a: *Actions, _: *Item) void {
@@ -177,7 +177,7 @@ pub fn install(app: *nanoui.App, acts: *Actions) !void {
             .{ .label = "Command Palette…", .accelerator = binds.accel("Cmd+P"), .click = of(acts, A.palette) },
             .{ .label = "Focus Input", .accelerator = binds.accel("Cmd+L"), .click = of(acts, A.focusInput) },
             .separator,
-            .{ .label = "graff", .click = of(acts, A.graff) },
+            .{ .label = "Agent", .click = of(acts, A.nativeAgent) },
             .{ .label = "Claude Code", .click = of(acts, A.claude) },
         } },
         .{ .label = "View", .submenu = &.{
@@ -190,42 +190,45 @@ pub fn install(app: *nanoui.App, acts: *Actions) !void {
             .{ .label = "Show Sidebar", .accelerator = binds.accel("Cmd+S"), .click = of(acts, A.sidebar) },
             .{ .role = .toggle_full_screen },
         } },
-        .{ .label = "Window", .submenu = &.{
-            .{ .role = .minimize },
-            .{ .role = .zoom },
-            .separator,
-            .{ .label = "Select Next Split", .accelerator = binds.accel("Cmd+]"), .click = of(acts, A.nextPane) },
-            .{ .label = "Select Previous Split", .accelerator = binds.accel("Cmd+["), .click = of(acts, A.prevPane) },
-            .{ .label = "Select Split", .submenu = &.{
-                .{ .label = "Left", .accelerator = binds.accel("Cmd+Alt+Left"), .click = of(acts, A.focusDir(.left)) },
-                .{ .label = "Right", .accelerator = binds.accel("Cmd+Alt+Right"), .click = of(acts, A.focusDir(.right)) },
-                .{ .label = "Above", .accelerator = binds.accel("Cmd+Alt+Up"), .click = of(acts, A.focusDir(.up)) },
-                .{ .label = "Below", .accelerator = binds.accel("Cmd+Alt+Down"), .click = of(acts, A.focusDir(.down)) },
-            } },
-            .{ .label = "Resize Split", .submenu = &.{
-                .{ .label = "Move Divider Left", .accelerator = binds.accel("Cmd+Ctrl+Left"), .click = of(acts, A.resizeDir(.left)) },
-                .{ .label = "Move Divider Right", .accelerator = binds.accel("Cmd+Ctrl+Right"), .click = of(acts, A.resizeDir(.right)) },
-                .{ .label = "Move Divider Up", .accelerator = binds.accel("Cmd+Ctrl+Up"), .click = of(acts, A.resizeDir(.up)) },
-                .{ .label = "Move Divider Down", .accelerator = binds.accel("Cmd+Ctrl+Down"), .click = of(acts, A.resizeDir(.down)) },
+        .{
+            .label = "Window",
+            .submenu = &.{
+                .{ .role = .minimize },
+                .{ .role = .zoom },
                 .separator,
-                .{ .label = "Equalize Splits", .accelerator = binds.accel("Cmd+Ctrl+="), .click = of(acts, A.equalize) },
-            } },
-            .{ .label = "Zoom Split", .accelerator = binds.accel("Cmd+Shift+Enter"), .click = of(acts, A.zoom) },
-            .separator,
-            // ⌘⇧] and ⌘⇧[: AppKit matches the shifted characters.
-            .{ .label = "Show Next Tab", .accelerator = binds.accel("Cmd+}"), .click = of(acts, A.nextTab) },
-            .{ .label = "Show Previous Tab", .accelerator = binds.accel("Cmd+{"), .click = of(acts, A.prevTab) },
-            .{ .label = "Tab 1", .accelerator = binds.accel("Cmd+1"), .click = of(acts, A.tabN(0)) },
-            .{ .label = "Tab 2", .accelerator = binds.accel("Cmd+2"), .click = of(acts, A.tabN(1)) },
-            .{ .label = "Tab 3", .accelerator = binds.accel("Cmd+3"), .click = of(acts, A.tabN(2)) },
-            .{ .label = "Tab 4", .accelerator = binds.accel("Cmd+4"), .click = of(acts, A.tabN(3)) },
-            .{ .label = "Tab 5", .accelerator = binds.accel("Cmd+5"), .click = of(acts, A.tabN(4)) },
-            .{ .label = "Tab 6", .accelerator = binds.accel("Cmd+6"), .click = of(acts, A.tabN(5)) },
-            .{ .label = "Tab 7", .accelerator = binds.accel("Cmd+7"), .click = of(acts, A.tabN(6)) },
-            .{ .label = "Tab 8", .accelerator = binds.accel("Cmd+8"), .click = of(acts, A.tabN(7)) },
-            .{ .label = "Tab 9", .accelerator = binds.accel("Cmd+9"), .click = of(acts, A.tabN(8)) },
-            .separator,
-            .{ .role = .front },
-        } },
+                .{ .label = "Select Next Split", .accelerator = binds.accel("Cmd+]"), .click = of(acts, A.nextPane) },
+                .{ .label = "Select Previous Split", .accelerator = binds.accel("Cmd+["), .click = of(acts, A.prevPane) },
+                .{ .label = "Select Split", .submenu = &.{
+                    .{ .label = "Left", .accelerator = binds.accel("Cmd+Alt+Left"), .click = of(acts, A.focusDir(.left)) },
+                    .{ .label = "Right", .accelerator = binds.accel("Cmd+Alt+Right"), .click = of(acts, A.focusDir(.right)) },
+                    .{ .label = "Above", .accelerator = binds.accel("Cmd+Alt+Up"), .click = of(acts, A.focusDir(.up)) },
+                    .{ .label = "Below", .accelerator = binds.accel("Cmd+Alt+Down"), .click = of(acts, A.focusDir(.down)) },
+                } },
+                .{ .label = "Resize Split", .submenu = &.{
+                    .{ .label = "Move Divider Left", .accelerator = binds.accel("Cmd+Ctrl+Left"), .click = of(acts, A.resizeDir(.left)) },
+                    .{ .label = "Move Divider Right", .accelerator = binds.accel("Cmd+Ctrl+Right"), .click = of(acts, A.resizeDir(.right)) },
+                    .{ .label = "Move Divider Up", .accelerator = binds.accel("Cmd+Ctrl+Up"), .click = of(acts, A.resizeDir(.up)) },
+                    .{ .label = "Move Divider Down", .accelerator = binds.accel("Cmd+Ctrl+Down"), .click = of(acts, A.resizeDir(.down)) },
+                    .separator,
+                    .{ .label = "Equalize Splits", .accelerator = binds.accel("Cmd+Ctrl+="), .click = of(acts, A.equalize) },
+                } },
+                .{ .label = "Zoom Split", .accelerator = binds.accel("Cmd+Shift+Enter"), .click = of(acts, A.zoom) },
+                .separator,
+                // ⌘⇧] and ⌘⇧[: AppKit matches the shifted characters.
+                .{ .label = "Show Next Tab", .accelerator = binds.accel("Cmd+}"), .click = of(acts, A.nextTab) },
+                .{ .label = "Show Previous Tab", .accelerator = binds.accel("Cmd+{"), .click = of(acts, A.prevTab) },
+                .{ .label = "Tab 1", .accelerator = binds.accel("Cmd+1"), .click = of(acts, A.tabN(0)) },
+                .{ .label = "Tab 2", .accelerator = binds.accel("Cmd+2"), .click = of(acts, A.tabN(1)) },
+                .{ .label = "Tab 3", .accelerator = binds.accel("Cmd+3"), .click = of(acts, A.tabN(2)) },
+                .{ .label = "Tab 4", .accelerator = binds.accel("Cmd+4"), .click = of(acts, A.tabN(3)) },
+                .{ .label = "Tab 5", .accelerator = binds.accel("Cmd+5"), .click = of(acts, A.tabN(4)) },
+                .{ .label = "Tab 6", .accelerator = binds.accel("Cmd+6"), .click = of(acts, A.tabN(5)) },
+                .{ .label = "Tab 7", .accelerator = binds.accel("Cmd+7"), .click = of(acts, A.tabN(6)) },
+                .{ .label = "Tab 8", .accelerator = binds.accel("Cmd+8"), .click = of(acts, A.tabN(7)) },
+                .{ .label = "Tab 9", .accelerator = binds.accel("Cmd+9"), .click = of(acts, A.tabN(8)) },
+                .separator,
+                .{ .role = .front },
+            },
+        },
     });
 }

@@ -55,8 +55,8 @@ test "onboarding: how to start, the input's keys, analytics asked; the answers k
     f.w.overlay = .onboarding;
     t.settle(1);
     try std.testing.expect(t.hasText("Welcome to nanoterm"));
-    try std.testing.expect(t.hasText("Sign in with Codegraff"));
-    try std.testing.expect(t.containsText("One sign-in"));
+    try std.testing.expect(t.hasText("Use built-in Agent"));
+    try std.testing.expect(t.containsText("Agent is ready"));
     try std.testing.expect(t.hasText("Connect your own agents") and t.hasText("Just the terminal"));
     try t.screenshot("/tmp/nanoterm-onboarding/1-start.png");
     f.w.onboarding = .agents;

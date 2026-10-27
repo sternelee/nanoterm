@@ -1,8 +1,7 @@
 //! What the input is: a command for the shell, or a request for the agent.
 //! Warp's way: rules first (a known command with flags or pipes is shell,
 //! a sentence of English words is a request), and when the rules are not
-//! sure, a model decides (Warp runs a small BERT locally; nanoterm asks
-//! Codegraff's Jev, `jev.zig`). The rules are instant and stay local.
+//! sure, the rules' best guess wins. The rules are instant and stay local.
 const std = @import("std");
 const Commands = @import("commands.zig").Commands;
 
@@ -18,7 +17,7 @@ pub const Guess = struct {
 const one_off = [_][]const u8{ "hello", "hi", "hey", "thanks", "thank", "explain", "why", "what", "how", "help", "continue", "yes", "no", "ok", "okay", "please" };
 
 /// Programs whose arguments are free text: always shell (Warp's list).
-const shell_first = [_][]const u8{ "echo", "man", "sudo", "claude", "codex", "gemini", "graff", "printf", "export", "alias" };
+const shell_first = [_][]const u8{ "echo", "man", "sudo", "claude", "codex", "gemini", "agent", "printf", "export", "alias" };
 
 /// Common English words: requests are mostly made of them.
 const english = std.StaticStringMap(void).initComptime(blk: {
@@ -279,10 +278,10 @@ test "commands and requests" {
     defer c.deinit();
     for ([_][]const u8{ "git", "ls", "find", "make", "kill", "cargo", "cat", "open", "echo", "docker", "wc", "cd", "npm", "mv" }) |w| c.add(w);
     const shell = [_][]const u8{
-        "ls",                           "ls -la",                         "git status",              "git commit -m 'fix the bug'", "cat README.md",
-        "make test",                    "cargo build --release",          "echo hello world",        "ls | grep zig",               "./run.sh",
-        "kill 1234",                    "find . -name '*.zig' | wc -l",   "FOO=1 make test",         "docker run -it ubuntu bash",  "git log --oneline | head",
-        "npm install",                  "/usr/bin/env python3 script.py", "cd src\nmake test",       "mv a.txt b.txt",              "unknowntool --flag value",
+        "ls",          "ls -la",                         "git status",        "git commit -m 'fix the bug'", "cat README.md",
+        "make test",   "cargo build --release",          "echo hello world",  "ls | grep zig",               "./run.sh",
+        "kill 1234",   "find . -name '*.zig' | wc -l",   "FOO=1 make test",   "docker run -it ubuntu bash",  "git log --oneline | head",
+        "npm install", "/usr/bin/env python3 script.py", "cd src\nmake test", "mv a.txt b.txt",              "unknowntool --flag value",
     };
     for (shell) |s| {
         const g = guess(s, &c, false);
@@ -290,12 +289,11 @@ test "commands and requests" {
         try std.testing.expectEqual(Kind.shell, g.kind);
     }
     const agent = [_][]const u8{
-        "why is the build failing",                         "find the biggest files in this repo",          "explain",
-        "what does this project do?",                       "make the tests pass",                          "fix the failing tests please",
-        "how do I undo my last commit",                     "/model",                                       "why does ./run.sh fail",
-        "fix the error in src/main.zig",                    "move these two from downloads to this folder", "explain what src/jev.zig does",
-        "the lease is expecting five years so the remaining two years technically like",
-        "fix this:\nTypeError: cannot read [object] of undefined", "tom & jerry is the cartoon i mean",
+        "why is the build failing",                                                      "find the biggest files in this repo",                     "explain",
+        "what does this project do?",                                                    "make the tests pass",                                     "fix the failing tests please",
+        "how do I undo my last commit",                                                  "/model",                                                  "why does ./run.sh fail",
+        "fix the error in src/main.zig",                                                 "move these two from downloads to this folder",            "explain what src/main.zig does",
+        "the lease is expecting five years so the remaining two years technically like", "fix this:\nTypeError: cannot read [object] of undefined", "tom & jerry is the cartoon i mean",
     };
     for (agent) |s| {
         const g = guess(s, &c, false);
@@ -316,13 +314,13 @@ test "commands and requests" {
     try std.testing.expect(!isEnglish("zig"));
 }
 
-/// The first word of `text`, for what Jev is told about it.
+/// The first word of `text`, for local classification.
 pub fn firstWord(text: []const u8) []const u8 {
     var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
     return it.next() orelse "";
 }
 
-test "Jev sees a command's shape, never what's private in it" {
+test "classification sees a command's shape, never what's private in it" {
     var buf: [280]u8 = undefined;
     try std.testing.expectEqualStrings("find <path> -name <text> | wc -l", shape(&buf, "find . -name '*.zig' | wc -l"));
     try std.testing.expectEqualStrings("curl -H <text> <url>", shape(&buf, "curl -H 'Authorization: Bearer sk_live_123' https://x.io/y"));

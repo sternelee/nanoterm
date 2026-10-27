@@ -52,7 +52,7 @@ test "the smart input, through the real view" {
     t.frame();
     t.typeText("why is the build failing");
     try std.testing.expectEqual(session_mod.Mode.agent, s.mode());
-    try std.testing.expect(t.hasText("agent"));
+    try std.testing.expect(t.hasText("Agent"));
     try std.testing.expect(t.hasText("auto"));
     try t.screenshot("/tmp/nanoterm-view-agent.png");
     // ⌘I chooses the shell, and it stays chosen.
@@ -148,7 +148,7 @@ test "an agent's answer, in Markdown" {
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, home);
+    }.f }, .claude, home);
     s.agent = ag;
     try ag.promptAs("Why does the build fail?", "Why does the build fail?");
     const t = ag.current().?;
@@ -212,4 +212,44 @@ test "a ready update shows in the title bar; one that can't install keeps nanote
     t.settle(1);
     try std.testing.expect(!t.hasText("nanoterm 9.9.9 is ready"));
     try std.testing.expect(t.hasText("Restart to update to 9.9.9"));
+}
+
+test "a block's header keeps its height when its hover actions appear" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-block-hover";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    s.run("printf hover\\n");
+    var waited: f64 = 0;
+    while (s.timeline.items.len == 0 or s.timeline.items[s.timeline.items.len - 1].block.state == .running) : (waited += 0.02) {
+        if (waited > 10) return error.Timeout;
+        nanoui.runFor(0.02);
+        t.frame();
+    }
+    t.settle(1);
+    const output = t.findText("hovern") orelse return error.OutputNotFound;
+    const path = t.findText("~") orelse return error.PathNotFound;
+    const y_before = output.y;
+    t.moveTo(path.x + path.w / 2, path.y + path.h / 2);
+    t.settle(1);
+    const hovered_output = t.findText("hovern") orelse return error.OutputNotFound;
+    try std.testing.expectApproxEqAbs(y_before, hovered_output.y, 0.01);
+    try t.screenshot("/tmp/nanoterm-block-hover-actions.png");
 }

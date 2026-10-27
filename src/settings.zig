@@ -2,13 +2,11 @@
 //! size, the input's editing keys, whether coding agents are on at all,
 //! whether onboarding was done, and the
 //! analytics choice (with the install's random id, sent only with it), in
-//! `~/Library/Application Support/nanoterm/settings.json`; the
-//! Codegraff account (graff's own credential file); and which agents are
-//! installed, looked for when Settings opens.
+//! `~/Library/Application Support/nanoterm/settings.json`; and which
+//! external agents are installed, looked for when Settings opens.
 const std = @import("std");
 const agent_mod = @import("agent.zig");
 const Which = agent_mod.Which;
-const codegraff = @import("codegraff.zig");
 const launch = @import("agent_launch.zig");
 
 /// Whether anonymous usage analytics are shared: not asked yet, yes, no.
@@ -18,7 +16,7 @@ pub const Prefs = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     path: []const u8 = "",
-    agent: Which = .graff,
+    agent: Which = .agent,
     zoom: f32 = 1,
     keys: @import("nanoui").ui.Keymap = .system,
     /// Coding agents at all: off, nanoterm is a terminal and nothing else
@@ -27,23 +25,20 @@ pub const Prefs = struct {
     onboarded: bool = false,
     analytics: Analytics = .unset,
     install_id: [32]u8 = @splat('0'),
-    account: codegraff.Account,
     installed: std.EnumArray(Which, bool) = .initFill(false),
     /// Anonymous usage analytics, sent only when `analytics` is on.
     telemetry: @import("analytics.zig").Client,
-    /// graff's own provider sign-ins (ChatGPT, xAI, Kimi, Z.AI).
-    graff: @import("graff_logins.zig").Logins,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, home: []const u8, env: *std.process.Environ.Map) Prefs {
-        var p: Prefs = .{ .gpa = gpa, .io = io, .account = .init(gpa, io, home, env), .telemetry = .init(gpa, env), .graff = .{ .gpa = gpa, .io = io, .home = home } };
+        var p: Prefs = .{ .gpa = gpa, .io = io, .telemetry = .init(gpa, env) };
         p.path = std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "settings.json" }) catch "";
         const data = std.Io.Dir.cwd().readFileAlloc(io, p.path, gpa, .limited(64 * 1024)) catch return p;
         defer gpa.free(data);
-        const S = struct { agent: []const u8 = "graff", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "" };
+        const S = struct { agent: []const u8 = "agent", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "" };
         const parsed = std.json.parseFromSlice(S, gpa, data, .{ .ignore_unknown_fields = true }) catch return p;
         defer parsed.deinit();
         const v = parsed.value;
-        p.agent = std.meta.stringToEnum(Which, v.agent) orelse .graff;
+        p.agent = std.meta.stringToEnum(Which, v.agent) orelse .agent;
         p.zoom = std.math.clamp(v.zoom, 0.6, 2.4);
         p.keys = std.meta.stringToEnum(@TypeOf(p.keys), v.keys) orelse .system;
         p.agents = v.agents;
@@ -54,9 +49,7 @@ pub const Prefs = struct {
     }
 
     pub fn deinit(p: *Prefs) void {
-        p.account.deinit();
         p.telemetry.deinit();
-        p.graff.deinit();
     }
 
     /// Records an anonymous usage event, if the user shares analytics.
@@ -134,7 +127,7 @@ test "settings are kept across launches" {
     {
         var p: Prefs = .init(gpa, io, arena.allocator(), home, &env);
         defer p.deinit();
-        try std.testing.expectEqual(Which.graff, p.agent);
+        try std.testing.expectEqual(Which.agent, p.agent);
         p.setAgent(.codex);
         p.setZoom(1.2);
         p.setKeys(.vim);

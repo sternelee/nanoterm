@@ -33,6 +33,7 @@ pub fn followShell(a: *Session, ag: *agent_mod.Agent, text: []const u8) []const 
     const dupe = a.gpa.dupe(u8, now) catch return text;
     a.gpa.free(ag.cwd);
     ag.cwd = dupe;
+    if (ag.native) |native| native.setCwd(now) catch {};
     return said;
 }
 
@@ -80,4 +81,3 @@ pub fn finished(ctx: *anyopaque, t: *agent_mod.Turn) void {
         .turn = t,
     });
 }
-

@@ -14,8 +14,6 @@ const complete = @import("complete.zig");
 const attach = @import("attach.zig");
 pub const Commands = @import("commands.zig").Commands;
 pub const History = @import("history.zig").History;
-pub const Jev = @import("jev.zig").Jev;
-pub const Catalog = @import("catalog.zig").Catalog;
 const visual_host = @import("visual_host.zig");
 const ssh = @import("ssh.zig");
 const helpers = @import("session_agent.zig");
@@ -49,11 +47,8 @@ pub const Shared = struct {
     commands: Commands,
     /// The commands run, in every pane.
     history: History,
-    jev: Jev,
-    /// graff's models, read when the picker first opens.
-    catalog: Catalog,
-    /// graff's saved model ("provider\nmodel"), shown until a session says.
-    graff_model: []const u8 = "",
+    /// Native agent provider, MCP and Skills management for Settings.
+    agent_store: ?*@import("agent_settings.zig").Store = null,
     /// Where agents' visuals come in (show_visual), and this program, which
     /// is their MCP server too.
     visuals: ?*visual_host.Host = null,
@@ -67,7 +62,7 @@ pub const Shared = struct {
     appearance_path: []const u8 = "",
     /// The hosts of ~/.ssh/config, for the palette.
     ssh_hosts: []const []const u8 = &.{},
-    /// Settings (⌘,): the default agent, text size, Codegraff account.
+    /// Settings (⌘,): the default agent, text size, built-in Agent configuration.
     prefs: @import("settings.zig").Prefs,
 
     /// Call `wire` once the value is at its final address.
@@ -87,8 +82,6 @@ pub const Shared = struct {
             .zdotdir = try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "zsh" }),
             .commands = .init(gpa),
             .history = .{ .gpa = gpa },
-            .jev = .init(gpa, io, env),
-            .catalog = .{ .gpa = gpa },
             .log = .{ .gpa = gpa },
             .pictures = .{ .gpa = gpa, .io = io, .home = home, .fetch = true },
             .prefs = .init(gpa, io, arena, home, env),
@@ -100,7 +93,12 @@ pub const Shared = struct {
         } else |_| {}
         s.commands.scan(io, env.get("PATH") orelse "");
         s.history.load(io, try std.fs.path.join(arena, &.{ home, ".zsh_history" }), try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "history" }));
-        s.graff_model = graffModel(arena, io, home);
+        s.agent_store = gpa.create(@import("agent_settings.zig").Store) catch null;
+        if (s.agent_store) |store| store.* = @import("agent_settings.zig").Store.init(gpa, io, home) catch {
+            gpa.destroy(store);
+            s.agent_store = null;
+            return s;
+        };
         s.exe = std.process.executablePathAlloc(io, arena) catch "";
         s.ssh_hosts = ssh.hosts(arena, io, home);
         s.visuals = visual_host.Host.create(gpa, io, env.get("TMPDIR") orelse "/tmp") catch null;
@@ -110,13 +108,7 @@ pub const Shared = struct {
     /// Points callbacks at the Shared where it now lives.
     pub fn wire(s: *Shared) void {
         @import("view_markdown.zig").pictures = &s.pictures;
-        s.jev.changed = .{ .ctx = s, .func = redrawCtx };
-        s.catalog.changed = .{ .ctx = s, .func = redrawCtx };
         s.pictures.changed = .{ .ctx = s, .func = redrawCtx };
-        s.prefs.account.changed = .{ .ctx = s, .func = redrawCtx };
-        s.prefs.graff.changed = .{ .ctx = s, .func = redrawCtx };
-        s.prefs.account.key_changed = .{ .ctx = &s.jev, .func = @import("jev.zig").Jev.setKey };
-        s.prefs.account.load();
     }
 
     pub fn deinit(s: *Shared) void {
@@ -126,8 +118,10 @@ pub const Shared = struct {
         if (@import("view_markdown.zig").pictures == &s.pictures) @import("view_markdown.zig").pictures = null;
         s.commands.deinit();
         s.history.deinit();
-        s.jev.deinit();
-        s.catalog.deinit();
+        if (s.agent_store) |store| {
+            store.deinit();
+            s.gpa.destroy(store);
+        }
         s.prefs.deinit();
     }
 
@@ -148,25 +142,7 @@ pub const Shared = struct {
         std.Io.Dir.cwd().writeFile(s.io, .{ .sub_path = s.appearance_path, .data = @tagName(a) }) catch {};
         s.redraw();
     }
-
-    /// Starts reading graff's catalog, for the model picker.
-    pub fn loadCatalog(s: *Shared) void {
-        const graff = proc.which(s.arena, s.io, s.env.get("PATH") orelse "", "graff") orelse {
-            s.catalog.state = .failed;
-            return;
-        };
-        s.catalog.load(s.arena, graff, proc.cStrings(s.arena, s.env_list) catch return);
-    }
 };
-
-/// graff's saved model, read (never written): "model" of "provider\nmodel".
-fn graffModel(arena: std.mem.Allocator, io: std.Io, home: []const u8) []const u8 {
-    const path = std.fs.path.join(arena, &.{ home, ".simple-harness-model" }) catch return "";
-    const data = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4096)) catch return "";
-    var lines = std.mem.tokenizeAny(u8, data, "\r\n");
-    _ = lines.next();
-    return std.mem.trim(u8, lines.next() orelse "", " ");
-}
 
 pub const Session = struct {
     id: u64,
@@ -177,7 +153,7 @@ pub const Session = struct {
     home: []const u8,
     shell: shell_mod.Shell,
     agent: ?*agent_mod.Agent = null,
-    which: agent_mod.Which = .graff,
+    which: agent_mod.Which = .agent,
     /// Every block made, owned here; the timeline and turns point to them.
     all_blocks: std.ArrayList(*blocks.Block) = .empty,
     timeline: std.ArrayList(Entry) = .empty,
@@ -193,7 +169,7 @@ pub const Session = struct {
     history_pos: ?usize = null,
     /// The completion menu of the input.
     menu: complete.Menu,
-    /// graff's model for its next start (`--model`).
+    /// agent's model for its next start (`--model`).
     model_choice: ?[]u8 = null,
     selected: ?u64 = null,
     next_id: u64 = 1,
@@ -361,7 +337,7 @@ pub const Session = struct {
     }
 
     /// Where what is typed goes: the program running, else the mode chosen,
-    /// else what the classifier (or Jev) made of it.
+    /// else what the classifier made of it.
     pub fn mode(a: *const Session) Mode {
         if (!a.shared.prefs.agents) return .terminal;
         // On an SSH host, commands unless clearly a request (its programs
@@ -377,14 +353,7 @@ pub const Session = struct {
         if (a.lock) |m| return m;
         // Pictures are for the agent.
         if (a.attachments.items.items.len > 0) return .agent;
-        // A reply to the agent stays with it; Jev reads the text alone.
-        if (!(a.followUp() and a.guess.kind == .agent)) if (a.shared.jev.answer(a.input.text())) |k| return if (k == .agent) .agent else .terminal;
         return if (a.guess.kind == .agent) .agent else .terminal;
-    }
-
-    /// Whether Jev decided the mode of what is typed.
-    pub fn decidedByJev(a: *const Session) bool {
-        return a.lock == null and !a.shell.busy() and !(a.followUp() and a.guess.kind == .agent) and a.shared.jev.answer(a.input.text()) != null;
     }
 
     /// The agent answered last: a reply is likelier a follow-up.
@@ -393,8 +362,8 @@ pub const Session = struct {
         return items.len > 0 and items[items.len - 1] == .turn;
     }
 
-    /// Classifies the input when it changed; asks Jev when the rules are
-    /// not sure, and starts the agent early when it is wanted.
+    /// Classifies the input when it changed with local rules, and starts
+    /// the agent early when it is wanted.
     pub fn observe(a: *Session) void {
         const text = a.input.text();
         const h = std.hash.Wyhash.hash(0, text);
@@ -402,7 +371,6 @@ pub const Session = struct {
         a.guessed = h;
         a.guess = classify.guess(text, &a.shared.commands, a.followUp());
         if (a.lock != null or a.shell.busy()) return;
-        if (a.shared.prefs.agents and !a.guess.sure and std.mem.indexOfScalar(u8, std.mem.trim(u8, text, " "), ' ') != null) a.shared.jev.ask(text, .{ .installed = a.shared.commands.has(classify.firstWord(text)), .follow_up = a.followUp() });
         // Ready before Return is pressed.
         if (a.mode() == .agent and a.guess.sure and a.agent == null) _ = a.ensureAgent();
     }
@@ -559,12 +527,20 @@ pub const Session = struct {
         ag.env = a.shared.env_list;
         a.agent = ag;
         a.offerVisuals(ag);
-        const argv = @import("agent_launch.zig").argv(a.arena, a.io, a.shared.env, a.which, a.model_choice) catch {
-            ag.status = .failed;
-            ag.error_text = std.fmt.allocPrint(a.gpa, "{s} is not installed", .{a.which.label()}) catch null;
-            return ag;
-        };
-        ag.start(argv, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
+        if (a.which == .agent) {
+            ag.startNative(a.cwd(), a.model_choice) catch |err| {
+                ag.status = .failed;
+                ag.error_text = std.fmt.allocPrint(a.gpa, "could not start built-in Agent: {s}", .{@errorName(err)}) catch null;
+                return ag;
+            };
+        } else {
+            const argv = @import("agent_launch.zig").argv(a.arena, a.io, a.shared.env, a.which, a.model_choice) catch {
+                ag.status = .failed;
+                ag.error_text = std.fmt.allocPrint(a.gpa, "{s} is not installed", .{a.which.label()}) catch null;
+                return ag;
+            };
+            ag.start(argv, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
+        }
         return ag;
     }
 };

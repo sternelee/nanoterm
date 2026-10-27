@@ -37,13 +37,13 @@ test {
     _ = @import("web.zig");
     _ = @import("marks.zig");
     _ = @import("agents.zig");
+    _ = @import("agent_native.zig");
+    _ = @import("agent_settings.zig");
+    _ = @import("tests_agent_native.zig");
     _ = @import("tests_settings.zig");
     _ = @import("tests_onboarding.zig");
     _ = @import("tests_followup.zig");
     _ = @import("tests_pager.zig");
-    _ = @import("view_signins.zig");
-    _ = @import("graff_logins.zig");
-    _ = @import("tests_graff_logins.zig");
     _ = @import("tests_multiline.zig");
     _ = @import("agent_prompt.zig");
     _ = @import("analytics.zig");
@@ -52,9 +52,7 @@ test {
     _ = @import("commands.zig");
     _ = @import("classify.zig");
     _ = @import("history.zig");
-    _ = @import("jev.zig");
     _ = @import("agent_config.zig");
-    _ = @import("catalog.zig");
     _ = @import("complete.zig");
     _ = @import("palette.zig");
     _ = @import("markdown.zig");
@@ -66,12 +64,9 @@ test {
     _ = @import("tests_sidebar.zig");
     _ = @import("open_files.zig");
     _ = @import("view_sidebar.zig");
-    _ = @import("tests_graff_update.zig");
-    _ = @import("graff_update.zig");
     _ = @import("tests_agent.zig");
     _ = @import("tests_stream.zig");
 }
-
 
 /// Runs the main run loop (and so the dispatch sources) until `done`.
 fn pumpUntil(ctx: anytype, comptime done: fn (@TypeOf(ctx)) bool) !void {
@@ -223,7 +218,7 @@ test "an ACP agent: messages, a terminal as a block, a permission" {
         for (host.made.items) |b| b.destroy(gpa);
         host.made.deinit(gpa);
     }
-    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .graff, home);
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .claude, home);
     defer a.destroy();
     a.env = &.{"PATH=/usr/bin:/bin"};
     try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", script }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));

@@ -65,7 +65,7 @@ test "the agent's steps fold into one line; the visual and reply stay" {
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, home);
+    }.f }, .claude, home);
     s.agent = ag;
     s.offerVisuals(ag);
     try ag.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", home ++ "/agent.py" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));

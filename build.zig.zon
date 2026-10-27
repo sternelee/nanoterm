@@ -9,5 +9,5 @@
             .hash = "nanoui-0.6.4-we0KMR_xEAAZx0rueM5FILCpIetrME29nqyxkVPljuOm",
         },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "vendor/fx" },
 }

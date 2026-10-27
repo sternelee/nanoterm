@@ -46,7 +46,7 @@ pub fn cStrings(arena: std.mem.Allocator, items: []const []const u8) ![*:null]co
 
 /// The full path of `name` on `path_env` (the OS's list of folders), if
 /// any. On Windows a name without an extension is tried with PATHEXT's
-/// usual ones too (graff.exe, npx.cmd).
+/// usual ones too (agent.exe, npx.cmd).
 pub fn which(arena: std.mem.Allocator, io: std.Io, path_env: []const u8, name: []const u8) ?[]const u8 {
     const exts: []const []const u8 = if (windows and std.fs.path.extension(name).len == 0) &.{ ".exe", ".cmd", ".bat", "" } else &.{""};
     var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);

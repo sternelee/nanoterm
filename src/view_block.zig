@@ -85,14 +85,17 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
 }
 
 fn header(c: *ui.Context, app: *App, b: *blocks.Block, hovered: bool) void {
-    const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+    // The hover actions are 24px tall; keep the header that tall whether they
+    // are shown or not, so the command under it does not move as the pointer
+    // enters the block.
+    const r = ui.div(c).row().wFull().h(26).gap(8).itemsCenter();
     defer r.end();
-    ui.text(c, blocks.tildePath(c.alloc(), b.cwd, app.home), .{ .size = 11.5, .mono = true, .color = theme.cwd });
+    ui.text(c, blocks.tildePath(c.alloc(), b.cwd, app.home), .{ .size = 13, .mono = true, .color = theme.cwd });
     if (b.git_branch.len > 0) {
-        ui.icon(c, "arrow.triangle.branch", .{ .size = 10, .color = theme.branch });
-        ui.text(c, b.git_branch, .{ .size = 11.5, .mono = true, .color = theme.branch });
+        ui.icon(c, "arrow.triangle.branch", .{ .size = 11, .color = theme.branch });
+        ui.text(c, b.git_branch, .{ .size = 12.5, .mono = true, .color = theme.branch });
     }
-    if (b.source == .agent) ui.badge(c, "agent", theme.agent);
+    if (b.source == .agent) ui.badge(c, "Agent", theme.agent);
     ui.spacer(c);
     if (hovered and b.state == .done and b.source == .shell) {
         // Warp's block actions: run again, ask the agent, copy.

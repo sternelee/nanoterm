@@ -1,0 +1,659 @@
+diff --git a/src/builtins/mcp.zig b/src/builtins/mcp.zig
+index dbd510f8..c89c60e8 100644
+--- a/src/builtins/mcp.zig
++++ b/src/builtins/mcp.zig
+@@ -118,14 +118,45 @@ fn skipUnprintableNames(alloc: Allocator, loaded: *NativeConfigs) Allocator.Erro
+ /// The MCP host for the workspace, or null when no server is configured and
+ /// there is nothing to report. Its servers start when the model first needs
+ /// them.
++pub const ExtraStdioServer = struct {
++    name: []const u8,
++    command: []const u8,
++    args: []const []const u8,
++};
++
+ pub fn loadHost(
+     alloc: Allocator,
+     workspace_root: []const u8,
+     builtins: tool_dispatch.Registry,
+     extras: mcp_host.Extras,
++) !?*mcp_host.Host {
++    return loadHostWithExtra(alloc, workspace_root, builtins, extras, null);
++}
++
++/// `loadHost`, plus one host-issued stdio server (nanoterm's show_visual
++/// endpoint) that joins the profile and workspace servers for this run.
++pub fn loadHostWithExtra(
++    alloc: Allocator,
++    workspace_root: []const u8,
++    builtins: tool_dispatch.Registry,
++    extras: mcp_host.Extras,
++    extra: ?ExtraStdioServer,
+ ) !?*mcp_host.Host {
+     var loaded = try loadNativeConfigs(alloc, workspace_root);
+     defer loaded.deinit(alloc);
++    if (extra) |server| {
++        // A host-issued server replaces a profile entry using its name.
++        var i: usize = 0;
++        while (i < loaded.configs.items.len) {
++            if (std.mem.eql(u8, loaded.configs.items[i].name, server.name)) {
++                var removed = loaded.configs.orderedRemove(i);
++                removed.deinit(alloc);
++                continue;
++            }
++            i += 1;
++        }
++        try loaded.configs.append(alloc, try cloneExtraServer(alloc, server));
++    }
+     const home = io_mod.homeDir() orelse return null;
+     // Read only while the host starts.
+     var inherited = try io_mod.cloneEnvironMap(alloc);
+@@ -158,6 +189,31 @@ pub fn loadHost(
+     return h;
+ }
+ 
++fn cloneExtraServer(alloc: Allocator, server: ExtraStdioServer) !McpServerConfig {
++    const name = try alloc.dupe(u8, server.name);
++    errdefer alloc.free(name);
++    const command = try alloc.dupe(u8, server.command);
++    errdefer alloc.free(command);
++    const args = try alloc.alloc([]const u8, server.args.len);
++    var initialized: usize = 0;
++    errdefer {
++        for (args[0..initialized]) |arg| alloc.free(arg);
++        alloc.free(args);
++    }
++    for (server.args, args) |arg, *owned| {
++        owned.* = try alloc.dupe(u8, arg);
++        initialized += 1;
++    }
++    return .{
++        .name = name,
++        .source = .acp,
++        .scope = .acp_session,
++        .always_loaded = true,
++        .command = command,
++        .args = args,
++    };
++}
++
+ /// Each diagnostic in a sentence, owned by `alloc`.
+ fn renderNotes(alloc: Allocator, diagnostics: []const project_config.WorkspaceDiagnostic) ![]const []const u8 {
+     const notes = try alloc.alloc([]const u8, diagnostics.len);
+diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
+index 78e530a8..bb769108 100644
+--- a/src/core/cli/cli_ask.zig
++++ b/src/core/cli/cli_ask.zig
+@@ -46,6 +46,7 @@ const mcp_access_policy = @import("../mcp/access_policy.zig");
+ const mcp_model_catalog = @import("../mcp/model_catalog.zig");
+ const mcp_host = @import("../mcp_host/host.zig");
+ const mcp_contract = @import("../mcp/mcp_contract.zig");
++const builtin_mcp = @import("../../builtins/mcp.zig");
+ const mode_registry = @import("../modes/mode_registry.zig");
+ const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
+ const prompt_policy = @import("../config/prompt_policy.zig");
+@@ -97,7 +98,7 @@ const url_opener = @import("../hosts/url_opener.zig");
+ const Allocator = std.mem.Allocator;
+ const ChatMessage = types.ChatMessage;
+ const HistoryTurn = types.HistoryTurn;
+-const ImageAttachment = types.ImageAttachment;
++pub const ImageAttachment = types.ImageAttachment;
+ const PermissionGrant = types.PermissionGrant;
+ const PermissionMode = types.PermissionMode;
+ const SessionRuntime = session_runtime.SessionRuntime;
+@@ -253,6 +254,7 @@ pub const Config = struct {
+     max_history_turns: usize,
+     mode_registry: mode_registry.Registry,
+     load_mcp_host: ?mcp_host.LoadFn = null,
++    embedded_extra_mcp: ?builtin_mcp.ExtraStdioServer = null,
+     context_limit_overrides: []const config_runtime.context_limits.Override = &.{},
+     additional_directories: []const []const u8 = &.{},
+     saved_directories_suppressed: bool = false,
+@@ -341,7 +343,7 @@ test "prompt result failure writer preserves exact error type and identity" {
+ }
+ 
+ /// Resume selector parsed from fx ask --resume.
+-const ResumeTarget = session_store.ResumeTarget;
++pub const ResumeTarget = session_store.ResumeTarget;
+ 
+ const AskOptions = struct {
+     prompt: []u8,
+@@ -426,6 +428,7 @@ const PermissionApprovalPromptResult = enum {
+ const NotifyAttentionFn = *const fn (?*anyopaque) void;
+ const PermissionApprovalPromptFn = *const fn (?*anyopaque, ?*anyopaque, WriteFn, []const u8, ?*anyopaque, NotifyAttentionFn) anyerror!PermissionApprovalPromptResult;
+ const IsTtyFn = *const fn (?*anyopaque) bool;
++const EmbeddedToolFn = *const fn (?*anyopaque, []const u8, []const u8, []const u8) anyerror!void;
+ /// The final `?[]const u8` is the run's --model, which stands in for a provider without a saved model.
+ const LoadStartupStateFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, usize, ?[]const u8) anyerror!app_lifecycle.StartupState;
+ const LoadStartupStateWithAuthModeFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, usize, credentials.AuthMode, ?[]const u8) anyerror!app_lifecycle.StartupState;
+@@ -456,10 +459,14 @@ const RunDeps = struct {
+     context_registry: context_contract.Registry,
+     tool_set: tool_set_contract.ToolSet,
+     load_mcp_host: ?mcp_host.LoadFn = null,
++    embedded_extra_mcp: ?builtin_mcp.ExtraStdioServer = null,
+     process_queued_prompt: ProcessQueuedPromptFn = processQueuedPromptDefault,
+     persist_yolo_acknowledgment: PersistYoloAcknowledgmentFn = persistYoloAcknowledgmentDefault,
+     install_headless_interrupt: bool = false,
+     stdin_source: StdinSource = .real,
++    cancel_flag: ?*std.atomic.Value(bool) = null,
++    embedded_tool_ctx: ?*anyopaque = null,
++    embedded_tool: ?EmbeddedToolFn = null,
+ };
+ 
+ const OutputMode = enum {
+@@ -487,6 +494,7 @@ const RunOptions = struct {
+     resume_target: ?ResumeTarget = null,
+     color_enabled: bool = true,
+     model_override: ?[]const u8 = null,
++    workspace_root: ?[]const u8 = null,
+     effort_override: ?types.ReasoningEffort = null,
+     fast_override: ?bool = null,
+     ultrafast_override: ?bool = null,
+@@ -818,6 +826,7 @@ const AskContext = struct {
+     }
+ 
+     fn cancelFlag(self: *AskContext) *std.atomic.Value(bool) {
++        if (self.deps.cancel_flag) |flag| return flag;
+         if (comptime supports_headless_interrupt) {
+             if (self.use_process_interrupt_flag) {
+                 return &headless_interrupt.cancel_requested;
+@@ -1171,6 +1180,7 @@ fn askElicitationCapabilities(
+ }
+ 
+ fn checkHeadlessCancellation(deps: RunDeps) !void {
++    if (deps.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
+     if (comptime supports_headless_interrupt) {
+         if (deps.install_headless_interrupt and
+             headless_interrupt.cancel_requested.load(.seq_cst))
+@@ -1399,6 +1409,51 @@ pub fn runPrompt(alloc: Allocator, prompt: []const u8, auto_permission: bool, cf
+     return result.exit_code;
+ }
+ 
++pub const EmbeddedCallbacks = struct {
++    context: *anyopaque,
++    text: *const fn (?*anyopaque, []const u8) anyerror!void,
++    diagnostic: *const fn (?*anyopaque, []const u8) anyerror!void,
++    tool: ?EmbeddedToolFn = null,
++};
++
++/// Full native fx runtime for an in-process host. No CLI process, ACP, or Node.
++pub fn runEmbedded(
++    alloc: Allocator,
++    prompt: []const u8,
++    auto_permission: bool,
++    cfg: Config,
++    context_registry: context_contract.Registry,
++    tool_set: tool_set_contract.ToolSet,
++    resume_target: ?ResumeTarget,
++    model_override: ?[]const u8,
++    workspace_root: []const u8,
++    images: []const ImageAttachment,
++    cancel_flag: *std.atomic.Value(bool),
++    callbacks: EmbeddedCallbacks,
++    extra_mcp: ?builtin_mcp.ExtraStdioServer,
++) !PromptRunResult {
++    return runPromptInternal(alloc, prompt, if (auto_permission) .auto else null, cfg, .{
++        .output_mode = .raw,
++        .resume_target = resume_target,
++        .model_override = model_override,
++        .workspace_root = workspace_root,
++        .images = images,
++        .deps = .{
++            .stdout_ctx = callbacks.context,
++            .stderr_ctx = callbacks.context,
++            .write_stdout = callbacks.text,
++            .write_stderr = callbacks.diagnostic,
++            .context_registry = context_registry,
++            .tool_set = tool_set,
++            .load_mcp_host = cfg.load_mcp_host,
++            .cancel_flag = cancel_flag,
++            .embedded_tool_ctx = callbacks.context,
++            .embedded_tool = callbacks.tool,
++            .embedded_extra_mcp = extra_mcp,
++        },
++    });
++}
++
+ pub fn runPromptCapture(alloc: Allocator, prompt: []const u8, auto_permission: bool, cfg: Config, context_registry: context_contract.Registry, tool_set: tool_set_contract.ToolSet) !PromptRunResult {
+     return runPromptInternal(alloc, prompt, if (auto_permission) .auto else null, cfg, .{
+         .output_mode = .json,
+@@ -1457,6 +1512,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+             options.model_override,
+         );
+     defer startup.deinit(alloc);
++    if (options.workspace_root) |workspace_root| {
++        alloc.free(startup.workspace_root);
++        startup.workspace_root = try alloc.dupe(u8, workspace_root);
++    }
+     applyAskThemeChoice(startup.theme);
+     cfg.provider_set.definitions = startup.configured_providers.definitions;
+     // Bind gateway chat traffic to a per-process connection pool and warm one
+@@ -1716,7 +1775,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+     }
+ 
+     try ctx.checkCancellation();
+-    if (options.deps.load_mcp_host) |load_host| {
++    if (options.deps.embedded_extra_mcp) |extra| {
++        ctx.mcp_host = try builtin_mcp.loadHostWithExtra(alloc, startup.workspace_root, ctx.toolRegistry(), .{ .questions = ctx.mcp_elicitation_capabilities }, extra);
++        if (ctx.mcp_host) |h| try reportUnapprovedMcpServers(&ctx, h);
++    } else if (options.deps.load_mcp_host) |load_host| {
+         ctx.mcp_host = try load_host(alloc, startup.workspace_root, ctx.toolRegistry(), .{ .questions = ctx.mcp_elicitation_capabilities });
+         if (ctx.mcp_host) |h| try reportUnapprovedMcpServers(&ctx, h);
+     }
+@@ -2540,11 +2602,23 @@ fn executeToolCallAuthorized(
+     return result;
+ }
+ 
++fn notifyEmbeddedTool(ctx: *AskContext, call: ToolCall, status: []const u8, result: ?ToolExecutionResult) void {
++    const callback = ctx.deps.embedded_tool orelse return;
++    const output = if (result) |execution|
++        execution.command_result_json orelse execution.model_output
++    else
++        "";
++    callback(ctx.deps.embedded_tool_ctx, call.name, status, output) catch |err| {
++        debug_trace.logf("cli_ask", "embedded tool event dropped name={s} err={s}", .{ call.name, @errorName(err) });
++    };
++}
++
+ fn captureToolExecutionError(
+     ctx: *AskContext,
+     request: agent_runtime.ToolExecutionRequest,
+     err: anyerror,
+ ) void {
++    notifyEmbeddedTool(ctx, request.call, "error", null);
+     if (ctx.output_mode.capturesJson()) {
+         appendToolCallRecordBestEffort(
+             ctx,
+@@ -2562,6 +2636,7 @@ fn captureToolExecutionResult(
+     request: agent_runtime.ToolExecutionRequest,
+     result: ToolExecutionResult,
+ ) void {
++    notifyEmbeddedTool(ctx, request.call, if (result.status == .failure) "error" else "success", result);
+     if (ctx.output_mode.capturesJson()) {
+         appendToolCallRecordBestEffort(
+             ctx,
+@@ -2596,6 +2671,7 @@ fn recordToolCallRejected(
+     command_result_json: ?[]const u8,
+ ) !void {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    notifyEmbeddedTool(ctx, call, "error", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
+     if (!ctx.output_mode.capturesJson()) return;
+     appendToolCallRecordBestEffort(
+         ctx,
+@@ -2619,6 +2695,7 @@ fn recordToolCallFailed(
+     command_result_json: ?[]const u8,
+ ) !void {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    notifyEmbeddedTool(ctx, call, "error", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
+     if (!ctx.output_mode.capturesJson()) return;
+     appendToolCallRecordBestEffort(
+         ctx,
+diff --git a/src/core/config/config_runtime.zig b/src/core/config/config_runtime.zig
+index 204ee00e..e9dd3675 100644
+--- a/src/core/config/config_runtime.zig
++++ b/src/core/config/config_runtime.zig
+@@ -1097,6 +1097,7 @@ pub const PermissionMutation = settings_store.PermissionMutation;
+ pub const PermissionScope = settings_store.PermissionScope;
+ pub const StatuslineItem = settings_store.StatuslineItem;
+ pub const UserSettingsPatch = settings_store.UserSettingsPatch;
++pub const ProviderDefinitionPatch = settings_store.ProviderDefinitionPatch;
+ pub const WorkspaceDirectoryMutation = settings_store.WorkspaceDirectoryMutation;
+ pub const CommitOutcome = settings_store.CommitOutcome;
+ pub const LegacyCleanup = settings_store.LegacyCleanup;
+@@ -1176,6 +1177,15 @@ pub fn setUserPreferences(
+     patch: UserSettingsPatch,
+ ) !CommitOutcome {
+     const home = io_mod.homeDir() orelse return error.HomeNotSet;
++    return setUserPreferencesAtHome(alloc, home, patch);
++}
++
++/// Embedding hosts with an explicit profile home use the same atomic store.
++pub fn setUserPreferencesAtHome(
++    alloc: Allocator,
++    home: []const u8,
++    patch: UserSettingsPatch,
++) !CommitOutcome {
+     var store = try settings_store.Store.initFromHome(alloc, home, .writable);
+     defer store.deinit(alloc);
+     return store.applyUserPatch(alloc, patch);
+diff --git a/src/core/config/settings_store.zig b/src/core/config/settings_store.zig
+index 991db03e..afd559cb 100644
+--- a/src/core/config/settings_store.zig
++++ b/src/core/config/settings_store.zig
+@@ -9,6 +9,7 @@ const compactor = @import("../compactor/compactor.zig");
+ const context_limits = @import("context_limits.zig");
+ const project_config = @import("../mcp/project_config.zig");
+ const model_provider = @import("model_provider.zig");
++const configured_provider = @import("configured_provider.zig");
+ const workspace_access = @import("../workspace/workspace_access.zig");
+ const sort_utils = @import("../shared/sort_utils.zig");
+ const update_target = @import("../upgrade/update_target.zig");
+@@ -92,9 +93,19 @@ pub const ProjectMcpMutation = struct {
+     action: project_config.ProjectMcpAction,
+ };
+ 
++pub const ProviderDefinitionPatch = union(enum) {
++    upsert: struct {
++        id: []const u8,
++        base_url: []const u8,
++        bearer_env: ?[]const u8 = null,
++    },
++    remove: []const u8,
++};
++
+ pub const UserSettingsPatch = struct {
+     model_preference: ?ModelPreferencePatch = null,
+     provider: ?model_provider.ProviderId = null,
++    provider_definition: ?ProviderDefinitionPatch = null,
+     permission_mode: ?types.PermissionMode = null,
+     credential_source: ?types.CredentialSource = null,
+     /// Removes the key entirely so resolution returns to plain precedence.
+@@ -118,6 +129,7 @@ pub const UserSettingsPatch = struct {
+     fn isEmpty(self: UserSettingsPatch) bool {
+         return self.model_preference == null and
+             self.provider == null and
++            self.provider_definition == null and
+             self.permission_mode == null and
+             self.credential_source == null and
+             !self.clear_credential_source and
+@@ -918,6 +930,14 @@ pub fn validateProviderSlug(slug: []const u8) bool {
+ 
+ fn validateUserPatch(patch: UserSettingsPatch) !void {
+     if (patch.model_preference) |preference| try validateModel(preference.model);
++    if (patch.provider_definition) |definition| switch (definition) {
++        .upsert => |value| {
++            if (value.id.len == 0 or value.id.len > configured_provider.max_id_bytes) return error.InvalidProviderId;
++            if (value.base_url.len == 0 or value.base_url.len > 2048) return error.InvalidBaseUrl;
++            if (value.bearer_env) |name| if (name.len == 0 or name.len > 128) return error.InvalidEnvironmentName;
++        },
++        .remove => |id| if (id.len == 0 or id.len > configured_provider.max_id_bytes) return error.InvalidProviderId,
++    };
+ }
+ 
+ fn validAdditionalDirectoryPath(path: []const u8) bool {
+@@ -1040,6 +1060,38 @@ fn applyMutationToRoot(
+     return application;
+ }
+ 
++fn applyProviderDefinitionPatch(
++    arena: Allocator,
++    root: *std.json.ObjectMap,
++    patch: ProviderDefinitionPatch,
++) !bool {
++    var providers: std.json.Value = if (root.get("providers")) |value| value else .{ .object = .empty };
++    if (providers != .object) return error.InvalidObject;
++    const id = switch (patch) {
++        .upsert => |value| value.id,
++        .remove => |value| value,
++    };
++    switch (patch) {
++        .upsert => |value| {
++            var definition: std.json.ObjectMap = .empty;
++            try definition.put(arena, "protocol", .{ .string = "openai-chat-completions" });
++            try definition.put(arena, "base_url", .{ .string = value.base_url });
++            var auth: std.json.ObjectMap = .empty;
++            if (value.bearer_env) |name| {
++                try auth.put(arena, "type", .{ .string = "bearer" });
++                try auth.put(arena, "env", .{ .string = name });
++            } else try auth.put(arena, "type", .{ .string = "none" });
++            try definition.put(arena, "auth", .{ .object = auth });
++            try providers.object.put(arena, id, .{ .object = definition });
++        },
++        .remove => if (!providers.object.orderedRemove(id)) return false,
++    }
++    var registry = try configured_provider.Registry.parse(arena, providers);
++    defer registry.deinit(arena);
++    try root.put(arena, "providers", providers);
++    return true;
++}
++
+ fn applyUserPatchToRoot(
+     arena: Allocator,
+     root: *std.json.Value,
+@@ -1050,6 +1102,9 @@ fn applyUserPatchToRoot(
+         application.changed = try putModelPreference(arena, &root.object, preference) or application.changed;
+     }
+     if (patch.provider) |value| application.changed = try putString(arena, &root.object, "provider", value.label()) or application.changed;
++    if (patch.provider_definition) |definition| {
++        application.changed = try applyProviderDefinitionPatch(arena, &root.object, definition) or application.changed;
++    }
+     if (patch.permission_mode) |value| application.changed = try putString(arena, &root.object, "permission_mode", @tagName(value)) or application.changed;
+     if (patch.credential_source) |value| application.changed = try putString(arena, &root.object, "credential_source", @tagName(value)) or application.changed;
+     if (patch.clear_credential_source and root.object.contains("credential_source")) {
+diff --git a/src/core/terminal/native_session.zig b/src/core/terminal/native_session.zig
+index fb6b16fa..9abead05 100644
+--- a/src/core/terminal/native_session.zig
++++ b/src/core/terminal/native_session.zig
+@@ -298,17 +298,35 @@ pub fn isLauncherModeRaw(raw_args: []const [*:0]const u8) bool {
+         std.mem.eql(u8, std.mem.sliceTo(raw_args[1], 0), launcher_mode);
+ }
+ 
++pub fn isLauncherMode(args: []const [:0]const u8) bool {
++    return args.len == 1 and std.mem.eql(u8, args[0], launcher_mode);
++}
++
+ pub fn isControlModeRaw(raw_args: []const [*:0]const u8) bool {
+     return raw_args.len == 5 and
+         std.mem.eql(u8, std.mem.sliceTo(raw_args[1], 0), control_mode);
+ }
+ 
++pub fn isControlMode(args: []const [:0]const u8) bool {
++    return args.len == 4 and std.mem.eql(u8, args[0], control_mode);
++}
++
+ pub fn runControlMarker(raw_args: []const [*:0]const u8) !void {
+-    if (comptime !isSupported()) return error.TerminalHostUnsupported;
+     if (!isControlModeRaw(raw_args)) return error.InvalidControlMarker;
+-    const control_path = std.mem.sliceTo(raw_args[2], 0);
+-    const nonce = std.mem.sliceTo(raw_args[3], 0);
+-    const event = std.mem.sliceTo(raw_args[4], 0);
++    return writeControlMarker(
++        std.mem.sliceTo(raw_args[2], 0),
++        std.mem.sliceTo(raw_args[3], 0),
++        std.mem.sliceTo(raw_args[4], 0),
++    );
++}
++
++pub fn runControl(args: []const [:0]const u8) !void {
++    if (!isControlMode(args)) return error.InvalidControlMarker;
++    return writeControlMarker(args[1], args[2], args[3]);
++}
++
++fn writeControlMarker(control_path: []const u8, nonce: []const u8, event: []const u8) !void {
++    if (comptime !isSupported()) return error.TerminalHostUnsupported;
+     if (nonce.len != control_nonce_len) return error.InvalidControlMarker;
+     const kind: MarkerKind =
+         if (std.mem.eql(u8, event, "shell-ready"))
+diff --git a/src/embedded.zig b/src/embedded.zig
+new file mode 100644
+index 00000000..4b41fe22
+--- /dev/null
++++ b/src/embedded.zig
+@@ -0,0 +1,187 @@
++//! nanoterm's in-process fx entry point.
++//!
++//! This is the native Zig agent runtime: provider streaming, tools, MCP,
++//! skills, sessions, and compaction all execute in this address space.
++
++const std = @import("std");
++const cli_ask = @import("core/cli/cli_ask.zig");
++const builtin_gateway = @import("builtins/gateway.zig");
++const builtin_providers = @import("builtins/providers.zig");
++const builtin_context = @import("builtins/context.zig");
++const builtin_skills = @import("builtins/skills.zig");
++const builtin_modes = @import("builtins/modes.zig");
++const builtin_tools = @import("builtins/tools.zig");
++const builtin_mcp = @import("builtins/mcp.zig");
++const native_host = @import("core/hosts/native.zig");
++const shell_process_provider = @import("tools/shell/process_provider.zig");
++const command_runner = @import("core/execution/command_runner.zig");
++const terminal_native_session = @import("core/terminal/native_session.zig");
++const context_contract = @import("core/workspace/context_contract.zig");
++const agent_steps = @import("core/config/agent_steps.zig");
++const tool_result_limits = @import("core/tooling/tool_result_limits.zig");
++
++pub const Result = cli_ask.PromptRunResult;
++pub const Callbacks = cli_ask.EmbeddedCallbacks;
++pub const Config = cli_ask.Config;
++pub const ImageAttachment = cli_ask.ImageAttachment;
++pub const mcp_config = @import("core/mcp_host/config_file.zig");
++pub const skills = builtin_skills;
++pub const provider_settings = @import("core/config/config_runtime.zig");
++pub const model_provider = @import("core/config/model_provider.zig");
++pub const shared_io = @import("core/shared/io.zig");
++pub const ExtraStdioServer = builtin_mcp.ExtraStdioServer;
++
++/// The tool names one configured MCP server offers, for hosts that list them
++/// outside a model turn. `deinit` frees everything.
++pub const McpToolList = struct {
++    names: [][]u8 = &.{},
++    /// Why there are no names, when the server could not be asked.
++    note: ?[]u8 = null,
++
++    pub fn deinit(self: *McpToolList, alloc: std.mem.Allocator) void {
++        for (self.names) |name| alloc.free(name);
++        if (self.names.len > 0) alloc.free(self.names);
++        if (self.note) |text| alloc.free(text);
++        self.* = .{};
++    }
++};
++
++/// Lists `server`'s tools from the profile config at `config_path`. This runs
++/// the server over MCP and blocks; call it off the UI thread and hand it a
++/// cancel flag.
++pub fn listMcpTools(
++    alloc: std.mem.Allocator,
++    home: []const u8,
++    config_path: []const u8,
++    workspace_root: []const u8,
++    server: []const u8,
++    cancel: ?*const std.atomic.Value(bool),
++) !McpToolList {
++    var configs = try builtin_mcp.loadConfigFromPath(alloc, config_path);
++    defer {
++        for (configs.items) |*entry| entry.deinit(alloc);
++        configs.deinit(alloc);
++    }
++
++    var environ = try shared_io.cloneEnvironMap(alloc);
++    defer environ.deinit();
++
++    var runtime: @import("core/mcp_host/runtime.zig").Runtime = undefined;
++    try runtime.start(alloc, shared_io.getIo(), configs.items, &environ, .{
++        .client_version = "nanoterm",
++        .credentials = .{ .detect = home },
++        .workspace_root = workspace_root,
++    });
++    defer runtime.deinit();
++
++    const result = runtime.tools(alloc, server, cancel) catch |err| {
++        return .{ .note = try alloc.dupe(u8, @errorName(err)) };
++    };
++    switch (result) {
++        .tools => |tools| {
++            var list: McpToolList = .{};
++            errdefer list.deinit(alloc);
++            list.names = try alloc.alloc([]u8, tools.len);
++            @memset(list.names, &.{});
++            for (tools, 0..) |tool, i| list.names[i] = try alloc.dupe(u8, tool.name);
++            for (tools) |tool| {
++                alloc.free(tool.name);
++                alloc.free(tool.raw);
++            }
++            alloc.free(tools);
++            return list;
++        },
++        .needs_login => return .{ .note = try alloc.dupe(u8, "the server needs sign-in") },
++        .failed => |text| {
++            defer alloc.free(text);
++            return .{ .note = try alloc.dupe(u8, text) };
++        },
++        .unknown_server => return .{ .note = try alloc.dupe(u8, "server not found") },
++    }
++}
++
++/// Handles fx's private re-execution entrypoints inside the host executable.
++/// Returns false for nanoterm's ordinary UI and CLI arguments.
++pub fn runInternal(init: std.process.Init) !bool {
++    const args = try init.minimal.args.toSlice(init.arena.allocator());
++    const cli_args = if (args.len > 0) args[1..] else args;
++    const terminal_mode = if (comptime terminal_native_session.isSupported())
++        terminal_native_session.isControlMode(cli_args) or terminal_native_session.isLauncherMode(cli_args)
++    else
++        false;
++    if (!terminal_mode and !command_runner.isForegroundSessionInvocation(cli_args)) return false;
++
++    shared_io.setIo(init.io);
++    shared_io.setEnvironMap(init.environ_map);
++    if (comptime terminal_native_session.isSupported()) {
++        if (terminal_native_session.isControlMode(cli_args)) {
++            try terminal_native_session.runControl(cli_args);
++            return true;
++        }
++        if (terminal_native_session.isLauncherMode(cli_args)) {
++            try terminal_native_session.runLauncher(init.gpa);
++            return true;
++        }
++    }
++    try command_runner.runForegroundSessionBootstrap(cli_args);
++    return true;
++}
++
++const ignored_list_entries = [_][]const u8{
++    ".git", ".zig-cache", "zig-out", "node_modules", ".next", "dist", "build", "coverage",
++};
++
++pub fn config() Config {
++    return .{
++        .command_usage = "nanoterm fx",
++        .default_model = builtin_gateway.default_model,
++        .default_agent_step_limit = agent_steps.default_max_agent_steps,
++        .gateway_retry_count = builtin_gateway.retry_count,
++        .gateway_chat_url = builtin_gateway.default_chat_url,
++        .gateway_models_path = builtin_gateway.models_path,
++        .gateway_provider = builtin_gateway.provider,
++        .provider_set = builtin_providers.native,
++        .process_provider = shell_process_provider.provider,
++        .secret_store = native_host.secret_store,
++        .prompt_policy = builtin_context.prompt_policy,
++        .skill_root_policy = builtin_skills.root_policy,
++        .ignored_list_entries = &ignored_list_entries,
++        .max_list_entries = 100,
++        .max_read_file_bytes = 50 * 1024,
++        .max_read_file_lines = 400,
++        .max_read_file_line_len = 2000,
++        .max_command_output_bytes = 64 * 1024,
++        .max_tool_result_bytes = tool_result_limits.default_max_tool_result_bytes,
++        .max_history_turns = 8,
++        .mode_registry = builtin_modes.registry,
++        .load_mcp_host = builtin_mcp.loadHost,
++    };
++}
++
++pub fn run(
++    alloc: std.mem.Allocator,
++    prompt: []const u8,
++    workspace_root: []const u8,
++    session_id: ?[]const u8,
++    model: ?[]const u8,
++    images: []const ImageAttachment,
++    cancel_flag: *std.atomic.Value(bool),
++    callbacks: Callbacks,
++    extra_mcp: ?ExtraStdioServer,
++) !Result {
++    return cli_ask.runEmbedded(
++        alloc,
++        prompt,
++        true,
++        config(),
++        .{ .default_provider = builtin_context.provider },
++        builtin_tools.advertisement_set,
++        if (session_id) |id| .{ .id = id } else null,
++        model,
++        workspace_root,
++        images,
++        cancel_flag,
++        callbacks,
++        extra_mcp,
++    );
++}

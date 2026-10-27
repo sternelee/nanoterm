@@ -136,7 +136,7 @@ test "kept across launches, cut to size, the newest last" {
     var l: Log = .{ .gpa = gpa };
     defer l.deinit();
     l.load(io, dir ++ "/sub/sessions.jsonl");
-    l.record(.{ .time = 100, .cwd = @constCast("/a"), .agent = @constCast("graff"), .prompt = @constCast("why is the build slow?"), .reply = @constCast("Because \"LTO\"\nis on.") });
+    l.record(.{ .time = 100, .cwd = @constCast("/a"), .agent = @constCast("agent"), .prompt = @constCast("why is the build slow?"), .reply = @constCast("Because \"LTO\"\nis on.") });
     l.record(.{ .time = 200, .cwd = @constCast("/b"), .agent = @constCast("Claude Code"), .prompt = @constCast("  "), .reply = @constCast("") });
     var again: Log = .{ .gpa = gpa };
     defer again.deinit();

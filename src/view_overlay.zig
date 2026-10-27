@@ -108,7 +108,7 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
         var n: usize = 0;
         var selected: usize = 0;
         for (std.enums.values(agent_mod.Which)) |which| {
-            if (which != s.which and which != .graff and which != .claude and !w.shared.prefs.installed.get(which)) continue;
+            if (which != s.which and which != .agent and which != .claude and !w.shared.prefs.installed.get(which)) continue;
             if (which == s.which) selected = n;
             shown[n] = which;
             names[n] = which.label();
@@ -124,16 +124,7 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
     }
     options(c, s);
     const enter = search(c, w, "Search models…");
-    // graff's session, once up, lists its models with makers and how each
-    // is paid for: asked once.
-    const cat = &s.shared.catalog;
-    if (s.which == .graff and cat.acp == .none) if (s.agent) |ag| if (ag.session != null) {
-        cat.acp = .asked;
-        ag.client.request("graff/models", .{}, cat, @import("catalog.zig").Catalog.onAcp) catch {
-            cat.acp = .answered;
-        };
-    };
-    const Choice = struct { value: []const u8, row: Row, section: []const u8 = "" };
+    const Choice = struct { value: []const u8, row: Row, section: []const u8 = "", provider: ?[]const u8 = null };
     var list: std.ArrayList(Choice) = .empty;
     const q = w.query.text();
     const current = assist.modelLabel(s);
@@ -141,28 +132,22 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
         for (o.choices) |ch| if (palette.score(ch.name, q) != null or palette.score(ch.value, q) != null)
             list.append(c.alloc(), .{ .value = ch.value, .row = .{ .icon = if (std.mem.eql(u8, ch.value, o.current)) "checkmark.circle.fill" else "cpu", .title = ch.name, .detail = ch.description, .current = std.mem.eql(u8, ch.value, o.current) } }) catch {};
     };
-    if (list.items.len == 0 and s.which == .graff) {
-        const CatMod = @import("catalog.zig");
-        const marks = @import("marks.zig");
-        for (cat.models.items) |m| {
-            const name = c.print("{s} {s}", .{ m.provider, m.name });
-            if (palette.score(name, q) == null) continue;
-            const is_current = if (cat.acp == .answered) m.current else std.mem.eql(u8, m.name, current);
-            const mk = marks.maker(m.maker, m.provider, m.name);
-            const note = CatMod.costNote(m.cost);
+    if (list.items.len == 0 and s.which == .agent) if (s.shared.agent_store) |store| {
+        for (store.providers.items) |provider| {
+            if (provider.model.len == 0 or palette.score(provider.model, q) == null) continue;
             list.append(c.alloc(), .{
-                .value = m.name,
-                .section = if (note.len > 0) c.print("{s} · {s}", .{ CatMod.providerName(m.provider), note }) else CatMod.providerName(m.provider),
-                .row = .{ .icon = if (is_current) "checkmark.circle.fill" else "cpu", .title = m.name, .detail = if (cat.acp == .answered) m.detail else c.print("{s} · {s}", .{ m.provider, m.detail }), .current = is_current, .mono = true, .mark = marks.of(mk), .mark_key = c.print("mark-{s}", .{mk}) },
+                .value = provider.model,
+                .section = provider.name,
+                .provider = provider.name,
+                .row = .{ .icon = if (std.mem.eql(u8, provider.model, current)) "checkmark.circle.fill" else "cpu", .title = provider.model, .detail = provider.base_url, .current = std.mem.eql(u8, provider.model, current), .mono = true },
             }) catch {};
-            if (list.items.len >= 300) break;
         }
-        if (cat.state == .loading) ui.text(c, "Loading graff's models…", .{ .size = 12, .color = theme.muted });
-        if (cat.state == .failed) ui.text(c, "graff did not list its models: type a name and press ↩", .{ .size = 12, .color = theme.warning });
-    }
+        ui.text(c, "Choose a configured model, or type a model name and press ↩. Add providers in Settings.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+    };
     const items = list.items;
     w.pick = @min(w.pick, items.len -| 1);
     var chosen: ?[]const u8 = if (enter) (if (items.len > 0) items[w.pick].value else if (q.len > 0) q else null) else null;
+    var chosen_provider: ?[]const u8 = if (enter and items.len > 0) items[w.pick].provider else null;
     const first = firstRow(w.pick);
     for (items[first..@min(items.len, first + rows)], first..) |ch, i| {
         // A provider's title where its models start: "Codex · your plan".
@@ -172,12 +157,19 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
             defer h.end();
             ui.text(c, ch.section, .{ .size = 11, .weight = .semibold, .color = theme.muted });
         }
-        if (row(c, w, i, ch.row)) chosen = ch.value;
+        if (row(c, w, i, ch.row)) {
+            chosen = ch.value;
+            chosen_provider = ch.provider;
+        }
     }
     if (items.len == 0 and s.agent != null and s.agent.?.status == .starting) ui.text(c, c.print("Starting {s} to see its models…", .{s.which.label()}), .{ .size = 12, .color = theme.muted });
     const value = chosen orelse return;
+    // Selecting a provider reloads the store and frees the row's strings.
+    const owned_value = c.alloc().dupe(u8, value) catch return;
+    const owned_provider = if (chosen_provider) |provider| c.alloc().dupe(u8, provider) catch return else null;
+    if (owned_provider) |provider| if (s.shared.agent_store) |store| store.selectProviderByName(provider);
     // The name outlives the frame: it is copied before the overlay goes.
-    assist.chooseModel(s, value);
+    assist.chooseModel(s, owned_value);
     w.closeOverlay();
     c.changed = true;
 }

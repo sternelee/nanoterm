@@ -1,7 +1,6 @@
-//! A conversation with a coding agent over ACP: start the agent, open a
-//! session in the terminal's directory, send prompts, and turn the
-//! agent's updates into turns of messages, thoughts, tool calls, plans,
-//! permission questions and the commands it runs (blocks).
+//! Conversations with coding agents: the embedded native agent runtime, plus
+//! external ACP agents. Updates become turns of messages, thoughts, tools,
+//! plans, permission questions, and command blocks.
 const std = @import("std");
 const acp = @import("acp.zig");
 const blocks = @import("blocks.zig");
@@ -9,11 +8,11 @@ const host = @import("agent_host.zig");
 const agent_config = @import("agent_config.zig");
 const visual = @import("visual.zig");
 const prompt_mod = @import("agent_prompt.zig");
+const native_agent = @import("agent_native.zig");
 
-/// The agents nanoterm talks to over ACP, as Harness ships them
-/// (`agents.zig` says how to find and install each).
+/// Agent is built in; the other agents use ACP (`agents.zig` locates them).
 pub const Which = enum {
-    graff,
+    agent,
     claude,
     codex,
     opencode,
@@ -23,7 +22,7 @@ pub const Which = enum {
 
     pub fn label(w: Which) []const u8 {
         return switch (w) {
-            .graff => "graff",
+            .agent => "Agent",
             .claude => "Claude Code",
             .codex => "Codex",
             .opencode => "opencode",
@@ -127,6 +126,8 @@ pub const Agent = struct {
     app: App,
     which: Which,
     client: acp.Client,
+    native: ?*native_agent.Runtime = null,
+    native_turn: ?*Turn = null,
     status: Status = .off,
     session: ?[]u8 = null,
     cwd: []u8,
@@ -169,6 +170,7 @@ pub const Agent = struct {
     pub fn destroy(a: *Agent) void {
         if (a.on_destroy) |d| d.func(d.ctx, a);
         if (a.remote) |r| r.deinit(a.gpa);
+        if (a.native) |native| native.deinit();
         a.client.deinit();
         a.terminals.deinit();
         a.config.deinit();
@@ -224,6 +226,7 @@ pub const Agent = struct {
 
     /// Starts the agent's process with `argv` and opens a session.
     pub fn start(a: *Agent, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) !void {
+        if (a.which == .agent) return a.startNative(a.cwd, null);
         a.status = .starting;
         const cwd_z = try a.gpa.dupeSentinel(u8, a.cwd, 0);
         defer a.gpa.free(cwd_z);
@@ -238,11 +241,20 @@ pub const Agent = struct {
         }, a, onInitialized);
     }
 
+    pub fn startNative(a: *Agent, cwd: []const u8, model: ?[]const u8) !void {
+        std.debug.assert(a.which == .agent);
+        const extra: ?native_agent.ExtraStdioServer = if (a.mcp) |m| .{ .name = m.name, .command = m.command, .args = m.args } else null;
+        a.native = try native_agent.Runtime.create(cwd, model, extra);
+        a.native.?.setCallback(a, onNativeEvent);
+        a.status = .ready;
+        a.app.changed(a.app.ctx);
+    }
+
     fn fail(a: *Agent, comptime fmt: []const u8, args: anytype) void {
         a.status = .failed;
         if (a.error_text) |e| a.gpa.free(e);
         // The agent's own last words say most: add them.
-        const said = a.client.stderr.lastLine();
+        const said = if (a.native == null) a.client.stderr.lastLine() else "";
         a.error_text = if (said.len > 0)
             std.fmt.allocPrint(a.gpa, fmt ++ ": {s}", args ++ .{said}) catch null
         else
@@ -319,7 +331,7 @@ pub const Agent = struct {
             t.done = true;
             return;
         }
-        if (a.session == null) {
+        if (a.session == null and a.native == null) {
             if (a.queued) |q| a.gpa.free(q);
             a.queued = try a.gpa.dupe(u8, text);
             return;
@@ -329,6 +341,14 @@ pub const Agent = struct {
 
     fn send(a: *Agent, text: []const u8, images: []const Image) void {
         a.status = .working;
+        if (a.native) |native| {
+            // agent runs one native turn at a time. Turns already own their text
+            // and images, so leave newer ones pending until the answer ends.
+            if (a.native_turn != null or native.busy()) return;
+            const t = a.current() orelse return;
+            a.startNativeTurn(t);
+            return;
+        }
         if (a.current()) |t| t.sent = true;
         var arena: std.heap.ArenaAllocator = .init(a.gpa);
         defer arena.deinit();
@@ -338,6 +358,42 @@ pub const Agent = struct {
         for (images) |im| lost += @intFromBool(im.path.len == 0 and !(a.images_ok and im.data.len <= prompt_mod.max_inline_bytes));
         if (lost > 0) if (a.current()) |t| a.addItem(t, .{ .note = std.fmt.allocPrint(a.gpa, "{d} picture(s) could not be sent to {s}", .{ lost, a.which.label() }) catch return });
         a.client.request("session/prompt", .{ .sessionId = a.session.?, .prompt = parts }, a, onPromptDone) catch {};
+    }
+
+    fn startNativeTurn(a: *Agent, t: *Turn) void {
+        const native = a.native orelse return;
+        a.native_turn = t;
+        var images: std.ArrayList(native_agent.ImageAttachment) = .empty;
+        defer images.deinit(a.gpa);
+        for (t.images) |image| {
+            images.append(a.gpa, .{ .path = image.name, .media_type = @constCast(image.mime), .inline_data = image.data }) catch {
+                a.native_turn = null;
+                a.fail("out of memory", .{});
+                return;
+            };
+        }
+        native.start(t.prompt, images.items) catch |err| {
+            a.native_turn = null;
+            // A done event can reach the UI just before the worker clears its
+            // running flag. The runtime's idle pump retries this pending turn.
+            if (err == error.Busy) {
+                a.status = .working;
+                return;
+            }
+            a.fail("could not start agent: {s}", .{@errorName(err)});
+            return;
+        };
+        t.sent = true;
+    }
+
+    fn startNextNativeTurn(a: *Agent) void {
+        if (a.native == null or a.native_turn != null) return;
+        for (a.turns.items) |t| {
+            if (t.sent or t.done) continue;
+            a.status = .working;
+            a.startNativeTurn(t);
+            return;
+        }
     }
 
     /// The oldest prompt the agent hasn't answered: answers come in the
@@ -362,8 +418,70 @@ pub const Agent = struct {
         a.app.changed(a.app.ctx);
     }
 
-    /// Chooses `value` for the config option `id` (a model, a mode).
+    fn onNativeEvent(context: ?*anyopaque, event: native_agent.Event) void {
+        const a: *Agent = @ptrCast(@alignCast(context.?));
+        const t = switch (event) {
+            // The worker just cleared its running flag: retry a turn whose
+            // start raced with the previous done event.
+            .idle => {
+                a.startNextNativeTurn();
+                a.app.changed(a.app.ctx);
+                return;
+            },
+            else => a.native_turn orelse return,
+        };
+        switch (event) {
+            .text => |text| {
+                if (t.items.items.len > 0 and t.items.items[t.items.items.len - 1] == .text) {
+                    t.items.items[t.items.items.len - 1].text.appendSlice(a.gpa, text) catch {};
+                } else {
+                    var line: std.ArrayList(u8) = .empty;
+                    line.appendSlice(a.gpa, text) catch return;
+                    a.addItem(t, .{ .text = line });
+                }
+            },
+            .diagnostic => |text| if (text.len > 0) a.addItem(t, .{ .note = a.gpa.dupe(u8, text) catch return }),
+            .tool => |call| a.addItem(t, .{ .tool = .{
+                .id = a.gpa.dupe(u8, call.name) catch return,
+                .kind = a.gpa.dupe(u8, call.name) catch return,
+                .title = std.ArrayList(u8).fromOwnedSlice(a.gpa.dupe(u8, call.name) catch return),
+                .detail = std.ArrayList(u8).fromOwnedSlice(a.gpa.dupe(u8, call.output) catch return),
+                .status = if (std.mem.eql(u8, call.status, "completed") or std.mem.eql(u8, call.status, "success")) .completed else .failed,
+            } }),
+            .done => |done| {
+                t.done = true;
+                t.ended = blocks.now();
+                a.native_turn = null;
+                a.status = .ready;
+                if (done.session_id.len > 0) if (a.gpa.dupe(u8, done.session_id) catch null) |session| {
+                    if (a.session) |old| a.gpa.free(old);
+                    a.session = session;
+                };
+                if (done.interrupted) a.addItem(t, .{ .note = a.gpa.dupe(u8, "cancelled") catch return });
+                if (a.app.finished) |finished| finished(a.app.ctx, t);
+                a.startNextNativeTurn();
+            },
+            .failed => |message| {
+                a.addItem(t, .{ .note = std.fmt.allocPrint(a.gpa, "agent: {s}", .{message}) catch return });
+                t.done = true;
+                t.ended = blocks.now();
+                a.native_turn = null;
+                a.status = .ready;
+                if (a.app.finished) |finished| finished(a.app.ctx, t);
+                a.startNextNativeTurn();
+            },
+            .idle => {},
+        }
+        a.app.changed(a.app.ctx);
+    }
+
+    /// Selects a native agent model, or an ACP config option.
     pub fn setOption(a: *Agent, id: []const u8, value: []const u8) void {
+        if (a.native) |native| {
+            if (std.mem.eql(u8, id, "model")) native.setModel(value) catch {};
+            a.app.changed(a.app.ctx);
+            return;
+        }
         const s = a.session orelse return;
         a.config.setCurrent(id, value);
         a.client.request("session/set_config_option", .{ .sessionId = s, .configId = id, .value = value }, a, onOptionSet) catch {};
@@ -378,6 +496,7 @@ pub const Agent = struct {
 
     /// Stops the turn running.
     pub fn cancel(a: *Agent) void {
+        if (a.native) |native| return native.cancel();
         const s = a.session orelse return;
         a.client.notify("session/cancel", .{ .sessionId = s }) catch {};
     }

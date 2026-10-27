@@ -380,8 +380,8 @@ test "command lines read back as the arguments given" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const argv = try proc.cStrings(a, &.{ "C:\\Program Files\\graff.exe", "login", "say \"hi\"", "trail\\", "" });
-    try std.testing.expectEqualStrings("\"C:\\Program Files\\graff.exe\" login \"say \\\"hi\\\"\" trail\\ \"\"", try commandLine(a, argv));
+    const argv = try proc.cStrings(a, &.{ "C:\\Program Files\\agent.exe", "run", "say \"hi\"", "trail\\", "" });
+    try std.testing.expectEqualStrings("\"C:\\Program Files\\agent.exe\" run \"say \\\"hi\\\"\" trail\\ \"\"", try commandLine(a, argv));
     const npx = try proc.cStrings(a, &.{ "C:\\nodejs\\npx.cmd", "-y", "pkg" });
     try std.testing.expectEqualStrings("cmd.exe /d /s /c \"C:\\nodejs\\npx.cmd -y pkg\"", try commandLine(a, npx));
 }

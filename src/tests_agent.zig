@@ -1,13 +1,10 @@
 //! What an agent lets the user choose, against a fake ACP agent: config
 //! options (model, mode) set through session/set_config_option, slash
-//! commands offered as "/" is typed; and Jev's answers, from a local file
-//! instead of the gateway. Nothing reaches the user's agents or accounts.
+//! commands offered as "/" is typed. Nothing reaches the user's agents.
 const std = @import("std");
 const agent_mod = @import("agent.zig");
 const blocks = @import("blocks.zig");
 const proc = @import("proc.zig");
-const jev_mod = @import("jev.zig");
-
 
 fn pumpUntil(ctx: anytype, comptime done: fn (@TypeOf(ctx)) bool) !void {
     var waited: f64 = 0;
@@ -89,44 +86,7 @@ test "an agent's models, modes and slash commands" {
     try std.testing.expectEqualStrings("smartest", a.config.find("model").?.choices[1].description);
 }
 
-test "Jev decides what the rules could not, from its answer" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    const dir = "/tmp/nanoterm-test-jev";
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-    // curl reads the answer from a file: no network, no account.
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/answer.json", .data = "{\"answers\":{\"q1\":{\"type\":\"choice\",\"choice\":\"agent\",\"confidence\":0.8}}}" });
-    var j: jev_mod.Jev = .{ .gpa = gpa, .key = try gpa.dupe(u8, "test-key"), .endpoint = "file://" ++ dir ++ "/answer.json" };
-    defer j.deinit();
-    j.ask("tidy up the readme", .{});
-    j.ask("tidy up the readme a bit", .{});
-    try pumpUntil(&j, struct {
-        fn f(x: *jev_mod.Jev) bool {
-            return x.answer("tidy up the readme a bit") != null or x.down;
-        }
-    }.f);
-    try std.testing.expect(!j.down);
-    // Typing paused once: one question, about the latest text.
-    try std.testing.expectEqual(@as(usize, 1), j.calls);
-    try std.testing.expectEqual(@import("classify.zig").Kind.agent, j.answer("tidy up the readme a bit").?);
-    try std.testing.expect(j.answer("tidy up the readme") == null);
-
-    // A failed call turns Jev off for the session.
-    var bad: jev_mod.Jev = .{ .gpa = gpa, .key = try gpa.dupe(u8, "test-key"), .endpoint = "file://" ++ dir ++ "/missing.json" };
-    defer bad.deinit();
-    bad.ask("tidy up the readme", .{});
-    try pumpUntil(&bad, struct {
-        fn f(x: *jev_mod.Jev) bool {
-            return x.down;
-        }
-    }.f);
-    bad.ask("something else entirely", .{});
-    try std.testing.expectEqual(@as(usize, 1), bad.calls);
-}
-
-/// Answers a prompt only once the next one comes, as graff 0.302 does when
-/// its last line sits unflushed: the first answer arrives after the
+/// Covers an ACP agent whose last line sits unflushed: the first answer arrives after the
 /// second prompt was sent.
 const lagging_agent =
     \\import json, sys

@@ -1,5 +1,5 @@
-//! Settings (⌘,): the Codegraff account (one sign-in for nanoterm and
-//! graff), the agents Harness ships (installed or not, the one new tabs
+//! Settings (⌘,): built-in Agent providers, MCP and Skills, the agents
+//! Harness ships (installed or not, the one new tabs
 //! start with, an installer run in a new tab), appearance, text size,
 //! updates, and about.
 const std = @import("std");
@@ -25,8 +25,8 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
     // As tall as it is, up to the window's room; then it scrolls.
     const body = ui.div(c).column().wFull().scrollY().maxH(c.size.h - 170).px(20).pb(20).gap(18);
     defer body.end();
-    account(c, w);
     agentList(c, w);
+    account(c, w);
     look(c, w);
     privacy(c, w);
     updates(c, w);
@@ -43,46 +43,162 @@ fn box(c: *ui.Context) ui.Div {
 }
 
 pub fn account(c: *ui.Context, w: *Workspace) void {
-    const s = section(c, "Codegraff");
-    defer s.end();
-    const b = box(c);
-    defer b.end();
-    const a = &w.shared.prefs.account;
-    const r = ui.div(c).row().wFull().gap(12).itemsCenter();
-    defer r.end();
-    ui.icon(c, if (a.state == .signed_in) "person.crop.circle.fill.badge.checkmark" else "person.crop.circle", .{ .size = 26, .color = if (a.state == .signed_in) theme.success else theme.muted });
-    {
-        const t = ui.div(c).column().grow().gap(3);
-        defer t.end();
-        switch (a.state) {
-            .signed_out => {
-                ui.text(c, "Sign in with Codegraff", .{ .size = 14, .weight = .semibold });
-                ui.text(c, "One sign-in for nanoterm and graff: Codegraff's models and credits, and Jev telling commands from questions.", .{ .size = 12, .color = theme.muted, .wrap = true });
-            },
-            .starting => ui.text(c, "Opening Codegraff…", .{ .size = 14, .weight = .semibold }),
-            .waiting => {
-                ui.text(c, "Approve the sign-in in your browser", .{ .size = 14, .weight = .semibold });
-                if (a.code) |code| ui.text(c, c.print("Your code: {s}", .{code}), .{ .size = 12.5, .mono = true, .color = theme.muted });
-            },
-            .signed_in => {
-                ui.text(c, a.email orelse "Signed in", .{ .size = 14, .weight = .semibold });
-                if (a.credits_micro_usd) |cr| {
-                    const dollars = @as(f64, @floatFromInt(cr)) / 1_000_000;
-                    ui.text(c, c.print("${d:.2} in credits{s}{s}", .{ dollars, if (a.tier != null) " · " else "", a.tier orelse "" }), .{ .size = 12, .color = theme.muted });
-                } else ui.text(c, "graff uses this sign-in too", .{ .size = 12, .color = theme.muted });
-            },
+    const kit = nanoui.kit;
+    const store = w.shared.agent_store orelse {
+        const s = section(c, "Agent · built in");
+        defer s.end();
+        ui.text(c, "Agent configuration needs a home directory.", .{ .color = theme.failure });
+        return;
+    };
+    if (kit.collapsible(c, "agent-builtin", "Agent · built in", &store.config_open)) |config| {
+        defer config.end();
+        {
+            const b = box(c);
+            defer b.end();
+            ui.text(c, "Providers", .{ .size = 14, .weight = .semibold });
+            ui.text(c, "Custom OpenAI-compatible providers, with their model and optional bearer token variable.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            for (store.providers.items) |*provider| {
+                const open = kit.collapsible(
+                    c,
+                    c.print("provider-{s}", .{provider.name}),
+                    if (provider.selected) c.print("{s} · selected", .{provider.name}) else provider.name,
+                    &provider.open,
+                ) orelse continue;
+                defer open.end();
+                ui.text(c, c.print("{s} · {s}", .{ provider.base_url, provider.model }), .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                if (provider.auth_env.len > 0) ui.text(c, c.print("Token variable: {s}", .{provider.auth_env}), .{ .size = 11, .color = theme.faint });
+                const actions = ui.div(c).row().wFull().gap(8);
+                defer actions.end();
+                if (!provider.selected and ui.button(c, "Select", .{ .size = 12 }).clicked) {
+                    store.selectProvider(provider.*);
+                    syncAgentModel(w);
+                    // selectProvider reloads the list this loop borrows from.
+                    break;
+                }
+                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                    const name = c.gpa.dupe(u8, provider.name) catch break;
+                    defer c.gpa.free(name);
+                    store.removeProvider(name);
+                    syncAgentModel(w);
+                    break;
+                }
+            }
+            if (store.providers.items.len == 0) ui.text(c, "No custom providers yet.", .{ .size = 11.5, .color = theme.faint });
+            if (kit.collapsible(c, "provider-add", "Add provider", &store.provider_form_open)) |open| {
+                defer open.end();
+                _ = ui.textField(c, &store.provider_name, .{ .placeholder = "Provider id (for example local)", .width = .fill });
+                _ = ui.textField(c, &store.provider_url, .{ .placeholder = "Base URL, including /v1/", .width = .fill });
+                _ = ui.textField(c, &store.provider_model, .{ .placeholder = "Model", .width = .fill });
+                _ = ui.textField(c, &store.provider_auth_env, .{ .placeholder = "Bearer token environment variable (optional)", .width = .fill });
+                if (ui.button(c, "Save and select provider", .{ .variant = .primary, .size = 12 }).clicked) {
+                    store.saveProvider();
+                    syncAgentModel(w);
+                }
+            }
         }
-        if (a.failure) |why| ui.text(c, why, .{ .size = 12, .color = theme.failure, .wrap = true });
+        {
+            const b = box(c);
+            defer b.end();
+            ui.text(c, "MCP servers", .{ .size = 14, .weight = .semibold });
+            ui.text(c, "stdio and HTTP servers in Agent's own MCP profile.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            for (store.mcp_servers.items) |*server| {
+                const open = kit.collapsible(c, c.print("mcp-{s}", .{server.name}), server.name, &server.open) orelse continue;
+                defer open.end();
+                ui.text(c, server.summary, .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                const actions = ui.div(c).row().wFull().gap(8);
+                defer actions.end();
+                if (ui.button(c, if (store.mcp_query_thread == null) "List tools" else "Listing…", .{ .size = 12 }).clicked) {
+                    store.startMcpQuery(server.name);
+                    pollMcpTools(w);
+                }
+                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                    const name = c.gpa.dupe(u8, server.name) catch break;
+                    defer c.gpa.free(name);
+                    store.removeMcp(name);
+                    break;
+                }
+                if (store.mcp_query_thread != null and std.mem.eql(u8, store.mcp_query_server, server.name)) {
+                    ui.text(c, "Starting the server and asking for its tools…", .{ .size = 11, .color = theme.faint });
+                }
+                if (std.mem.eql(u8, store.mcp_tools_server, server.name)) {
+                    if (store.mcp_tools_note.len > 0) {
+                        ui.text(c, store.mcp_tools_note, .{ .size = 11, .color = if (store.mcp_tools_failed) theme.failure else theme.muted, .wrap = true });
+                    }
+                    if (store.mcp_tools.items.len > 0) {
+                        ui.text(c, c.print("{d} tools", .{store.mcp_tools.items.len}), .{ .size = 11.5, .weight = .semibold, .color = theme.muted });
+                        for (store.mcp_tools.items) |tool| {
+                            const row = ui.div(c).row().wFull().gap(6).itemsCenter();
+                            defer row.end();
+                            ui.icon(c, "wrench.and.screwdriver", .{ .size = 11, .color = theme.agent });
+                            ui.text(c, tool, .{ .size = 12 });
+                        }
+                    }
+                }
+            }
+            if (store.mcp_servers.items.len == 0) ui.text(c, "No MCP servers yet.", .{ .size = 11.5, .color = theme.faint });
+            if (kit.collapsible(c, "mcp-add", "Add MCP server", &store.mcp_form_open)) |open| {
+                defer open.end();
+                _ = ui.textField(c, &store.mcp_name, .{ .placeholder = "Server name", .width = .fill });
+                _ = ui.textField(c, &store.mcp_target, .{ .placeholder = "https://… or executable command", .width = .fill });
+                _ = ui.textField(c, &store.mcp_args, .{ .placeholder = "Space-separated arguments for stdio command (optional)", .width = .fill });
+                _ = ui.textField(c, &store.mcp_env, .{ .placeholder = "stdio environment JSON (optional)", .width = .fill });
+                _ = ui.textField(c, &store.mcp_headers, .{ .placeholder = "HTTP headers JSON (optional)", .width = .fill });
+                ui.text(c, "Environment and headers are JSON objects, for example {\"TOKEN\":\"…\"}.", .{ .size = 11, .color = theme.faint });
+                if (ui.button(c, "Add MCP server", .{ .size = 12 }).clicked) store.addMcp();
+            }
+        }
+        {
+            const b = box(c);
+            defer b.end();
+            ui.text(c, "Skills", .{ .size = 14, .weight = .semibold });
+            ui.text(c, "Procedures Agent can load from its Skills roots.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            for (store.skills.items) |skill| {
+                const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+                defer r.end();
+                ui.icon(c, "puzzlepiece", .{ .size = 13, .color = theme.agent });
+                ui.text(c, skill.name, .{ .size = 12.5 });
+                ui.spacer(c);
+                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 11.5 }).clicked) {
+                    const name = c.gpa.dupe(u8, skill.name) catch break;
+                    defer c.gpa.free(name);
+                    store.removeSkill(name);
+                    break;
+                }
+            }
+            if (store.skills.items.len == 0) ui.text(c, "No Skills yet.", .{ .size = 11.5, .color = theme.faint });
+            if (kit.collapsible(c, "skill-add", "Add Skill", &store.skill_form_open)) |open| {
+                defer open.end();
+                ui.text(c, "Install a git repository, or start a new Skill from nanoterm's template.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                _ = ui.textField(c, &store.skill_source, .{ .placeholder = "Install from git URL or local path", .width = .fill });
+                if (ui.button(c, "Install Skill", .{ .size = 12 }).clicked) store.installSkill();
+                _ = ui.textField(c, &store.skill_name, .{ .placeholder = "New Skill name", .width = .fill });
+                if (ui.button(c, "Create Skill template", .{ .size = 12 }).clicked) store.createSkill();
+            }
+        }
     }
-    switch (a.state) {
-        .signed_out => if (ui.button(c, "Sign in", .{ .variant = .primary, .size = 12.5 }).clicked) a.signIn(),
-        .starting => {},
-        .waiting => {
-            if (ui.button(c, "Open again", .{ .size = 12 }).clicked) if (a.url) |u| a.open(u);
-            if (ui.button(c, "Cancel", .{ .variant = .ghost, .size = 12 }).clicked) a.cancel();
-        },
-        .signed_in => if (ui.button(c, "Sign out", .{ .size = 12 }).clicked) a.signOut(),
-    }
+    if (store.status.len > 0) ui.text(c, store.status, .{ .size = 11.5, .color = if (store.failed) theme.failure else theme.success });
+}
+
+fn pollMcpTools(w: *Workspace) void {
+    nanoui.App.after(30, w, struct {
+        fn step(context: ?*anyopaque) callconv(.c) void {
+            const workspace: *Workspace = @ptrCast(@alignCast(context));
+            const store = workspace.shared.agent_store orelse return;
+            if (!store.mcpQueryDone()) {
+                nanoui.App.after(30, workspace, step);
+                return;
+            }
+            store.finishMcpQuery();
+            workspace.shared.redraw();
+        }
+    }.step);
+}
+
+fn syncAgentModel(w: *Workspace) void {
+    const s = w.focused();
+    if (s.which != .agent) return;
+    const store = s.shared.agent_store orelse return;
+    @import("assist.zig").chooseModel(s, store.currentModel());
 }
 
 pub fn agentList(c: *ui.Context, w: *Workspace) void {
@@ -126,7 +242,7 @@ pub fn agentList(c: *ui.Context, w: *Workspace) void {
             if (ui.button(c, "Install", .{ .size = 12, .icon = "arrow.down.circle" }).clicked) runInTab(w, info.install);
             continue;
         }
-        if (info.login.len > 0 and info.which != .graff) {
+        if (info.login.len > 0 and info.which != .agent) {
             if (ui.button(c, "Sign in", .{ .variant = .ghost, .size = 12 }).clicked) runInTab(w, info.login);
         }
         if (prefs.agent == info.which) {
@@ -141,8 +257,6 @@ pub fn agentList(c: *ui.Context, w: *Workspace) void {
     }
     ui.text(c, "New tabs start with the default agent; ⌘⇧M switches the one a pane uses.", .{ .size = 11.5, .color = theme.faint });
     b.end();
-    // graff's own sign-ins, as Harness lists them.
-    if (prefs.installed.get(.graff)) @import("view_signins.zig").section(c, w, box);
 }
 
 /// Runs `command` in a new tab (an installer, a sign-in), and closes Settings.

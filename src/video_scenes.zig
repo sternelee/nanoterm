@@ -25,15 +25,12 @@ pub const win = struct {
 pub const at = struct {
     pub const term = 2.6;
     pub const harness = 13.6;
-    pub const graff = 17.4;
+    pub const agent = 17.4;
     pub const bench = 21.0;
     pub const fixes = 25.2;
     pub const end = 27.3;
     pub const done = 30.0;
 };
-
-/// What the Codegraff card offers, under "Or sign in with Codegraff".
-pub const codegraff_offer = "New Google sign-ups get $1 of free credit";
 
 /// Keys shown under the window as they are pressed: from, to, keys, what.
 pub const Caption = struct { f32, f32, []const u8, []const u8 };
@@ -54,10 +51,10 @@ pub const Director = struct {
             scene(c, t, 0, at.term, title, d);
         } else if (t < at.harness) {
             scene(c, t, at.term, at.harness, term, d);
-        } else if (t < at.graff) {
-            scene(c, t, at.harness, at.graff, harness, d);
+        } else if (t < at.agent) {
+            scene(c, t, at.harness, at.agent, harness, d);
         } else if (t < at.bench) {
-            scene(c, t, at.graff, at.bench, graff, d);
+            scene(c, t, at.agent, at.bench, nativeAgent, d);
         } else if (t < at.fixes) {
             scene(c, t, at.bench, at.fixes, bench, d);
         } else if (t < at.end) {
@@ -199,7 +196,7 @@ fn caption(c: *ui.Context, d: *Director) void {
     }
 }
 
-/// Every agent nanoterm runs, with its maker; graff is Codegraff's.
+/// External ACP agents, with their makers; the built-in Agent appears separately.
 fn harness(c: *ui.Context, _: *Director, t: f32) void {
     const agents = @import("agents.zig");
     const marks = @import("marks.zig");
@@ -209,14 +206,14 @@ fn harness(c: *ui.Context, _: *Director, t: f32) void {
     {
         const h = ui.div(c).column().itemsCenter().gap(8);
         defer h.end();
-        ui.text(c, "Bring any harness", .{ .size = 40, .weight = .bold, .color = theme.text });
-        ui.text(c, "The coding agents you already use, with your own subscriptions and keys, in every tab.", .{ .size = 17, .color = theme.muted });
+        ui.text(c, "Built-in Agent, or bring your own", .{ .size = 40, .weight = .bold, .color = theme.text });
+        ui.text(c, "Agent is compiled in. External coding agents connect through ACP with your own subscriptions and keys.", .{ .size = 17, .color = theme.muted });
     }
     {
         const r = ui.div(c).row().gap(12);
         defer r.end();
         for (agents.all, 0..) |info, i| {
-            if (info.which == .graff) continue;
+            if (info.which == .agent) continue;
             const f: f32 = @floatFromInt(i);
             const p = part(t, 0.25 + f * 0.09, 0.45);
             const card = ui.div(c).column().w(146).itemsCenter().gap(10).px(10).py(18).rounded(14).bg(theme.background).border(theme.border).opacity(p).offset(0, (1 - p) * 12);
@@ -234,7 +231,7 @@ fn harness(c: *ui.Context, _: *Director, t: f32) void {
     {
         const card = ui.div(c).row().gap(16).itemsCenter().px(22).py(16).rounded(16).bg(theme.background).border(theme.accent.alpha(0.6)).opacity(p);
         defer card.end();
-        codegraffCard(c, t);
+        agentBuiltinCard(c, t);
     }
     // Agents off: a terminal and nothing else.
     const off = ui.div(c).row().gap(12).itemsCenter().opacity(part(t, 2.2, 0.5));
@@ -248,85 +245,37 @@ fn harness(c: *ui.Context, _: *Director, t: f32) void {
     ui.text(c, "Or turn agents off: just a fast terminal, nothing sent anywhere.", .{ .size = 16, .color = theme.muted });
 }
 
-/// Codegraff's card: its mark, the sign-in, the welcome credit.
-fn codegraffCard(c: *ui.Context, t: f32) void {
+/// Agent is compiled into nanoterm; there is no agent executable to install.
+fn agentBuiltinCard(c: *ui.Context, t: f32) void {
     const marks = @import("marks.zig");
-    _ = ui.image(c, .{ .key = "video-mark-graff", .bytes = marks.agent(.graff), .max_width = 34, .max_height = 34, .radius = 0, .tint = theme.accent });
+    _ = ui.image(c, .{ .key = "video-mark-agent", .bytes = marks.agent(.agent), .max_width = 34, .max_height = 34, .radius = 0, .tint = theme.accent });
     {
         const words = ui.div(c).column().gap(3);
         defer words.end();
-        ui.text(c, "Or sign in with Codegraff", .{ .size = 18, .weight = .semibold, .color = theme.text });
-        ui.text(c, codegraff_offer, .{ .size = 14, .color = theme.muted });
+        ui.text(c, "Agent is built in", .{ .size = 18, .weight = .semibold, .color = theme.text });
+        ui.text(c, "Native tools, custom providers, MCP and Skills", .{ .size = 14, .color = theme.muted });
     }
     const badge = ui.div(c).px(14).py(7).roundedFull().bg(theme.accent).opacity(part(t, 1.6, 0.4));
     defer badge.end();
-    ui.text(c, "$1 free", .{ .size = 16, .weight = .bold, .color = theme.on_accent });
+    ui.text(c, "Native", .{ .size = 16, .weight = .bold, .color = theme.on_accent });
 }
 
-/// graff, Codegraff's own agent, against other harnesses on the same model,
-/// tasks and machine (codegraff's evals/, measured 2026-10-01): seconds per
-/// task over 21 tasks, 3 runs each; every arm passed every run.
-const graff_runs = [_]struct { []const u8, f32, bool }{
-    .{ "graff", 8.7, true },
-    .{ "Claude Code", 13.2, false },
-    .{ "OpenCode 2", 14.1, false },
-};
-
-fn graff(c: *ui.Context, _: *Director, t: f32) void {
-    const col = ui.div(c).column().sizeFull().px(150).py(56).gap(20).justifyCenter();
+fn nativeAgent(c: *ui.Context, _: *Director, t: f32) void {
+    const col = ui.div(c).column().sizeFull().px(150).py(56).gap(24).justifyCenter();
     defer col.end();
-    {
-        const h = ui.div(c).column().gap(8);
-        defer h.end();
-        ui.text(c, "And graff, Codegraff's own agent, is quick", .{ .size = 38, .weight = .bold, .color = theme.text });
-        ui.text(c, "Same model, same tasks, same machine. Every harness passed every run.", .{ .size = 16, .color = theme.muted });
-    }
-    {
-        const r = ui.div(c).row().gap(28).itemsStart();
-        defer r.end();
-        graffCharts(c, t);
-    }
-    const note = ui.div(c).opacity(part(t, 1.6, 0.5));
-    defer note.end();
-    ui.text(c, "Codegraff's evals, measured 2026-10-01, 2-3 runs per task. On plain coding tasks alone, Claude Code and pi were a little faster; the lead is on tool-heavy (MCP) and sub-agent tasks.", .{ .size = 12.5, .color = theme.muted, .wrap = true });
-}
-
-/// Seconds per task beside the two headline differences.
-fn graffCharts(c: *ui.Context, t: f32) void {
-    {
-        // Seconds per task: shorter is better.
-        const left = ui.div(c).column().w(560).gap(10);
-        defer left.end();
-        ui.text(c, "Seconds per task, 21 tasks", .{ .size = 14, .weight = .semibold, .color = theme.muted });
-        for (graff_runs, 0..) |run, i| {
-            const f: f32 = @floatFromInt(i);
-            const grow = part(t, 0.3 + f * 0.12, 0.7);
-            const row = ui.div(c).row().gap(12).itemsCenter();
-            defer row.end();
-            {
-                const name = ui.div(c).w(120);
-                defer name.end();
-                ui.text(c, run[0], .{ .size = 15, .weight = if (run[2]) .bold else .medium, .color = if (run[2]) theme.text else theme.muted });
-            }
-            const b = ui.div(c).w(@max(3, 330 * run[1] / 14.1 * grow)).h(16).rounded(4).bg(if (run[2]) theme.accent else theme.faint);
-            b.end();
-            ui.text(c, c.print("{d:.1}s", .{run[1] * grow}), .{ .size = 14, .mono = true, .weight = if (run[2]) .bold else .regular, .color = if (run[2]) theme.text else theme.muted });
-        }
-    }
-    {
-        const right = ui.div(c).column().w(380).gap(12);
-        defer right.end();
-        const stats = [_]struct { []const u8, []const u8 }{
-            .{ "34% faster", "than Claude Code per task" },
-            .{ "up to 73% less", "list cost than the Codex app server" },
-        };
-        for (stats, 0..) |st, i| {
-            const f: f32 = @floatFromInt(i);
-            const card = ui.div(c).column().gap(4).px(20).py(14).rounded(14).bg(theme.background).border(theme.border).opacity(part(t, 0.9 + f * 0.25, 0.4));
-            defer card.end();
-            ui.text(c, st[0], .{ .size = 30, .weight = .bold, .color = theme.accent });
-            ui.text(c, st[1], .{ .size = 14, .color = theme.muted });
-        }
+    ui.text(c, "Agent, compiled right into nanoterm", .{ .size = 38, .weight = .bold, .color = theme.text });
+    ui.text(c, "The same Zig Agent runtime, tools and sessions — not an ACP subprocess.", .{ .size = 16, .color = theme.muted });
+    const features = [_]struct { []const u8, []const u8 }{
+        .{ "Native tools", "Read, edit, search, shell and web" },
+        .{ "Your provider", "Vercel AI Gateway or OpenAI-compatible endpoints" },
+        .{ "MCP + Skills", "Manage servers and reusable instructions in Settings" },
+    };
+    for (features, 0..) |feature, i| {
+        const f: f32 = @floatFromInt(i);
+        const card = ui.div(c).column().gap(4).px(20).py(14).rounded(14).bg(theme.background).border(theme.border).opacity(part(t, 0.3 + f * 0.25, 0.4));
+        defer card.end();
+        ui.text(c, feature[0], .{ .size = 24, .weight = .bold, .color = theme.accent });
+        ui.text(c, feature[1], .{ .size = 15, .color = theme.muted });
     }
 }
 

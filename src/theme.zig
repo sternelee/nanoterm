@@ -1,5 +1,5 @@
-//! nanoterm's look: Harness's default palettes, Codegraff Dark and
-//! Codegraff Light (warm neutrals, an amber accent), with its roles derived
+//! nanoterm's look: Harness's default palettes, CodeGraff Dark and
+//! CodeGraff Light (warm neutrals, an amber accent), with its roles derived
 //! as Harness derives them (hover and borders from white or black, the
 //! selection from the accent). `apply` switches the palette; the view
 //! hands nanoui the result every frame.

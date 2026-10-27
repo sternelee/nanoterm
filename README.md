@@ -1,17 +1,17 @@
 <p align="center">
-  <img src="docs/images/agent-light.png" alt="nanoterm in Codegraff Light: graff's turn folded into a summary, with a native visual" width="760">
+  <img src="docs/images/agent-light.png" alt="nanoterm in CodeGraff Light: Agent's turn folded into a summary, with a native visual" width="760">
 </p>
 
 <h1 align="center">nanoterm</h1>
 
 <p align="center">A terminal of blocks with a coding agent beside you, drawn on the GPU.</p>
 
-<p align="center">Built on <a href="https://github.com/justrach/nanoui"><strong>nanoui</strong></a>. The agent speaks ACP, as in <a href="https://github.com/justrach/harness">Harness</a>: graff or Claude Code.</p>
+<p align="center">Built on <a href="https://github.com/justrach/nanoui"><strong>nanoui</strong></a>, with <a href="https://fx.sh/">fx(040d5bbbf214e35fdcdfc4e365773bae09a5eb23)</a> compiled in as <strong>Agent</strong>. Claude Code and other external agents connect over ACP.</p>
 
 <p align="center">
   <img alt="macOS · Linux" src="https://img.shields.io/badge/macOS%20·%20Linux-555">
-  <img alt="Agents over ACP" src="https://img.shields.io/badge/agents-ACP-8a6bd1">
-  <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-0-44cc11">
+  <img alt="Built-in Agent and ACP agents" src="https://img.shields.io/badge/agents-built--in%20Agent%20%2B%20ACP-8a6bd1">
+  <img alt="Agent built in" src="https://img.shields.io/badge/Agent-built%20in-44cc11">
   <img alt="Built in Zig 0.17" src="https://img.shields.io/badge/built%20in-Zig%200.17-f7a41d?logo=zig&logoColor=white">
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
@@ -20,7 +20,7 @@
   <a href="#download">Download</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#blocks">Blocks</a> ·
-  <a href="#the-agent">The agent</a> ·
+  <a href="#agent">Agent</a> ·
   <a href="#visuals">Visuals</a> ·
   <a href="#ssh">SSH</a> ·
   <a href="#keys">Keys</a> ·
@@ -56,15 +56,22 @@ or [arm64](https://github.com/justrach/nanoterm/releases/latest/download/nanoter
 ## Get started
 
 nanoterm builds on its own. It fetches nanoui, pinned by commit in
-`build.zig.zon`:
+`build.zig.zon`, and checks out the built-in Agent's fx core as the
+`vendor/fx` submodule:
 
 ```sh
-git clone https://github.com/justrach/nanoterm
+git clone --recurse-submodules https://github.com/justrach/nanoterm
 cd nanoterm
+# Already cloned? git submodule update --init vendor/fx
 zig build run
 zig build run -- --cwd ~/code/app --run "git status" --agent claude --ask "What changed?"
-zig build test        # VT, zsh blocks, ACP fakes, the classifier, Jev, Luau and visuals, the view through ui.Tester
+zig build test        # VT, zsh blocks, ACP fakes, Agent config, the classifier, Luau and visuals
 ```
+
+The build applies `patches/fx/nanoterm-embed.patch` to the pristine
+submodule automatically. To move fx to the latest upstream main and reapply
+that patch, run `scripts/update-fx.sh`, then build and commit the updated
+submodule pointer and patch.
 
 Working on nanoui at the same time? In a `--recursive` clone of
 [nanoui](https://github.com/justrach/nanoui), nanoterm lives under `apps/`.
@@ -77,8 +84,8 @@ zig build run --fork=../..
 ```
 
 <p align="center">
-  <img src="docs/images/palette-dark.png" width="760" alt="The ⌘P launcher in Codegraff Dark: sessions, history, actions and commands">
-  <br><sub>The ⌘P launcher in Codegraff Dark. Synthetic example sessions.</sub>
+  <img src="docs/images/palette-dark.png" width="760" alt="The ⌘P launcher in CodeGraff Dark: sessions, history, actions and commands">
+  <br><sub>The ⌘P launcher in CodeGraff Dark. Synthetic example sessions.</sub>
 </p>
 
 ## Blocks
@@ -110,38 +117,32 @@ program leaves its screen, or ends, the pane shows the blocks again.
 ## One input, commands or requests
 
 As in Warp, there is one input. nanoterm tells a command from a request
-as you type, Warp's way: rules first (a program on your PATH with flags,
-pipes or paths is a command; a sentence of everyday English is a request;
-a trailing `?` asks), and when the rules are not sure, Codegraff's **Jev**
-decides — one "choice" question about a redacted copy of the text (no
-paths, code, values, ids or long tokens), sent once typing pauses, with
-your `graff login`. A pill before the input shows where Return goes and
-why (`auto`, `jev`, or `locked` after ⌘I or a click); Esc on an empty
-input goes back to detecting. A failed Jev call turns it off for the
-session; `NANOTERM_JEV=0` turns it off entirely. Each Jev call is billed
-to your Codegraff account like graff's own.
+as you type, Warp's way: local rules decide whether the text is a command
+(a program on your PATH with flags, pipes or paths), a request (everyday
+English or a trailing `?`), or needs your choice. A pill before the input
+shows where Return goes and why (`auto`, `choice`, or `locked` after ⌘I
+or a click); Esc on an empty input goes back to detecting. Classification
+stays on this machine and does not use a model or an account.
 
 - **Suggestions**: the latest matching command from your history (zsh's,
   read only, then nanoterm's own in `~/Library/Application Support/nanoterm/history`)
   is drawn faintly after the caret; → or Tab takes it.
 - **Completion**: Tab completes commands, files and folders, git
   subcommands and branches; several candidates open a menu (↑↓, Tab or ↩).
-- **Slash commands**: in agent mode, `/` lists the agent's own commands
-  (ACP's `available_commands_update`) with what each does.
+- **Slash commands**: for an external ACP agent, `/` lists its commands
+  (`available_commands_update`) with what each does.
 - **Agent and model**: the chip at the right of the input (or ⌘⇧M) picks
-  the agent and its model, searchable: the agent's ACP config options
-  (Claude Code's models and modes, graff's thought level), and for graff
-  its live catalog (`graff models`). Choosing a graff model before a
-  conversation starts it with `--model`; during one, it sends `/model`,
-  which graff also saves as its default.
+  the agent and its model. External agents expose their ACP config options;
+  for Agent, enter a model or configure providers in Settings. Model
+  changes apply to the next Agent turn without restarting the app.
 - **Blocks**: a failed command offers **Fix with …** and **Explain**;
   hovering a block offers run again, ask the agent about it (it goes with
   your next prompt as context, shown as a chip), and copy. ⌘↑ ⌘↓ select
   blocks.
 - **Pictures**: ⌘V with an image (a screenshot, image files copied in
   Finder) or the paperclip attaches it; chips above the input show what
-  goes with the next prompt (✕ leaves one out), sent as ACP image blocks
-  when the agent takes them.
+  goes with the next prompt (✕ leaves one out), sent as native Agent image
+  attachments or ACP image blocks when the selected agent takes them.
 - **Markdown files**: `cat README.md` draws the file as Markdown; hovering
   the block offers **Raw** to see it as text.
 - **Palette**: ⌘P is a launcher: one search over your open sessions, the
@@ -160,7 +161,7 @@ stop square while something runs); where you are and the keys sit
 quietly under it. Agents' answers show the local pictures they link
 (`![alt](/path/shot.png)`) inline, captioned; a click opens one.
 
-The colors are Harness's: Codegraff Dark and Codegraff Light, warm
+The colors are Harness's: CodeGraff Dark and CodeGraff Light, warm
 neutrals with an amber accent, following the system's appearance until
 you choose one in the palette (⌘P, "light mode", "dark mode"); the choice
 is kept for the next launch.
@@ -168,27 +169,23 @@ is kept for the next launch.
 Text is set in **Geist** and code and output in **JetBrains Mono**, when
 they are installed (else SF Pro and SF Mono). Agents' answers are
 Markdown, drawn as such: headings, airy paragraphs with **bold**,
-*italics*, `inline code` and links in place, bullet, numbered and task
+_italics_, `inline code` and links in place, bullet, numbered and task
 lists, quotes, tables, and code blocks with their language, syntax colors
 and a Copy button. Each turn shows your question and the agent's answer
 under their own avatars.
 
-## The agent
+## Agent
 
-The agent is **graff** (`graff acp --yolo`) or
-**Claude Code** (its ACP adapter `claude-agent-acp`: Zed's install, else
-`npx -y @zed-industries/claude-agent-acp`).
+**Agent is built in**: the agent runtime, native tools, sessions,
+providers, MCP host and Skills are compiled into nanoterm. It does not
+launch `fx acp` or `fx ask`, and needs no fx executable, Node.js or libfx.
+The Settings page manages custom
+OpenAI-compatible providers, stdio/HTTP MCP servers and Skills in expandable
+panels; every configured MCP server can list the tools it actually exposes.
+Everything lives in Agent's own configuration files in `~/.fx`.
 
-graff is kept current as Harness keeps it: nanoterm keeps its own copy
-(`~/Library/Application Support/nanoterm/bin/graff`) and replaces it from
-codegraff's latest stable release, after checking it against the release's
-`SHA256SUMS` and running it, shortly after launch, hourly, and when a graff
-session starts. Sessions run the newest graff there is, on PATH or this copy,
-and a card says when it was updated, with what's new. `GRAFF_EXECUTABLE`
-runs your own graff instead and leaves it alone;
-`NANOTERM_GRAFF_AUTO_UPDATE=0` turns updates off.
-
-nanoterm is the ACP client:
+**Claude Code, Codex, opencode, Grok, Devin and Hermes** remain available
+as external ACP agents. For those, nanoterm is the ACP client:
 
 - `initialize` with the file system and terminal capabilities, `session/new`
   in the shell's directory, `session/prompt`, `session/cancel` (⌃C, Esc);
@@ -205,7 +202,8 @@ nanoterm is the ACP client:
 As in Harness, an agent can answer with something you can use instead of
 a paragraph: a small interactive visual in its turn (compare plans, move a
 slider, see the trade-off). nanoterm gives every agent its own MCP server
-through ACP's `mcpServers` (`nanoterm --mcp SOCKET TOKEN`), offering one
+(`nanoterm --mcp SOCKET TOKEN`): external agents through ACP's `mcpServers`,
+and Agent as a host-issued stdio server, offering one
 tool, `show_visual`, with Harness's title, script and rules, so the same
 scripts work in both. The script is Luau: it keeps state in locals and
 returns a render function that builds `ui.column`, `row`, `text`, `stat`,
@@ -275,30 +273,30 @@ and each platform gets its own, in the menus, the keys and the labels shown.
 
 ## Keys
 
-| macOS | Linux | |
-|---|---|---|
-| Return | Return | run, or send to the agent (the pill says which) |
-| ⌘I | Ctrl+Shift+I | shell ⇄ agent, chosen until Esc on an empty input |
-| → / Tab | → / Tab | take the suggestion; Tab completes |
-| ⌘P | Ctrl+Shift+P | command palette |
-| ⌘⇧M | Ctrl+Shift+M | agent and model |
-| ⌘F | Ctrl+Shift+F | find in the pane's blocks |
-| ⌘= ⌘- ⌘0 | Ctrl+= Ctrl+- Ctrl+0 | bigger, smaller, actual size |
-| ⌘↑ ⌘↓ | Ctrl+Shift+↑ ↓ | select the previous / next block |
-| ⌘D / ⌘⇧D | Ctrl+Shift+O / E | split right / down |
-| ⌘] / ⌘[ | Ctrl+Shift+] / [ | next / previous pane |
-| ⌘⌥ arrows | Ctrl+Alt+arrows | the pane in that direction |
-| ⌘⌃ arrows | Ctrl+Shift+Alt+arrows | move the divider |
-| ⌘⌃= | Ctrl+Shift+Alt+= | equalize the panes |
-| ⌘⇧↩ | Ctrl+Shift+Enter | zoom the pane |
-| ⌘W | Ctrl+Shift+W | close the pane (asks if a command runs); the last closes the tab |
-| ⌘T | Ctrl+Shift+T | new tab |
-| ⌘⇧] ⌘⇧[, ⌘1…⌘9 | Ctrl+PageDown/Up, Alt+1…9 | next / previous tab, tab n |
-| ⌘K | Ctrl+Shift+K | clear the blocks |
-| ⌃C | Ctrl+C | stop the command or the agent's turn |
-| ↑ ↓ | ↑ ↓ | history |
+| macOS          | Linux                     |                                                                  |
+| -------------- | ------------------------- | ---------------------------------------------------------------- |
+| Return         | Return                    | run, or send to the agent (the pill says which)                  |
+| ⌘I             | Ctrl+Shift+I              | shell ⇄ agent, chosen until Esc on an empty input                |
+| → / Tab        | → / Tab                   | take the suggestion; Tab completes                               |
+| ⌘P             | Ctrl+Shift+P              | command palette                                                  |
+| ⌘⇧M            | Ctrl+Shift+M              | agent and model                                                  |
+| ⌘F             | Ctrl+Shift+F              | find in the pane's blocks                                        |
+| ⌘= ⌘- ⌘0       | Ctrl+= Ctrl+- Ctrl+0      | bigger, smaller, actual size                                     |
+| ⌘↑ ⌘↓          | Ctrl+Shift+↑ ↓            | select the previous / next block                                 |
+| ⌘D / ⌘⇧D       | Ctrl+Shift+O / E          | split right / down                                               |
+| ⌘] / ⌘[        | Ctrl+Shift+] / [          | next / previous pane                                             |
+| ⌘⌥ arrows      | Ctrl+Alt+arrows           | the pane in that direction                                       |
+| ⌘⌃ arrows      | Ctrl+Shift+Alt+arrows     | move the divider                                                 |
+| ⌘⌃=            | Ctrl+Shift+Alt+=          | equalize the panes                                               |
+| ⌘⇧↩            | Ctrl+Shift+Enter          | zoom the pane                                                    |
+| ⌘W             | Ctrl+Shift+W              | close the pane (asks if a command runs); the last closes the tab |
+| ⌘T             | Ctrl+Shift+T              | new tab                                                          |
+| ⌘⇧] ⌘⇧[, ⌘1…⌘9 | Ctrl+PageDown/Up, Alt+1…9 | next / previous tab, tab n                                       |
+| ⌘K             | Ctrl+Shift+K              | clear the blocks                                                 |
+| ⌃C             | Ctrl+C                    | stop the command or the agent's turn                             |
+| ↑ ↓            | ↑ ↓                       | history                                                          |
 
-Launch options: `--cwd DIR`, `--run CMD` (repeat), `--agent graff|claude`,
+Launch options: `--cwd DIR`, `--run CMD` (repeat), `--agent agent|claude`,
 `--ask PROMPT`, `--split right|down` (repeat).
 
 From a shell, [`tools/nt`](tools/nt) (copy it to `~/.local/bin`) opens a
@@ -308,10 +306,10 @@ it, Markdown drawn as Markdown. Files opened with nanoterm from the Finder
 
 ## License
 
-nanoterm's own code is licensed under the [MIT License](LICENSE). The parts derived
-from CodeGraff (its colors, and the graff features, which work only with graff)
-keep CodeGraff's original **modified AGPLv3**, kept verbatim in
-[`third_party/licenses`](third_party/licenses/CodeGraff-LICENSE.txt); see
+nanoterm's own code is licensed under the [MIT License](LICENSE). The vendored
+fx source keeps its **Apache-2.0** license. The palettes and UI parts derived
+from CodeGraff/Harness keep their original **modified AGPLv3**, kept verbatim
+in [`third_party/licenses`](third_party/licenses/CodeGraff-LICENSE.txt); see
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Credits
@@ -325,8 +323,10 @@ keep CodeGraff's original **modified AGPLv3**, kept verbatim in
 - **[Warp](https://www.warp.dev):** commands as blocks, and one input for
   commands and requests.
 - **[Ghostty](https://ghostty.org):** splits, tabs and their keys.
-- **[Harness](https://github.com/justrach/harness):** the Codegraff colors, the
+- **[fx](https://fx.sh/):** the built-in Zig Agent runtime, native tools,
+  providers, MCP and Skills, from Vercel Labs (Apache-2.0).
+- **[Harness](https://github.com/justrach/harness):** the CodeGraff colors, the
   composer, turns folded into a summary, and native visuals from Luau
-  (`show_visual`). nanoterm talks to agents over ACP the way Harness does.
+  (`show_visual`). External agents use ACP the way Harness does.
 
 <p align="center"><sub>Built in Zig 0.17 on <a href="https://github.com/justrach/nanoui">nanoui</a> · <a href="LICENSE">MIT</a> · <a href="THIRD_PARTY_NOTICES.md">third-party notices</a></sub></p>

@@ -1,7 +1,7 @@
 //! A pane's input, as Warp's: chips for where you are (folder, branch,
 //! what runs, the block given as context) and the agent and model (click
 //! to choose), then one input that knows commands from requests — a pill
-//! shows which it took, and why (auto, Jev, or chosen) — with the history's
+//! shows which it took, and why (auto or chosen) — with the history's
 //! suggestion drawn after the caret and a completion menu above it.
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -186,8 +186,8 @@ fn modePill(c: *ui.Context, s: *Session) void {
     const input_only = s.shell.busy() and !s.shell.remoteReady();
     if (d.clicked() and !input_only) s.toggleMode();
     if (agent) ui.icon(c, "sparkles", .{ .size = 11, .color = color }) else ui.text(c, "❯", .{ .size = 13, .weight = .bold, .color = color, .mono = true });
-    ui.text(c, if (input_only) "input" else if (agent) "agent" else if (s.shell.remoteReady()) s.shell.remote.?.host else "shell", .{ .size = 11, .weight = .semibold, .color = color });
-    const why: []const u8 = if (input_only or s.input.len == 0 and s.lock == null) "" else if (s.lock != null) "locked" else if (s.decidedByJev()) "jev" else "auto";
+    ui.text(c, if (input_only) "input" else if (agent) "Agent" else if (s.shell.remoteReady()) s.shell.remote.?.host else "shell", .{ .size = 11, .weight = .semibold, .color = color });
+    const why: []const u8 = if (input_only or s.input.len == 0 and s.lock == null) "" else if (s.lock != null) "locked" else "auto";
     if (why.len > 0) ui.text(c, why, .{ .size = 9.5, .color = color.alpha(0.7) });
 }
 

@@ -71,18 +71,18 @@ pub fn ask(s: *Session, text: []const u8) void {
 pub fn modelLabel(s: *Session) []const u8 {
     if (s.agent) |ag| if (ag.config.find("model")) |o| return o.currentName();
     if (s.model_choice) |m| return m;
-    if (s.which == .graff and s.shared.graff_model.len > 0) return s.shared.graff_model;
+    if (s.which == .agent) if (s.shared.agent_store) |store| if (store.currentModel().len > 0) return store.currentModel();
     return "default model";
 }
 
-/// Chooses `value` as the model: an agent's own model option when it has
-/// one; for graff, its `/model` command in a conversation, else `--model`
-/// for its next start.
+/// Chooses `value` as the model: native agent applies it to the next turn;
+/// external agents use their own model option or restart as needed.
 pub fn chooseModel(s: *Session, value: []const u8) void {
     if (s.agent) |ag| if (ag.config.find("model")) |o| return ag.setOption(o.id, value);
     if (s.model_choice) |m| s.gpa.free(m);
     s.model_choice = s.gpa.dupe(u8, value) catch null;
     if (s.agent) |ag| {
+        if (s.which == .agent) return ag.setOption("model", value);
         if (ag.turns.items.len > 0 and ag.session != null and ag.config.hasCommand("model")) {
             var buf: [256]u8 = undefined;
             const cmd = std.fmt.bufPrint(&buf, "/model {s}", .{value}) catch return;
@@ -99,7 +99,6 @@ pub fn chooseModel(s: *Session, value: []const u8) void {
 /// Opens the agent so the picker can show what it offers.
 pub fn prepareModels(s: *Session) void {
     _ = s.ensureAgent();
-    if (s.which == .graff) s.shared.loadCatalog();
 }
 
 // Completion.

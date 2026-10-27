@@ -1,7 +1,8 @@
 //! nanoterm: a terminal of blocks with a coding agent, in the manner of
-//! Warp, with Ghostty's splits and tabs, built on nanoui. Agents speak
-//! ACP, as in Harness.
+//! Warp, with Ghostty's splits and tabs, built on nanoui. Agent is compiled
+//! in natively; other agents speak ACP, as in Harness.
 const std = @import("std");
+const engine = @import("fx");
 const nanoui = @import("nanoui");
 const session_mod = @import("session.zig");
 const ws_mod = @import("workspace.zig");
@@ -34,6 +35,11 @@ fn updateReady(ctx: *anyopaque) void {
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // Native agent tools re-execute this binary for their private helpers.
+    if (try engine.runInternal(init)) return;
+    // Native agent reads HOME, PATH and provider credentials through its shared
+    // environment host in the GUI process too (not only in helper mode).
+    engine.shared_io.setEnvironMap(init.environ_map);
     // Its version, as the updater checks a downloaded one.
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         var buf: [64]u8 = undefined;
@@ -62,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
     var acts: actions.Actions = .{ .w = &w };
     try actions.install(app, &acts);
 
-    // nanoterm --cwd DIR --run "cmd" … --ask "prompt" --agent graff|claude
+    // nanoterm --cwd DIR --run "cmd" … --ask "prompt" --agent agent|claude
     //          --split right|down … (more panes, in the same directory)
     var start_dir: []const u8 = shared.home;
     var runs: std.ArrayList([]const u8) = .empty;
@@ -115,18 +121,6 @@ pub fn main(init: std.process.Init) !void {
         .changed = .{ .ctx = &shared, .func = updateReady },
     });
     defer w.updater.?.deinit();
-    // graff kept current, as Harness keeps it: where nanoterm updates
-    // itself (an installed app), and on Linux.
-    const graff_update = @import("graff_update.zig");
-    if (w.updater.?.phase.load(.acquire) != .off or @import("builtin").os.tag == .linux) {
-        const search = @import("agents.zig").searchPath(init.arena.allocator(), init.environ_map.get("PATH") orelse "", init.environ_map.get("HOME") orelse "/");
-        graff_update.global = try graff_update.Updater.create(init.gpa, init.io, init.environ_map, search);
-    }
-    if (graff_update.global) |g| {
-        g.changed = .{ .ctx = &shared, .func = updateReady };
-        g.start();
-    }
-    defer if (graff_update.global) |g| g.destroy();
     if (w.updater.?.current.len > 0) shared.prefs.telemetry.version = w.updater.?.current;
     shared.prefs.track("app_open", .{});
     // The first launch: a few choices before anything else.

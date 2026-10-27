@@ -86,7 +86,7 @@ fn cues(io: std.Io) !void {
     };
     try o.print("answer {d:.3}\n", .{answer_to});
     const at = scenes.at;
-    for ([_]f32{ at.term, at.harness, at.graff, at.bench, at.fixes, at.end }) |cut| try o.print("cut {d:.3}\n", .{cut});
+    for ([_]f32{ at.term, at.harness, at.agent, at.bench, at.fixes, at.end }) |cut| try o.print("cut {d:.3}\n", .{cut});
     try o.flush();
 }
 
@@ -173,7 +173,7 @@ const Script = struct {
     fn ask(sc: *Script) void {
         sc.done();
         const turn = sc.gpa.create(agent_mod.Turn) catch return;
-        turn.* = .{ .prompt = sc.gpa.dupe(u8, data.question) catch return, .agent = .graff, .started = 2000, .sent = true };
+        turn.* = .{ .prompt = sc.gpa.dupe(u8, data.question) catch return, .agent = .agent, .started = 2000, .sent = true };
         turn.items.append(sc.gpa, .{ .text = .empty }) catch {};
         sc.turn = turn;
         sc.s.timeline.append(sc.gpa, .{ .turn = turn }) catch {};
