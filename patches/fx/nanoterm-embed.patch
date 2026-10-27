@@ -80,6 +80,85 @@ index dbd510f8..c89c60e8 100644
  /// Each diagnostic in a sentence, owned by `alloc`.
  fn renderNotes(alloc: Allocator, diagnostics: []const project_config.WorkspaceDiagnostic) ![]const []const u8 {
      const notes = try alloc.alloc([]const u8, diagnostics.len);
+diff --git a/src/builtins/skills.zig b/src/builtins/skills.zig
+index eab73bd6..04989e45 100644
+--- a/src/builtins/skills.zig
++++ b/src/builtins/skills.zig
+@@ -13,26 +13,18 @@ const Allocator = std.mem.Allocator;
+ const RootSpec = skill_contract.RootSpec;
+ 
+ /// Roots scanned at the workspace root and each ancestor directory below
+-/// home, in precedence order. `.fx/skills` and `skills/` belong to the product;
+-/// the rest are compatibility roots for other agent installs.
++/// home, in precedence order. `.fx/skills` and `skills/` belong to the product.
++/// nanoterm's embedding patch trims the compatibility roots for other agent
++/// installs (opencode, codex, claude, agents, claw): its agent sees only the
++/// product's own skills.
+ const workspace_roots = [_]RootSpec{
+     .{ .source = .workspace_fx, .path = ".fx/skills" },
+     .{ .source = .workspace_shared, .path = "skills" },
+-    .{ .source = .workspace_opencode, .path = ".opencode/skills" },
+-    .{ .source = .workspace_codex, .path = ".codex/skills" },
+-    .{ .source = .workspace_claude, .path = ".claude/skills" },
+-    .{ .source = .workspace_agents, .path = ".agents/skills" },
+-    .{ .source = .workspace_claw, .path = ".claw/skills" },
+ };
+ 
+-/// Home-relative compatibility roots scanned after the managed install root.
+-const global_roots = [_]RootSpec{
+-    .{ .source = .global_opencode, .path = ".config/opencode/skills" },
+-    .{ .source = .global_codex, .path = ".codex/skills" },
+-    .{ .source = .global_claude, .path = ".claude/skills" },
+-    .{ .source = .global_agents, .path = ".agents/skills" },
+-    .{ .source = .global_claw, .path = ".claw/skills" },
+-};
++/// None for nanoterm's embedded agent: skills install into the managed root
++/// (`~/.fx/skills`, `managed_root_source`) and nowhere else is scanned.
++const global_roots = [_]RootSpec{};
+ 
+ pub const root_policy: skill_contract.RootPolicy = .{
+     .workspace_roots = &workspace_roots,
+@@ -1171,15 +1163,10 @@ test "copySkillDir preserves the installed skill across allocation failures" {
+     }
+ }
+ 
+-test "workspace skill roots scan the product root before compatibility roots" {
++test "workspace skill roots scan the product root only" {
+     const expected = [_]RootSpec{
+         .{ .source = .workspace_fx, .path = ".fx/skills" },
+         .{ .source = .workspace_shared, .path = "skills" },
+-        .{ .source = .workspace_opencode, .path = ".opencode/skills" },
+-        .{ .source = .workspace_codex, .path = ".codex/skills" },
+-        .{ .source = .workspace_claude, .path = ".claude/skills" },
+-        .{ .source = .workspace_agents, .path = ".agents/skills" },
+-        .{ .source = .workspace_claw, .path = ".claw/skills" },
+     };
+ 
+     try std.testing.expectEqual(expected.len, workspace_roots.len);
+@@ -1194,20 +1181,9 @@ test "workspace skill roots scan the product root before compatibility roots" {
+ }
+ 
+ test "global skill roots cover compatibility installs only" {
+-    const expected = [_]RootSpec{
+-        .{ .source = .global_opencode, .path = ".config/opencode/skills" },
+-        .{ .source = .global_codex, .path = ".codex/skills" },
+-        .{ .source = .global_claude, .path = ".claude/skills" },
+-        .{ .source = .global_agents, .path = ".agents/skills" },
+-        .{ .source = .global_claw, .path = ".claw/skills" },
+-    };
+-
+-    try std.testing.expectEqual(expected.len, global_roots.len);
+-    for (expected, global_roots) |exp, actual| {
+-        try std.testing.expectEqual(exp.source, actual.source);
+-        try std.testing.expectEqualStrings(exp.path, actual.path);
+-    }
+-
++    // nanoterm's embedded agent scans no compatibility root: the managed
++    // install root (`managed_root_source`) is the only home-relative root.
++    try std.testing.expectEqual(@as(usize, 0), global_roots.len);
+     for (global_roots) |spec| {
+         try std.testing.expect(spec.source != .global_fx);
+     }
 diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
 index 78e530a8..bb769108 100644
 --- a/src/core/cli/cli_ask.zig

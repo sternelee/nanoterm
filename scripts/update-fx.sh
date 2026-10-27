@@ -16,6 +16,7 @@ fi
 
 expected=(
     src/builtins/mcp.zig
+    src/builtins/skills.zig
     src/core/cli/cli_ask.zig
     src/core/config/config_runtime.zig
     src/core/config/settings_store.zig

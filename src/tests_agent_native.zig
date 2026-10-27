@@ -32,6 +32,21 @@ const Capture = struct {
     }
 };
 
+test "the embedded agent scans only fx's own skill roots" {
+    // nanoterm's patch trims the compatibility roots for other agent installs
+    // (opencode, codex, claude, agents, claw): the agent sees workspace
+    // `.fx/skills` and `skills/`, and the managed `~/.fx/skills`, nothing else.
+    const policy = engine.skills.root_policy;
+    try std.testing.expectEqual(@as(usize, 2), policy.workspace_roots.len);
+    for (policy.workspace_roots) |spec| {
+        const native = spec.source == .workspace_fx or spec.source == .workspace_shared;
+        try std.testing.expect(native);
+    }
+    try std.testing.expectEqual(@as(usize, 0), policy.global_roots.len);
+    const managed = policy.managed_root_source orelse return error.NoManagedRoot;
+    try std.testing.expectEqual(@intFromEnum(managed), @intFromEnum(@TypeOf(managed).global_fx));
+}
+
 test "native agent answers through an OpenAI-compatible provider (opt-in)" {
     const gpa = std.testing.allocator;
     const base_url = std.testing.environ.getAlloc(gpa, "NANOTERM_AGENT_SMOKE_URL") catch return error.SkipZigTest;
