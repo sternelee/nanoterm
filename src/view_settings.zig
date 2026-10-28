@@ -266,6 +266,33 @@ pub fn runInTab(w: *Workspace, command: []const u8) void {
     w.closeOverlay();
 }
 
+fn indexOfString(options: [][]const u8, want: []const u8) ?usize {
+    for (options, 0..) |option, i| if (std.mem.eql(u8, option, want)) return i;
+    return null;
+}
+
+/// What the select shows a family as: the whole name while it fits, else
+/// as much as does with an ellipsis, so no long family overflows the list.
+pub fn fontOptionLabel(c: *ui.Context, name: []const u8) []const u8 {
+    const max: f32 = 200;
+    const style = ui.TextStyle{ .size = 13 };
+    if (c.text.width(name, style) <= max) return name;
+    const ellipsis = "…";
+    var end = name.len;
+    while (end > 0) {
+        while (end > 0 and (name[end - 1] & 0xc0) == 0x80) end -= 1;
+        if (c.text.width(name[0..end], style) + c.text.width(ellipsis, style) <= max) return c.print("{s}{s}", .{ name[0..end], ellipsis });
+        end -= 1;
+    }
+    return ellipsis;
+}
+
+fn fontOptionLabels(c: *ui.Context, options: [][]const u8) [][]const u8 {
+    const labels = c.alloc().alloc([]const u8, options.len) catch return options;
+    for (options, 0..) |option, i| labels[i] = fontOptionLabel(c, option);
+    return labels;
+}
+
 fn look(c: *ui.Context, w: *Workspace) void {
     const s = section(c, "Appearance");
     defer s.end();
@@ -280,6 +307,31 @@ fn look(c: *ui.Context, w: *Workspace) void {
         const order = [_]@TypeOf(w.shared.appearance){ .system, .light, .dark };
         var picked: usize = std.mem.indexOfScalar(@TypeOf(w.shared.appearance), &order, w.shared.appearance) orelse 0;
         if (ui.segmented(c, &names, &picked)) w.shared.setAppearance(order[picked]);
+    }
+    {
+        const r = ui.div(c).row().wFull().itemsCenter();
+        defer r.end();
+        ui.text(c, "Terminal font", .{ .size = 13 });
+        ui.spacer(c);
+        const kit = nanoui.kit;
+        const options = w.shared.fonts.options.items;
+        const current = w.shared.prefs.terminal_font;
+        var picked: ?usize = if (current.len == 0) 0 else indexOfString(options, current);
+        const labels = fontOptionLabels(c, options);
+        if (kit.select(c, "terminal-font", labels, &picked, .{ .placeholder = "System", .width = 240 })) {
+            if (picked) |index| w.shared.prefs.setTerminalFont(if (index == 0) "" else options[index]);
+        }
+    }
+    ui.text(c, "A Nerd Font (JetBrainsMono Nerd Font, MesloLGS NF) has the glyphs for the file icons below.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        const t = ui.div(c).column().grow().gap(2);
+        defer t.end();
+        ui.text(c, "File icons in ls", .{ .size = 13 });
+        ui.text(c, "A Nerd Font icon before each file an ls prints: folders, pictures, archives, programs.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        var on = w.shared.prefs.file_icons;
+        if (ui.toggle(c, "", &on)) w.shared.prefs.setFileIcons(on);
     }
     {
         const r = ui.div(c).row().wFull().itemsCenter();

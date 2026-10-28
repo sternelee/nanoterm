@@ -17,6 +17,7 @@ pub const History = @import("history.zig").History;
 const visual_host = @import("visual_host.zig");
 const ssh = @import("ssh.zig");
 const helpers = @import("session_agent.zig");
+const theme = @import("theme.zig");
 pub const Log = @import("session_log.zig").Log;
 
 pub const Appearance = enum { system, dark, light };
@@ -64,6 +65,9 @@ pub const Shared = struct {
     ssh_hosts: []const []const u8 = &.{},
     /// Settings (⌘,): the default agent, text size, built-in Agent configuration.
     prefs: @import("settings.zig").Prefs,
+    /// The font families Settings offers for the terminal, loaded when it
+    /// opens; the system's and the installed terminal and Nerd families.
+    fonts: @import("fonts.zig").Registry = .{},
 
     /// Call `wire` once the value is at its final address.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, env: *std.process.Environ.Map) !Shared {
@@ -102,6 +106,7 @@ pub const Shared = struct {
         s.exe = std.process.executablePathAlloc(io, arena) catch "";
         s.ssh_hosts = ssh.hosts(arena, io, home);
         s.visuals = visual_host.Host.create(gpa, io, env.get("TMPDIR") orelse "/tmp") catch null;
+        theme.mono_font = if (s.prefs.terminal_font.len == 0) null else s.prefs.terminal_font;
         return s;
     }
 
@@ -122,6 +127,7 @@ pub const Shared = struct {
             store.deinit();
             s.gpa.destroy(store);
         }
+        s.fonts.deinit(s.gpa);
         s.prefs.deinit();
     }
 

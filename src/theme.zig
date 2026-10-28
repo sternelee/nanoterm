@@ -87,10 +87,10 @@ pub var solid: Color = default.solid;
 /// The composer's fill (Harness's input glass, opaque).
 pub var input: Color = default.input;
 
-/// The fonts: Geist for text, JetBrains Mono for code and output (the
-/// system's SF Pro and SF Mono where they are not installed).
+/// The fonts: Geist for text, and the terminal's monospaced family —
+/// JetBrains Mono to start, or what Settings picked (null: the system's).
 pub const font = "Geist";
-pub const mono_font = "JetBrains Mono";
+pub var mono_font: ?[]const u8 = "JetBrains Mono";
 
 // Code: panels, inline code, and syntax colors.
 pub var code_bg: Color = default.code_bg;

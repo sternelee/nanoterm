@@ -34,7 +34,11 @@ pub fn view(w: *Workspace, c: *ui.Context) void {
         .light => .light,
     };
     if (want != theme.appearance) theme.apply(want);
+    theme.mono_font = if (w.shared.prefs.terminal_font.len == 0) null else w.shared.prefs.terminal_font;
     c.theme = theme.ui();
+    // Settings can change the family during the view build. Apply it now as
+    // well as at the next frame boundary, so text and metrics change at once.
+    c.text.setFamilies(c.theme.font, c.theme.mono_font);
     c.setZoom(w.zoom);
     shortcuts(w, c);
     view_find.prepare(c, w);
@@ -98,7 +102,7 @@ fn shortcuts(w: *Workspace, c: *ui.Context) void {
         if (c.shortcut(.{ .key = S.escape })) w.closeOverlay();
         if (w.overlay == .palette) {
             const all = std.enums.values(@import("palette.zig").Scope);
-            const at = @intFromEnum(w.scope);
+            const at = @backingInt(w.scope);
             if (c.shortcut(.{ .key = S.tab, .shift = true })) {
                 w.scope = all[(at + all.len - 1) % all.len];
                 w.pick = 0;

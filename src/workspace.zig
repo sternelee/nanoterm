@@ -108,10 +108,14 @@ pub const Workspace = struct {
         if (w.overlay == .models) @import("assist.zig").prepareModels(w.focused());
     }
 
-    /// Settings (⌘,): the agents are looked for again as it opens.
+    /// Settings (⌘,): the agents are looked for again as it opens, and
+    /// the terminal's font choices are loaded.
     pub fn openSettings(w: *Workspace) void {
         w.overlay = if (w.overlay == .settings) .none else .settings;
-        if (w.overlay == .settings) w.shared.prefs.refresh(w.shared.env);
+        if (w.overlay == .settings) {
+            w.shared.prefs.refresh(w.shared.env);
+            w.shared.fonts.ensure(w.shared.gpa, w.shared.io, w.shared.prefs.terminal_font);
+        }
     }
 
     pub fn closeOverlay(w: *Workspace) void {

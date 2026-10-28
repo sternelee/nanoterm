@@ -9,6 +9,7 @@ const blocks = @import("blocks.zig");
 const App = @import("session.zig").Session;
 const assist = @import("assist.zig");
 const find = @import("find.zig");
+const file_icons = @import("file_icons.zig");
 const view_markdown = @import("view_markdown.zig");
 
 /// Find, for the panes not searched.
@@ -72,7 +73,7 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
         ui.text(c, if (b.source == .agent) "⚡" else "❯", .{ .size = 13, .weight = .bold, .color = if (b.source == .agent) theme.agent else theme.accent, .mono = true });
         ui.richText(c, b.command, find.spansFor(c.alloc(), f, &.{}, b.id, find.command), .{ .size = 13, .weight = .semibold, .mono = true, .wrap = true });
     }
-    output(c, b, f);
+    output(c, app, b, f);
     if (!nested) @import("view_remote.zig").bar(c, app, b);
     // A failed command: the agent can find out why, or fix it.
     if (!nested and app.shared.prefs.agents and b.state == .done and b.failed() and b.source == .shell) {
@@ -147,7 +148,7 @@ fn rendersMarkdown(b: *const blocks.Block, f: ?*const find.State) bool {
     return true;
 }
 
-fn output(c: *ui.Context, b: *blocks.Block, f: *const find.State) void {
+fn output(c: *ui.Context, app: *App, b: *blocks.Block, f: *const find.State) void {
     const lines = b.output.lines.items;
     const count = b.output.lineCount();
     if (count == 0) return;
@@ -166,6 +167,7 @@ fn output(c: *ui.Context, b: *blocks.Block, f: *const find.State) void {
         b.expanded = true;
     };
     const first = if (b.expanded or count <= tail_lines) 0 else count - tail_lines;
+    const listing = if (app.shared.prefs.file_icons) file_icons.listing(b.command) else .none;
     const col = ui.div(c).column().wFull().gap(0);
     defer col.end();
     if (first > 0 or b.output.dropped > 0) {
@@ -176,7 +178,14 @@ fn output(c: *ui.Context, b: *blocks.Block, f: *const find.State) void {
         var style = mono;
         style.wrap = true;
         style.color = theme.text;
-        ui.richText(c, l.text.items, find.spansFor(c.alloc(), f, l.spans.items, b.id, i), style);
+        const spans = find.spansFor(c.alloc(), f, l.spans.items, b.id, i);
+        if (listing != .none) {
+            if (file_icons.decorate(c.alloc(), app.shared.io, b.cwd, l.text.items, spans, listing)) |d| {
+                ui.richText(c, d.text, d.spans, style);
+                continue;
+            }
+        }
+        ui.richText(c, l.text.items, spans, style);
     }
     if (b.expanded and count > tail_lines) {
         if (ui.button(c, "Show less", .{ .variant = .ghost, .size = 11.5, .icon = "chevron.down" }).clicked) b.expanded = false;

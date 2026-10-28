@@ -60,6 +60,8 @@ test {
     _ = @import("tests_attach.zig");
     _ = @import("blocks.zig");
     _ = @import("highlight.zig");
+    _ = @import("file_icons.zig");
+    _ = @import("tests_file_icons.zig");
     _ = @import("tests_view.zig");
     _ = @import("tests_sidebar.zig");
     _ = @import("open_files.zig");
