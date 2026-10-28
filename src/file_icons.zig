@@ -53,6 +53,9 @@ fn glyph(kind: Kind) Glyph {
 pub fn listing(command: []const u8) Mode {
     var words = std.mem.tokenizeAny(u8, command, " \t");
     const first = words.next() orelse return .none;
+    // The usual alias for `ls -l`; whatever it really runs, a line that
+    // isn't that shape decorates nothing.
+    if (std.mem.eql(u8, first, "ll")) return .long;
     if (!std.mem.eql(u8, first, "ls")) return .none;
     var long = false;
     var one = false;

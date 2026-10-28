@@ -15,6 +15,8 @@ test "ls is told apart from other commands, and how it printed" {
     try std.testing.expectEqual(file_icons.Mode.columns, file_icons.listing("ls"));
     try std.testing.expectEqual(file_icons.Mode.long, file_icons.listing("ls -l"));
     try std.testing.expectEqual(file_icons.Mode.long, file_icons.listing("ls -la /tmp"));
+    try std.testing.expectEqual(file_icons.Mode.long, file_icons.listing("ll"));
+    try std.testing.expectEqual(file_icons.Mode.long, file_icons.listing("ll -a"));
     try std.testing.expectEqual(file_icons.Mode.one_per_line, file_icons.listing("ls -1"));
     try std.testing.expectEqual(file_icons.Mode.none, file_icons.listing("echo ls"));
     try std.testing.expectEqual(file_icons.Mode.none, file_icons.listing("ls | wc -l"));

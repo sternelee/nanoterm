@@ -327,9 +327,11 @@ fn look(c: *ui.Context, w: *Workspace) void {
         const r = ui.div(c).row().wFull().gap(10).itemsCenter();
         defer r.end();
         const t = ui.div(c).column().grow().gap(2);
-        defer t.end();
-        ui.text(c, "File icons in ls", .{ .size = 13 });
-        ui.text(c, "A Nerd Font icon before each file an ls prints: folders, pictures, archives, programs.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        {
+            defer t.end();
+            ui.text(c, "File icons in ls", .{ .size = 13 });
+            ui.text(c, "A Nerd Font icon before each file an ls prints: folders, pictures, archives, programs.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
         var on = w.shared.prefs.file_icons;
         if (ui.toggle(c, "", &on)) w.shared.prefs.setFileIcons(on);
     }
