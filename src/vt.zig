@@ -19,6 +19,12 @@ const screen_vt = @import("screen_vt.zig");
 pub const Line = struct {
     text: std.ArrayList(u8) = .empty,
     spans: std.ArrayList(nanoui.ui.Span) = .empty,
+    /// When the line was made, and its latest run of bytes: when they
+    /// landed (`fresh_at`) and from which byte (`fresh_from`), in the
+    /// frames' stamps — arrivals fade in from them.
+    arrived: f64 = 0,
+    fresh_at: f64 = 0,
+    fresh_from: u32 = std.math.maxInt(u32),
 
     fn deinit(l: *Line, gpa: std.mem.Allocator) void {
         l.text.deinit(gpa);
@@ -101,6 +107,10 @@ pub const Output = struct {
     inline_ok: bool = false,
     /// The screen is such a program's, not the alternate screen.
     inline_screen: bool = false,
+    /// The stamp parses mark arrivals with, set by the view each frame
+    /// (the clock animations run on), so what landed between two frames
+    /// reads as one moment.
+    stamp: f64 = 0,
 
     pub fn init(gpa: std.mem.Allocator) Output {
         return .{ .gpa = gpa };
@@ -162,15 +172,16 @@ pub const Output = struct {
 
     fn scrolledOff(ctx: *anyopaque, row: []const screen.Cell) void {
         const o: *Output = @ptrCast(@alignCast(ctx));
-        o.appendRow(row) catch {};
+        o.appendRow(row, o.stamp) catch {};
     }
 
-    /// A screen row as a line of the output: its text, colored by runs.
-    fn appendRow(o: *Output, row: []const screen.Cell) !void {
+    /// A screen row as a line of the output: its text, colored by runs,
+    /// arrived at `arrived` (the frames' clock).
+    fn appendRow(o: *Output, row: []const screen.Cell, arrived: f64) !void {
         var end = row.len;
         while (end > 0 and (row[end - 1].cp == ' ' or row[end - 1].cp == 0)) end -= 1;
         o.trim();
-        var l: Line = .{};
+        var l: Line = .{ .arrived = arrived };
         errdefer l.deinit(o.gpa);
         for (row[0..end]) |cell| {
             if (cell.attrs.tail) continue;
@@ -185,13 +196,16 @@ pub const Output = struct {
 
     /// What the screen shows, down to its last row with text or the
     /// cursor, becomes lines; the next output starts a line of its own.
+    /// The rows were already on the screen — they land settled, not
+    /// fading in as if new: what a program drawing in place left shows
+    /// as it left it (leaving vim is not new output).
     fn keepScreen(o: *Output, s: *const screen.Screen) void {
         var last: usize = s.cur.y;
         for (0..s.rows) |y| for (s.row(y)) |cell| if (cell.cp != ' ' and cell.cp != 0) {
             last = @max(last, y);
             break;
         };
-        for (0..last + 1) |y| o.appendRow(s.row(y)) catch {};
+        for (0..last + 1) |y| o.appendRow(s.row(y), 0) catch {};
         o.lines.append(o.gpa, .{}) catch {};
         o.col = 0;
     }
@@ -227,7 +241,7 @@ pub const Output = struct {
 
     fn newline(o: *Output) !void {
         o.trim();
-        try o.lines.append(o.gpa, .{});
+        try o.lines.append(o.gpa, .{ .arrived = o.stamp });
         o.col = 0;
         if (o.cursor) |cur| {
             cur.row = cur.bottom(cur.row + 1);
@@ -252,6 +266,10 @@ pub const Output = struct {
         while (l.text.items.len < o.col) try l.text.append(o.gpa, ' ');
         const start = o.col;
         const end = start + bytes.len;
+        if (l.fresh_at != o.stamp) {
+            l.fresh_at = o.stamp;
+            l.fresh_from = @intCast(start);
+        } else l.fresh_from = @min(l.fresh_from, @as(u32, @intCast(start)));
         // As a terminal does, writing after a carriage return overwrites
         // what is there; where that would split a multibyte character,
         // the rest of the line goes instead.

@@ -334,6 +334,34 @@ fn look(c: *ui.Context, w: *Workspace) void {
         if (ui.toggle(c, "", &on)) w.shared.prefs.setFileIcons(on);
     }
     {
+        // Motion's dials: one speed every effect's timing scales by, one
+        // amount for how far each goes; Reduce Motion turns them off.
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        const t = ui.div(c).column().grow().gap(2);
+        defer t.end();
+        ui.text(c, "Motion", .{ .size = 13 });
+        ui.text(c, "How new output settles in, glyph at a time, and the cursor springs between cells. The system's Reduce Motion turns all of it off.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+    }
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Speed", .{ .size = 13 });
+        ui.spacer(c);
+        var dur = w.shared.prefs.motion_duration;
+        if (ui.slider(c, &dur, .{ .min = 0.25, .max = 2, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(dur, w.shared.prefs.motion_intensity);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_duration}), .{ .size = 12.5, .mono = true, .color = theme.muted });
+    }
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Amount", .{ .size = 13 });
+        ui.spacer(c);
+        var inten = w.shared.prefs.motion_intensity;
+        if (ui.slider(c, &inten, .{ .min = 0, .max = 1.5, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(w.shared.prefs.motion_duration, inten);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_intensity}), .{ .size = 12.5, .mono = true, .color = theme.muted });
+    }
+    {
         const r = ui.div(c).row().wFull().itemsCenter();
         defer r.end();
         ui.text(c, "Keys in the input", .{ .size = 13 });

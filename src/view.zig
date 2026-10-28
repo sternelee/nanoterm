@@ -8,6 +8,7 @@ const ui = nanoui.ui;
 const K = ui.keys.label;
 const binds = @import("binds.zig");
 const theme = @import("theme.zig");
+const motion = @import("motion.zig");
 const split = @import("split.zig");
 const agent_mod = @import("agent.zig");
 const view_pane = @import("view_pane.zig");
@@ -36,6 +37,8 @@ pub fn view(w: *Workspace, c: *ui.Context) void {
     if (want != theme.appearance) theme.apply(want);
     theme.mono_font = if (w.shared.prefs.terminal_font.len == 0) null else w.shared.prefs.terminal_font;
     c.theme = theme.ui();
+    // Motion's dials, as the settings and the system ask for them.
+    motion.apply(w.shared.prefs.motion_duration, w.shared.prefs.motion_intensity, c.reduced_motion);
     // Settings can change the family during the view build. Apply it now as
     // well as at the next frame boundary, so text and metrics change at once.
     c.text.setFamilies(c.theme.font, c.theme.mono_font);
@@ -266,7 +269,7 @@ fn titleBar(w: *Workspace, c: *ui.Context, side: bool) void {
     ui.spacer(c);
     if (side) {
         if (view_sidebar.statusLine(c, w.tab())) |line| ui.text(c, line, .{ .size = 12, .color = theme.muted });
-    } else if (s.agent) |ag| statusDot(c, ag.status);
+    } else if (s.agent) |ag| statusDot(c, ag.status, @intFromPtr(s));
     if (!side and w.sidebar == .hidden and view_sidebar.anyAgent(w)) {
         // Hidden while agents run: a way back.
         ui.key(c, "sidebar-show");
@@ -323,14 +326,20 @@ fn tabs(w: *Workspace, c: *ui.Context) void {
     if (close) |i| w.closeTab(i);
 }
 
-fn statusDot(c: *ui.Context, status: agent_mod.Status) void {
-    const color: ui.Color = switch (status) {
+fn statusDot(c: *ui.Context, status: agent_mod.Status, id: u64) void {
+    var color: ui.Color = switch (status) {
         .off => theme.faint,
         .starting => theme.warning,
         .ready => theme.success,
         .working => theme.agent,
         .failed => theme.failure,
     };
+    // It breathes while it works, for its first seconds, then rests.
+    const since = motion.flipped(id, @intFromEnum(status), @floatCast(c.time));
+    if (motion.pulse(c.time, since)) |a| {
+        color = color.alpha(a);
+        c.animationFrame();
+    }
     _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = color }, .none, null);
     ui.text(c, @tagName(status), .{ .size = 11.5, .color = theme.muted });
 }

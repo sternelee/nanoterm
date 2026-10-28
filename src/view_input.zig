@@ -13,6 +13,7 @@ const blocks = @import("blocks.zig");
 const assist = @import("assist.zig");
 const complete = @import("complete.zig");
 const attach = @import("attach.zig");
+const motion_input = @import("motion_input.zig");
 const pager = @import("pager.zig");
 const Session = @import("session.zig").Session;
 const Workspace = @import("workspace.zig").Workspace;
@@ -31,6 +32,7 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         // Harness's composer: a rounded pill, the pictures, the text, and
         // a row of controls with the send button at its end, of Liquid
         // Glass that what scrolls under it shows through.
+        const pill_id = c.peekId(null);
         const pill = ui.div(c).column().wFull().gap(10).px(16).pt(14).pb(10).rounded(26).glass(.{}).border(theme.border.alpha(0.6));
         defer pill.end();
         pictures(c, s);
@@ -54,6 +56,14 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         s.caret = result.caret;
         s.input_lines = .{ result.line, result.lines };
         s.vim = if (result.vim_visual) .visual else if (result.vim_normal) .normal else .insert;
+        // What typing left behind: a flash where a glyph landed, and the
+        // ones Backspace took falling away. Drawn over the pill, so the
+        // pill's content corner is where their places are counted from.
+        if (c.focused_text) |ft| {
+            if (ft.id == s.input_id) {
+                if (c.rects.get(pill_id)) |r| motion_input.fx(c, ft, .{ .x = r.x + 16, .y = r.y + 14 }, ft.caret_rect.h);
+            }
+        }
         // Vim's k off the input's first line climbs into the output above
         // (history without output); j steps forward through the history.
         if (result.history < 0) {

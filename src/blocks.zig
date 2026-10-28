@@ -32,6 +32,21 @@ pub const Block = struct {
     expanded: bool = false,
     /// Markdown printed by `cat`, shown as the text it was (not rendered).
     raw: bool = false,
+    /// When `pulse_state` last changed, on the frames' clock — its bar
+    /// breathes from that moment, not the app's start. Kept here, not
+    /// in a registry: it dies with the block, and blocks of two panes
+    /// (whose ids each start at one) can never share it.
+    pulse_state: u32 = 0,
+    pulse_since: f64 = 0,
+
+    /// `state`'s moment it flipped into it (the clock of `now`, seconds).
+    pub fn flipped(b: *Block, state: u32, at: f64) f64 {
+        if (b.pulse_state != state) {
+            b.pulse_state = state;
+            b.pulse_since = at;
+        }
+        return b.pulse_since;
+    }
 
     pub fn create(gpa: std.mem.Allocator, id: u64, source: Source, command: []const u8, cwd: []const u8, branch: []const u8) !*Block {
         const b = try gpa.create(Block);
@@ -129,4 +144,13 @@ pub fn gitBranch(io: std.Io, buf: []u8, dir: []const u8) []const u8 {
         d = parent;
     }
     return "";
+}
+
+test "a block's bar breathes from the moment its state changed" {
+    const b = try Block.create(std.testing.allocator, 1, .shell, "cmd", "/", "");
+    defer b.destroy(std.testing.allocator);
+    try std.testing.expectEqual(@as(f64, 5), b.flipped(1, 5));
+    // Same state frame after frame: still the first moment.
+    try std.testing.expectEqual(@as(f64, 5), b.flipped(1, 6));
+    try std.testing.expectEqual(@as(f64, 8), b.flipped(2, 8));
 }

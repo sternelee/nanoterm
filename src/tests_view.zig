@@ -253,3 +253,89 @@ test "a block's header keeps its height when its hover actions appear" {
     try std.testing.expectApproxEqAbs(y_before, hovered_output.y, 0.01);
     try t.screenshot("/tmp/nanoterm-block-hover-actions.png");
 }
+
+test "new output arrives a glyph at a time, then rests" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-arrival";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    s.run("printf arriving\n");
+    var waited: f64 = 0;
+    while (s.timeline.items.len == 0 or s.timeline.items[s.timeline.items.len - 1].block.state == .running) : (waited += 0.02) {
+        if (waited > 10) return error.Timeout;
+        nanoui.runFor(0.02);
+        t.frame();
+    }
+    // It just landed: the line is still fading in, so the view keeps
+    // asking for frames while it settles.
+    try std.testing.expect(t.hasText("arriving"));
+    t.frame();
+    try std.testing.expect(t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-arrival-fading.png");
+    // A moment later it has all arrived and rests: no more frames asked for.
+    t.advance(1);
+    t.frame();
+    try std.testing.expect(!t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-arrival-settled.png");
+}
+
+test "typing flashes, and Backspace's glyph decays away, then rests" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-input-fx";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    // What lands in the input flashes, so frames are asked for while it fades.
+    t.typeText("hi");
+    t.frame();
+    try std.testing.expect(t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-input-flash.png");
+    t.settle(2);
+    t.frame();
+    try std.testing.expect(!t.ctx.animating);
+    // ⌫ takes its glyph with it: it decays in place instead, then rests.
+    t.key(.backspace);
+    t.frame();
+    try std.testing.expectEqualStrings("h", s.input.text());
+    try std.testing.expect(t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-input-decay.png");
+    t.settle(2);
+    t.frame();
+    try std.testing.expect(!t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-input-rest.png");
+}

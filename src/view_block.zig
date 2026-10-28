@@ -6,6 +6,7 @@ const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const blocks = @import("blocks.zig");
+const motion = @import("motion.zig");
 const App = @import("session.zig").Session;
 const assist = @import("assist.zig");
 const find = @import("find.zig");
@@ -62,8 +63,15 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
         f.scroll_to = null;
     };
 
-    // The bar on the left: running, failed, done.
-    const bar = if (b.state == .running) theme.accent else if (b.failed()) theme.failure else if (selected) theme.accent else theme.border;
+    // The bar on the left: running, failed, done. While it runs it
+    // breathes for its first seconds, then rests — an animation that
+    // runs forever costs more than it shows.
+    var bar = if (b.state == .running) theme.accent else if (b.failed()) theme.failure else if (selected) theme.accent else theme.border;
+    const since = b.flipped(if (b.state == .running) 1 else 2, c.time);
+    if (b.state == .running) if (motion.pulse(c.time, since)) |a| {
+        bar = theme.accent.alpha(a);
+        c.animationFrame();
+    };
     _ = c.leaf(.{ .absolute = true, .width = .{ .px = 3 }, .height = .fill, .radius = 1.5, .background = bar, .offset = .{ .x = if (nested) -8 else -10 } }, .none, null);
 
     header(c, app, b, it.hovered);
@@ -152,6 +160,9 @@ fn output(c: *ui.Context, app: *App, b: *blocks.Block, f: *const find.State) voi
     const lines = b.output.lines.items;
     const count = b.output.lineCount();
     if (count == 0) return;
+    // This frame's stamp: what parses between now and the next stamp
+    // reads as one moment of arrival.
+    b.output.stamp = c.time;
     if (rendersMarkdown(b, f)) {
         const text = b.output.plainText(c.alloc()) catch "";
         const box = ui.div(c).column().wFull().pt(4).pb(2);
@@ -178,7 +189,9 @@ fn output(c: *ui.Context, app: *App, b: *blocks.Block, f: *const find.State) voi
         var style = mono;
         style.wrap = true;
         style.color = theme.text;
-        const spans = find.spansFor(c.alloc(), f, l.spans.items, b.id, i);
+        if (!motion.lineSettled(l.arrived, l.fresh_at, l.fresh_from, c.time)) c.animationFrame();
+        var spans = find.spansFor(c.alloc(), f, l.spans.items, b.id, i);
+        spans = motion.arriveSpans(c.alloc(), l.text.items, spans, theme.text, l.arrived, l.fresh_at, l.fresh_from, c.time);
         if (listing != .none) {
             if (file_icons.decorate(c.alloc(), app.shared.io, b.cwd, l.text.items, spans, listing)) |d| {
                 ui.richText(c, d.text, d.spans, style);
