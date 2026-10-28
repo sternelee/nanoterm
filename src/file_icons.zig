@@ -147,22 +147,42 @@ pub fn decorate(arena: std.mem.Allocator, io: std.Io, cwd: []const u8, line: []c
     return .{ .text = text, .spans = all };
 }
 
-/// Where `ls -l` put the file's name: after its mode, links, owner,
-/// group, size and date — eight fields.
+/// Where the file's name is in a long listing. `ls -l` puts it after
+/// eight fields — mode, links, owner, group, size, and a three-field
+/// date month-first; exa and eza, which `ls` is often aliased to,
+/// after seven — mode, size, user, and the date day-first. The date's
+/// month says which of the two shapes a line is, so an exa behind an
+/// `ll` alias decorates as well as ls itself. What is neither shape —
+/// a header row, another command's output — names nothing.
 fn longFilenameStart(line: []const u8) ?usize {
-    var fields: usize = 0;
+    var starts: [9]usize = undefined;
+    var n: usize = 0;
     var i: usize = 0;
-    while (i < line.len) {
+    while (i < line.len and n < 9) {
         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) i += 1;
         if (i >= line.len) break;
+        starts[n] = i;
+        n += 1;
         while (i < line.len and line[i] != ' ' and line[i] != '\t') i += 1;
-        fields += 1;
-        if (fields == 8) {
-            while (i < line.len and (line[i] == ' ' or line[i] == '\t')) i += 1;
-            return i;
-        }
     }
+    // exa's date is day-first — the month is the fifth field — so the
+    // name is the seventh; ls's date is month-first, the name ninth
+    // (its links and group make two fields more).
+    if (n >= 7 and isMonth(line[starts[4]..nextSpace(line, starts[4])])) return starts[6];
+    if (n >= 9 and isMonth(line[starts[5]..nextSpace(line, starts[5])])) return starts[8];
     return null;
+}
+
+fn nextSpace(line: []const u8, from: usize) usize {
+    var i = from;
+    while (i < line.len and line[i] != ' ' and line[i] != '\t') i += 1;
+    return i;
+}
+
+fn isMonth(field: []const u8) bool {
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    for (months) |m| if (std.mem.eql(u8, field, m)) return true;
+    return false;
 }
 
 fn longKind(io: std.Io, cwd: []const u8, line: []const u8, name: []const u8) Kind {

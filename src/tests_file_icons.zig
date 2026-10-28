@@ -76,6 +76,29 @@ test "a long listing puts its icon before the name, and total stays bare" {
     try std.testing.expect(file_icons.decorate(arena, io, home, "total 8", &.{}, .long) == null);
 }
 
+test "an exa behind an alias decorates too, day-first dates and no group" {
+    const previous_font = theme.mono_font;
+    defer theme.mono_font = previous_font;
+    theme.mono_font = "FiraCode Nerd Font Mono";
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-file-icons";
+
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/src");
+    // What exa prints for `ll` — mode, size, user, then the date
+    // day-first — when zsh has `ll='ls -lh'` and `ls=exa`.
+    const dir = ".rw-r--r--@ 1.4k sternelee 25 Oct 15:43 src";
+    const d = file_icons.decorate(arena, io, home, dir, &.{}, .long) orelse return error.NoIcons;
+    try std.testing.expect(std.mem.endsWith(u8, d.text, "\u{f07b} src"));
+    try std.testing.expect(std.mem.startsWith(u8, d.text, ".rw-r--r--@"));
+    // Its header row names nothing, like ls's total.
+    try std.testing.expect(file_icons.decorate(arena, io, home, "Permissions Size User Date Modified Name", &.{}, .long) == null);
+}
+
 test "ordinary mono fonts use visible icons instead of missing Nerd glyphs" {
     const previous_font = theme.mono_font;
     defer theme.mono_font = previous_font;
