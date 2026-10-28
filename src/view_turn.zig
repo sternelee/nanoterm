@@ -10,6 +10,7 @@ const view_block = @import("view_block.zig");
 const view_markdown = @import("view_markdown.zig");
 const view_visual = @import("view_visual.zig");
 const view_fold = @import("view_fold.zig");
+const file_icons = @import("file_icons.zig");
 const App = @import("session.zig").Session;
 
 /// The width of an avatar and its gap: the turn's content starts after.
@@ -143,7 +144,22 @@ fn tool(c: *ui.Context, app: *App, tl: *agent_mod.Tool) void {
     if (tl.block) |b| {
         view_block.block(c, app, b, true);
     } else if (tl.detail.items.len > 0 and tl.status != .in_progress) {
+        // A tool that listed files without a terminal — its output's shape
+        // says so — shows them with their icons, like any listing.
         const d = tl.detail.items;
+        if (app.shared.prefs.file_icons) {
+            // Whole lines only: a listing cut mid-row would not be one.
+            const shown = if (d.len > 400)
+                (if (std.mem.lastIndexOfScalar(u8, d[0..400], '\n')) |nl| d[0..nl] else "")
+            else
+                d;
+            const cwd = if (app.agent) |ag| ag.cwd else app.cwd();
+            if (file_icons.decorateOutput(c.alloc(), app.shared.io, cwd, shown)) |dec| {
+                ui.richText(c, dec.text, dec.spans, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+                if (shown.len < d.len) ui.text(c, "…", .{ .size = 11.5, .mono = true, .color = theme.faint });
+                return;
+            }
+        }
         const shown = if (d.len > 400) c.print("{s}…", .{d[0..400]}) else d;
         ui.text(c, shown, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
     }

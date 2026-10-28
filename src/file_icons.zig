@@ -109,16 +109,80 @@ pub fn decorate(arena: std.mem.Allocator, io: std.Io, cwd: []const u8, line: []c
         },
     }
     if (items.items.len == 0) return null;
+    return assemble(arena, line, spans, items.items);
+}
 
+/// Output a tool printed when it looks like nothing else: every line a
+/// long listing's row, or every line a bare path. Agents list files
+/// through tools whose names we never learn — a shell tool that prints
+/// ls, a glob of paths — but the lines' shape says it, so the icons come
+/// without asking the tool. Anything else stays plain.
+pub fn decorateOutput(arena: std.mem.Allocator, io: std.Io, cwd: []const u8, text: []const u8) ?Decorated {
+    var rows: usize = 0;
+    var listings: usize = 0;
+    var paths: usize = 0;
+    var found: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const eol = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        const line = std.mem.trim(u8, text[i..eol], " \t\r");
+        if (line.len > 0) {
+            rows += 1;
+            if (headerRow(line) or longFilenameStart(line) != null) listings += 1;
+            if (std.mem.indexOfAny(u8, line, " \t") == null) {
+                paths += 1;
+                if (statKind(io, cwd, line) != null) found += 1;
+            }
+        }
+        i = eol + 1;
+    }
+    // Every row a listing's (headers aside), or bare paths — at least
+    // two, and one of them really there — so prose and reports stay plain.
+    const listing_rows = listings == rows;
+    const bare_paths = paths == rows and rows >= 2 and found > 0;
+    if (rows == 0 or (!listing_rows and !bare_paths)) return null;
+    var items: std.ArrayList(Insertion) = .empty;
+    i = 0;
+    while (i < text.len) {
+        const eol = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        const raw = text[i..eol];
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len > 0) {
+            if (listing_rows) {
+                if (!headerRow(line)) {
+                    if (longFilenameStart(raw)) |at| {
+                        const name = std.mem.trimEnd(u8, raw[at..], " \r");
+                        items.append(arena, .{ .at = i + at, .kind = longKind(io, cwd, raw, name) }) catch return null;
+                    }
+                }
+            } else {
+                const lead = @intFromPtr(line.ptr) - @intFromPtr(raw.ptr);
+                items.append(arena, .{ .at = i + lead, .kind = kindOf(io, cwd, line) }) catch return null;
+            }
+        }
+        i = eol + 1;
+    }
+    if (items.items.len == 0) return null;
+    return assemble(arena, text, &.{}, items.items);
+}
+
+/// A row that says nothing: ls's `total`, exa's header.
+fn headerRow(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "total ") or std.mem.startsWith(u8, line, "Permissions ");
+}
+
+/// The line with its icons in, the spans — the icons' own, and `spans`
+/// shifted past them — saying what is colored.
+fn assemble(arena: std.mem.Allocator, line: []const u8, spans: []const ui.Span, items: []const Insertion) ?Decorated {
     var extra: usize = 0;
-    for (items.items) |item| extra += glyph(item.kind).text.len + 1;
+    for (items) |item| extra += glyph(item.kind).text.len + 1;
     const text = arena.alloc(u8, line.len + extra) catch return null;
     var out: std.ArrayList(ui.Span) = .empty;
-    out.ensureTotalCapacity(arena, spans.len + items.items.len) catch return null;
+    out.ensureTotalCapacity(arena, spans.len + items.len) catch return null;
 
     var pos: usize = 0;
     var prev: usize = 0;
-    for (items.items) |item| {
+    for (items) |item| {
         const chunk = line[prev..item.at];
         @memcpy(text[pos..][0..chunk.len], chunk);
         pos += chunk.len;
@@ -137,7 +201,7 @@ pub fn decorate(arena: std.mem.Allocator, io: std.Io, cwd: []const u8, line: []c
     pos += rest.len;
     std.debug.assert(pos == text.len);
 
-    for (spans) |span| out.appendAssumeCapacity(shifted(span, items.items));
+    for (spans) |span| out.appendAssumeCapacity(shifted(span, items));
     const all = out.allocatedSlice();
     std.mem.sort(ui.Span, all, {}, struct {
         fn less(_: void, a: ui.Span, b: ui.Span) bool {

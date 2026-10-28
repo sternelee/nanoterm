@@ -99,6 +99,41 @@ test "an exa behind an alias decorates too, day-first dates and no group" {
     try std.testing.expect(file_icons.decorate(arena, io, home, "Permissions Size User Date Modified Name", &.{}, .long) == null);
 }
 
+test "a tool's output that lists files decorates; anything else stays plain" {
+    const previous_font = theme.mono_font;
+    defer theme.mono_font = previous_font;
+    theme.mono_font = "FiraCode Nerd Font Mono";
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-file-icons";
+
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/src");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/run.sh", .data = "" });
+    try std.Io.Dir.cwd().setFilePermissions(io, home ++ "/run.sh", .fromMode(0o755), .{});
+
+    // A shell tool's ls: rows in either of the two long shapes.
+    const ls = "total 8\n-rwxr-xr-x  1 user  staff    32 Oct  2 10:00 run.sh\n.rw-r--r--@ 1.4k sternelee 25 Oct 15:43 src\n";
+    const d = file_icons.decorateOutput(arena, io, home, ls) orelse return error.NoIcons;
+    try std.testing.expect(std.mem.startsWith(u8, d.text, "total 8\n"));
+    try std.testing.expect(std.mem.indexOf(u8, d.text, "\u{f135} run.sh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d.text, "\u{f07b} src") != null);
+
+    // A glob's paths, one a line.
+    const paths = "run.sh\nsrc\n";
+    const p = file_icons.decorateOutput(arena, io, home, paths) orelse return error.NoIcons;
+    try std.testing.expect(std.mem.startsWith(u8, p.text, "\u{f135} run.sh\n"));
+    try std.testing.expect(std.mem.endsWith(u8, p.text, "\u{f07b} src\n"));
+
+    // Prose and single words name nothing.
+    try std.testing.expect(file_icons.decorateOutput(arena, io, home, "all done, 2 files\nsee the report\n") == null);
+    try std.testing.expect(file_icons.decorateOutput(arena, io, home, "ok") == null);
+    try std.testing.expect(file_icons.decorateOutput(arena, io, home, "") == null);
+}
+
 test "ordinary mono fonts use visible icons instead of missing Nerd glyphs" {
     const previous_font = theme.mono_font;
     defer theme.mono_font = previous_font;
