@@ -111,7 +111,7 @@ fn actions(c: *ui.Context, w: *Workspace, s: *Session) void {
     // An SSH session open is not something running: its commands are.
     const remote_idle = s.shell.remoteReady();
     const running = (s.shell.busy() and !remote_idle) or (if (s.agent) |ag| ag.status == .working else false);
-    const can_send = s.input.len > 0 or s.attachments.items.items.len > 0;
+    const can_send = s.input.text().len > 0 or s.attachments.items.items.len > 0;
     ui.key(c, "send");
     var send = ui.div(c).row().size(30, 30).roundedFull().center().bg(theme.text);
     if (!running and !can_send) send = send.opacity(0.35);
@@ -187,7 +187,7 @@ fn modePill(c: *ui.Context, s: *Session) void {
     if (d.clicked() and !input_only) s.toggleMode();
     if (agent) ui.icon(c, "sparkles", .{ .size = 11, .color = color }) else ui.text(c, "❯", .{ .size = 13, .weight = .bold, .color = color, .mono = true });
     ui.text(c, if (input_only) "input" else if (agent) "Agent" else if (s.shell.remoteReady()) s.shell.remote.?.host else "shell", .{ .size = 11, .weight = .semibold, .color = color });
-    const why: []const u8 = if (input_only or s.input.len == 0 and s.lock == null) "" else if (s.lock != null) "locked" else "auto";
+    const why: []const u8 = if (input_only or s.input.text().len == 0 and s.lock == null) "" else if (s.lock != null) "locked" else "auto";
     if (why.len > 0) ui.text(c, why, .{ .size = 9.5, .color = color.alpha(0.7) });
 }
 

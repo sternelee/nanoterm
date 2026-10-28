@@ -135,6 +135,17 @@ pub const Store = struct {
         self.gpa.free(self.skills_dir);
         self.gpa.free(self.selected_provider);
         self.gpa.free(self.status);
+        self.provider_name.deinit();
+        self.provider_url.deinit();
+        self.provider_model.deinit();
+        self.provider_auth_env.deinit();
+        self.mcp_name.deinit();
+        self.mcp_target.deinit();
+        self.mcp_args.deinit();
+        self.mcp_env.deinit();
+        self.mcp_headers.deinit();
+        self.skill_source.deinit();
+        self.skill_name.deinit();
     }
 
     fn clearMcpQuery(self: *Store) void {

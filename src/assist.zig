@@ -159,7 +159,7 @@ pub fn reachable(here: Here, cmd: []const u8) bool {
 pub fn tab(s: *Session, caret: usize) void {
     if (s.menu.open) return accept(s);
     const sug = suggestion(s);
-    if (sug.len > 0 and caret == s.input.len) {
+    if (sug.len > 0 and caret == s.input.text().len) {
         var buf: [1024]u8 = undefined;
         s.input.set(std.fmt.bufPrint(&buf, "{s}{s}", .{ s.input.text(), sug }) catch return);
         return;

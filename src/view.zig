@@ -131,7 +131,7 @@ fn shortcuts(w: *Workspace, c: *ui.Context) void {
     if (c.shortcut(binds.shortcut("Cmd+K"))) s.clear();
     if (c.shortcut(.{ .key = 'c', .ctrl = true })) s.interrupt();
     // ^D on an empty input: the program's end of input, as in a terminal.
-    if (s.input.len == 0 and program.reading(s) and c.shortcut(.{ .key = 'd', .ctrl = true })) program.eof(s);
+    if (s.input.text().len == 0 and program.reading(s) and c.shortcut(.{ .key = 'd', .ctrl = true })) program.eof(s);
     if (c.shortcut(binds.shortcut("Cmd+Up"))) selectBlock(s, -1);
     if (c.shortcut(binds.shortcut("Cmd+Down"))) selectBlock(s, 1);
     if (s.menu.open) {
@@ -163,7 +163,7 @@ fn shortcuts(w: *Workspace, c: *ui.Context) void {
         if (s.agent) |ag| if (ag.status == .working) return ag.cancel();
         if (s.selected != null) {
             s.selected = null;
-        } else if (s.input.len == 0) s.lock = null;
+        } else if (s.input.text().len == 0) s.lock = null;
     }
 }
 

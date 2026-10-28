@@ -55,7 +55,7 @@ or [arm64](https://github.com/justrach/nanoterm/releases/latest/download/nanoter
 
 ## Get started
 
-nanoterm builds on its own. It fetches nanoui, pinned by commit in
+nanoterm builds on its own. It fetches nanoui 0.8.0, pinned by commit in
 `build.zig.zon`, and checks out the built-in Agent's fx core as the
 `vendor/fx` submodule:
 

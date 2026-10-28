@@ -248,6 +248,7 @@ pub const Session = struct {
         if (a.agent) |ag| ag.destroy();
         for (a.retired.items) |ag| ag.destroy();
         a.retired.deinit(a.gpa);
+        a.input.deinit();
         a.shell.deinit();
         for (a.all_blocks.items) |b| b.destroy(a.gpa);
         a.all_blocks.deinit(a.gpa);

@@ -75,6 +75,8 @@ pub const Workspace = struct {
         for (w.tabs.items) |t| w.freeTab(t);
         w.tabs.deinit(w.shared.gpa);
         w.placed.deinit(w.shared.gpa);
+        w.query.deinit();
+        w.find.deinit();
     }
 
     pub fn zoomBy(w: *Workspace, by: f32) void {
