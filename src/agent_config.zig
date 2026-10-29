@@ -51,7 +51,7 @@ pub const Config = struct {
         c.options.clearRetainingCapacity();
     }
 
-    fn clearCommands(c: *Config) void {
+    pub fn clearCommands(c: *Config) void {
         for (c.commands.items) |cmd| {
             c.gpa.free(cmd.name);
             c.gpa.free(cmd.description);

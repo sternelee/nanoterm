@@ -55,6 +55,11 @@ pub fn attached(s: *Session) ?*blocks.Block {
 
 /// Sends `text` to the agent, with the selected block as its context.
 pub fn ask(s: *Session, text: []const u8) void {
+    // The built-in Agent's own commands nanoterm runs for it; the others
+    // keep their block context below.
+    if (s.which == .agent and text.len > 1 and text[0] == '/') {
+        if (@import("agent_fx.zig").route(s, text)) return;
+    }
     const b = attached(s) orelse return s.ask(text);
     var full: std.ArrayList(u8) = .empty;
     defer full.deinit(s.gpa);
@@ -110,6 +115,7 @@ fn context(s: *Session) complete.Context {
         .home = s.home,
         .commands = &s.shared.commands,
         .slash = if (s.mode() == .agent) if (s.agent) |ag| ag.config.commands.items else &.{} else null,
+        .fx_args = s.mode() == .agent and s.which == .agent,
     };
 }
 

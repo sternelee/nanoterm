@@ -6,5 +6,7 @@ codedb.snapshot
 .DS_Store
 zig-pkg/
 .pi
+.context
+.codex
 vendor/*
 !vendor/fx

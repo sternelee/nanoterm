@@ -177,6 +177,9 @@ pub const Session = struct {
     menu: complete.Menu,
     /// agent's model for its next start (`--model`).
     model_choice: ?[]u8 = null,
+    /// A /compact asked for a handoff; the next finished turn carries it
+    /// into a fresh session (agent_fx.carry).
+    compact_pending: bool = false,
     selected: ?u64 = null,
     next_id: u64 = 1,
     shell_exited: bool = false,

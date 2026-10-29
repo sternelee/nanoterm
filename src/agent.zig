@@ -246,7 +246,34 @@ pub const Agent = struct {
         const extra: ?native_agent.ExtraStdioServer = if (a.mcp) |m| .{ .name = m.name, .command = m.command, .args = m.args } else null;
         a.native = try native_agent.Runtime.create(cwd, model, extra);
         a.native.?.setCallback(a, onNativeEvent);
+        // The embedded runtime takes plain prompts, so its slash commands are
+        // nanoterm's to run; the menu lists them.
+        @import("agent_fx.zig").seed(a.gpa, &a.config);
         a.status = .ready;
+        a.app.changed(a.app.ctx);
+    }
+
+    /// A turn that is only a note, done as made: feedback for a command
+    /// nanoterm ran itself (a slash command of the built-in Agent).
+    pub fn note(a: *Agent, text: []const u8) void {
+        const t = a.gpa.create(Turn) catch return;
+        t.* = .{ .prompt = &.{}, .agent = a.which, .started = blocks.now(), .done = true, .ended = blocks.now() };
+        t.prompt = a.gpa.dupe(u8, "") catch {
+            a.gpa.destroy(t);
+            return;
+        };
+        const owned = a.gpa.dupe(u8, text) catch {
+            freeTurn(a.gpa, t);
+            return;
+        };
+        t.items.append(a.gpa, .{ .note = owned }) catch {
+            freeTurn(a.gpa, t);
+            return;
+        };
+        a.turns.append(a.gpa, t) catch {
+            freeTurn(a.gpa, t);
+            return;
+        };
         a.app.changed(a.app.ctx);
     }
 

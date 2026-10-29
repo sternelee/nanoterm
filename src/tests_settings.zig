@@ -46,13 +46,32 @@ test "the Settings page: built-in Agent, agents, appearance, updates" {
     try std.testing.expect(t.hasText("Codex") and t.hasText("opencode") and t.hasText("Hermes"));
     try std.testing.expect(t.hasText("Default"));
     try std.testing.expect(t.hasText("MCP servers") and t.hasText("Skills"));
+    // fx's own dials, for the pane the panel is over.
+    try std.testing.expect(t.hasText("Sign in"));
+    try std.testing.expect(t.hasText("Permissions"));
+    try std.testing.expect(t.hasText("Reasoning effort"));
+    try std.testing.expect(t.hasText("Additional workspaces"));
+    try std.testing.expect(t.hasText("Project instructions"));
+    // A permission mode picked here is written to fx's own settings.
+    try t.clickText("Full access");
+    t.settle(1);
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(65536));
+        defer gpa.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "yolo") != null);
+    }
     // New configurations hide in expandable panels until their title is clicked.
+    // They sit below fx's dials now: scroll the page to reach them.
+    t.scroll(600, 500, -1200);
+    t.settle(1);
     try t.clickText("Add provider");
     t.settle(1);
     try std.testing.expect(t.hasText("Base URL, including /v1/"));
     try t.clickText("Add MCP server");
     t.settle(1);
     try std.testing.expect(t.hasText("Space-separated arguments for stdio command (optional)"));
+    t.scroll(600, 500, -1200);
+    t.settle(1);
     try t.clickText("Add Skill");
     t.settle(1);
     try std.testing.expect(t.hasText("Install from git URL or local path"));

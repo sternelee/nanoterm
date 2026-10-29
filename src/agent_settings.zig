@@ -13,12 +13,17 @@ pub const Provider = struct {
     auth_env: []u8,
     selected: bool,
     open: bool = false,
+    /// Every model id the provider offers (its model_metadata keys, or the
+    /// single preferred one when the definition carries no list).
+    models: std.ArrayList([]u8) = .empty,
 
-    fn deinit(self: Provider, gpa: Allocator) void {
+    fn deinit(self: *Provider, gpa: Allocator) void {
         gpa.free(self.name);
         gpa.free(self.base_url);
         gpa.free(self.model);
         gpa.free(self.auth_env);
+        for (self.models.items) |model| gpa.free(model);
+        self.models.deinit(gpa);
     }
 };
 
@@ -78,6 +83,16 @@ pub const Store = struct {
     skill_form_open: bool = false,
     config_open: bool = false,
 
+    // fx runtime state for the built-in Agent: its dials and directories,
+    // loaded for a workspace when the panel opens and after each change.
+    perm_mode: []u8 = &.{},
+    effort: []u8 = &.{},
+    dirs: std.ArrayList([]u8) = .empty,
+    dirs_cwd: []u8 = &.{},
+    agents_files: std.ArrayList([]u8) = .empty,
+    runtime_loaded: bool = false,
+    workspace_dir: ui.TextBuffer = .{},
+
     mcp_query_thread: ?std.Thread = null,
     mcp_query_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     mcp_query_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -135,6 +150,10 @@ pub const Store = struct {
         self.gpa.free(self.skills_dir);
         self.gpa.free(self.selected_provider);
         self.gpa.free(self.status);
+        self.freeRuntime();
+        self.dirs.deinit(self.gpa);
+        self.agents_files.deinit(self.gpa);
+        self.workspace_dir.deinit();
         self.provider_name.deinit();
         self.provider_url.deinit();
         self.provider_model.deinit();
@@ -246,7 +265,7 @@ pub const Store = struct {
     }
 
     fn clearLists(self: *Store) void {
-        for (self.providers.items) |item| item.deinit(self.gpa);
+        for (self.providers.items) |*item| item.deinit(self.gpa);
         self.providers.clearRetainingCapacity();
         for (self.mcp_servers.items) |item| item.deinit(self.gpa);
         self.mcp_servers.clearRetainingCapacity();
@@ -263,6 +282,88 @@ pub const Store = struct {
     fn note(self: *Store, text: []const u8) void {
         self.replace(&self.status, text) catch {};
         self.failed = false;
+    }
+
+    // The built-in Agent's fx dials: permission mode, reasoning effort,
+    // additional workspaces, and the AGENTS.md files it loads.
+
+    fn freeRuntime(self: *Store) void {
+        if (self.perm_mode.len > 0) self.gpa.free(self.perm_mode);
+        self.perm_mode = &.{};
+        if (self.effort.len > 0) self.gpa.free(self.effort);
+        self.effort = &.{};
+        for (self.dirs.items) |dir| self.gpa.free(dir);
+        self.dirs.clearRetainingCapacity();
+        for (self.agents_files.items) |path| self.gpa.free(path);
+        self.agents_files.clearRetainingCapacity();
+        if (self.dirs_cwd.len > 0) self.gpa.free(self.dirs_cwd);
+        self.dirs_cwd = &.{};
+        self.runtime_loaded = false;
+    }
+
+    /// Loads fx's runtime state for `cwd`, unless it is already loaded for
+    /// that directory (the panel holds it between frames).
+    pub fn ensureRuntime(self: *Store, cwd: []const u8) void {
+        if (self.runtime_loaded and std.mem.eql(u8, self.dirs_cwd, cwd)) return;
+        self.freeRuntime();
+        if (self.dirs_cwd.len > 0) self.gpa.free(self.dirs_cwd);
+        self.dirs_cwd = self.gpa.dupe(u8, cwd) catch &.{};
+        const fx = @import("agent_fx.zig");
+        self.perm_mode = fx.readPermission(self.gpa, self.home, cwd) orelse (self.gpa.dupe(u8, "auto") catch &.{});
+        var buf: [64]u8 = undefined;
+        self.effort = self.gpa.dupe(u8, fx.readEffort(&buf, self.gpa, self.home)) catch &.{};
+        const dirs = fx.readDirs(self.gpa, self.home, cwd);
+        if (self.dirs.appendSlice(self.gpa, dirs)) |_| {} else |_| {
+            for (dirs) |dir| self.gpa.free(dir);
+        }
+        self.gpa.free(dirs);
+        const files = fx.instructions(self.gpa, cwd);
+        if (self.agents_files.appendSlice(self.gpa, files)) |_| {} else |_| {
+            for (files) |path| self.gpa.free(path);
+        }
+        self.gpa.free(files);
+        self.runtime_loaded = true;
+    }
+
+    /// Writes the permission mode ("ask", "auto", "full-access"), then
+    /// reloads what the panel shows.
+    pub fn setPermissionMode(self: *Store, cwd: []const u8, mode: []const u8) void {
+        @import("agent_fx.zig").setPermission(self.gpa, self.home, mode) catch |err| return self.fail(err);
+        self.note("Permission mode saved");
+        self.runtime_loaded = false;
+        self.ensureRuntime(cwd);
+    }
+
+    /// Writes the reasoning effort ("auto", or a level such as "high").
+    pub fn setEffortLevel(self: *Store, cwd: []const u8, level: []const u8) void {
+        @import("agent_fx.zig").setEffort(self.gpa, self.home, level) catch |err| return self.fail(err);
+        self.note("Reasoning effort saved");
+        self.runtime_loaded = false;
+        self.ensureRuntime(cwd);
+    }
+
+    /// Saves an additional workspace directory for `cwd`.
+    pub fn addWorkspaceDir(self: *Store, cwd: []const u8) void {
+        const path = std.mem.trim(u8, self.workspace_dir.text(), " \t\r\n");
+        if (path.len == 0) return self.fail(error.WorkspacePathRequired);
+        @import("agent_fx.zig").changeDir(self.gpa, cwd, .{ .add = path }) catch |err| return self.fail(err);
+        self.note("Directory saved");
+        self.workspace_dir.clear();
+        self.runtime_loaded = false;
+        self.ensureRuntime(cwd);
+    }
+
+    /// Drops an additional workspace directory for `cwd`.
+    pub fn removeWorkspaceDir(self: *Store, cwd: []const u8, path: []const u8) void {
+        @import("agent_fx.zig").changeDir(self.gpa, cwd, .{ .remove = path }) catch |err| return self.fail(err);
+        self.note("Directory removed");
+        self.runtime_loaded = false;
+        self.ensureRuntime(cwd);
+    }
+
+    /// Reloads everything after the home's settings changed elsewhere.
+    pub fn refreshRuntime(self: *Store) void {
+        self.runtime_loaded = false;
     }
 
     fn fail(self: *Store, err: anyerror) void {
@@ -313,13 +414,26 @@ pub const Store = struct {
                 };
             };
             const model = if (models) |map| if (map.get(entry.key_ptr.*)) |value| if (value == .string) value.string else "" else "" else "";
-            try self.providers.append(self.gpa, .{
+            var provider = Provider{
                 .name = try self.gpa.dupe(u8, entry.key_ptr.*),
                 .base_url = try self.gpa.dupe(u8, url),
                 .model = try self.gpa.dupe(u8, model),
                 .auth_env = try self.gpa.dupe(u8, auth_env),
                 .selected = std.mem.eql(u8, self.selected_provider, entry.key_ptr.*),
-            });
+            };
+            errdefer provider.deinit(self.gpa);
+            if (definition.get("model_metadata")) |value| if (value == .object) {
+                var metadata = value.object.iterator();
+                while (metadata.next()) |meta_entry| {
+                    if (meta_entry.value_ptr.* != .object) continue;
+                    provider.models.append(self.gpa, self.gpa.dupe(u8, meta_entry.key_ptr.*) catch continue) catch continue;
+                }
+            };
+            // No list of its own: the one model it prefers is what it offers.
+            if (provider.models.items.len == 0 and provider.model.len > 0) {
+                provider.models.append(self.gpa, self.gpa.dupe(u8, provider.model) catch "") catch {};
+            }
+            try self.providers.append(self.gpa, provider);
         }
     }
 
@@ -385,9 +499,24 @@ pub const Store = struct {
     pub fn saveProvider(self: *Store) void {
         const name = std.mem.trim(u8, self.provider_name.text(), " \t\r\n");
         const url = std.mem.trim(u8, self.provider_url.text(), " \t\r\n");
-        const model = std.mem.trim(u8, self.provider_model.text(), " \t\r\n");
         const env = std.mem.trim(u8, self.provider_auth_env.text(), " \t\r\n");
-        if (name.len == 0 or url.len == 0 or model.len == 0) return self.fail(error.ProviderFieldsRequired);
+        // Models, comma-separated; the first is the preferred one.
+        var ids: [32][]const u8 = undefined;
+        var count: usize = 0;
+        var tokens = std.mem.tokenizeScalar(u8, self.provider_model.text(), ',');
+        while (tokens.next()) |token| {
+            const id = std.mem.trim(u8, token, " \t\r\n");
+            if (id.len == 0 or count == ids.len) continue;
+            var seen = false;
+            for (ids[0..count]) |other| if (std.mem.eql(u8, other, id)) {
+                seen = true;
+            };
+            if (!seen) {
+                ids[count] = id;
+                count += 1;
+            }
+        }
+        if (name.len == 0 or url.len == 0 or count == 0) return self.fail(error.ProviderFieldsRequired);
         const id = engine.model_provider.parse(name) orelse return self.fail(error.InvalidProviderId);
         if (id != .configured) return self.fail(error.ReservedProviderId);
         var outcome = engine.provider_settings.setUserPreferencesAtHome(self.gpa, self.home, .{
@@ -397,9 +526,10 @@ pub const Store = struct {
                 .base_url = url,
                 .bearer_env = if (env.len > 0) env else null,
             } },
-            .model_preference = .{ .provider = id, .model = model },
+            .model_preference = .{ .provider = id, .model = ids[0] },
         }) catch |err| return self.fail(err);
         defer outcome.deinit(self.gpa);
+        self.writeProviderModels(name, ids[0..count]) catch |err| return self.fail(err);
         self.note("Provider saved and selected");
         self.provider_form_open = false;
         self.provider_name.clear();
@@ -407,6 +537,45 @@ pub const Store = struct {
         self.provider_model.clear();
         self.provider_auth_env.clear();
         self.reload();
+    }
+
+    /// Writes a provider's models as its definition's model_metadata, the
+    /// shape fx's own store keeps. The engine's patch carries only the URL
+    /// and its auth, so this reads the settings back, adds the list, and
+    /// writes through a temp file and rename, as fx commits do.
+    fn writeProviderModels(self: *Store, name: []const u8, models: []const []const u8) !void {
+        const data = std.Io.Dir.cwd().readFileAlloc(self.io, self.settings_path, self.gpa, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => try self.gpa.dupe(u8, "{}"),
+            else => return err,
+        };
+        defer self.gpa.free(data);
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, data, .{ .duplicate_field_behavior = .@"error" });
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidSettingsShape;
+        // The parsed tree lives in parseFromSlice's own arena; grow it there,
+        // or freeing the tree would free what it never allocated.
+        const arena = parsed.arena.allocator();
+        var root = &parsed.value.object;
+        var providers = if (root.getPtr("providers")) |value| blk: {
+            if (value.* != .object) return error.InvalidSettingsShape;
+            break :blk &value.object;
+        } else blk: {
+            try root.put(arena, "providers", .{ .object = .empty });
+            break :blk &root.getPtr("providers").?.object;
+        };
+        const definition = providers.getPtr(name) orelse return error.ProviderNotFound;
+        if (definition.* != .object) return error.InvalidSettingsShape;
+        var metadata: std.json.ObjectMap = .empty;
+        // The map borrows the caller's model strings; it lives only until
+        // the settings are written back below.
+        for (models) |model| try metadata.put(arena, model, .{ .object = .empty });
+        try definition.object.put(arena, "model_metadata", .{ .object = metadata });
+        const written = try std.json.Stringify.valueAlloc(self.gpa, parsed.value, .{});
+        defer self.gpa.free(written);
+        var tmp: [512]u8 = undefined;
+        const tmp_path = try std.fmt.bufPrint(&tmp, "{s}.tmp", .{self.settings_path});
+        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = tmp_path, .data = written });
+        try std.Io.Dir.renameAbsolute(tmp_path, self.settings_path, self.io);
     }
 
     pub fn selectProvider(self: *Store, provider: Provider) void {
@@ -575,6 +744,30 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     store.selectProviderByName("gateway");
     try std.testing.expectEqualStrings("", store.currentModel());
     store.selectProviderByName("local");
+    try std.testing.expectEqualStrings("qwen3-coder-plus", store.currentModel());
+
+    // A comma-separated list saves every model; the first is preferred.
+    store.provider_name.set("local");
+    store.provider_url.set("http://127.0.0.1:11435/v1/");
+    store.provider_model.set("qwen3-coder, qwen3-max, llama-x");
+    store.saveProvider();
+    try std.testing.expect(!store.failed);
+    try std.testing.expectEqual(@as(usize, 3), store.providers.items[0].models.items.len);
+    try std.testing.expectEqualStrings("qwen3-coder", store.providers.items[0].model);
+    try std.testing.expectEqualStrings("qwen3-max", store.providers.items[0].models.items[1]);
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(64 * 1024));
+        defer gpa.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "model_metadata") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "llama-x") != null);
+    }
+    // The old single-model save survives too: one id, one entry.
+    store.provider_name.set("local");
+    store.provider_url.set("http://127.0.0.1:11435/v1/");
+    store.provider_model.set(" qwen3-coder-plus ,");
+    store.saveProvider();
+    try std.testing.expect(!store.failed);
+    try std.testing.expectEqual(@as(usize, 1), store.providers.items[0].models.items.len);
     try std.testing.expectEqualStrings("qwen3-coder-plus", store.currentModel());
 
     store.mcp_name.set("local-tools");

@@ -134,13 +134,16 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
     };
     if (list.items.len == 0 and s.which == .agent) if (s.shared.agent_store) |store| {
         for (store.providers.items) |provider| {
-            if (provider.model.len == 0 or palette.score(provider.model, q) == null) continue;
-            list.append(c.alloc(), .{
-                .value = provider.model,
-                .section = provider.name,
-                .provider = provider.name,
-                .row = .{ .icon = if (std.mem.eql(u8, provider.model, current)) "checkmark.circle.fill" else "cpu", .title = provider.model, .detail = provider.base_url, .current = std.mem.eql(u8, provider.model, current), .mono = true },
-            }) catch {};
+            // Every model the provider offers, not only its preferred one.
+            for (provider.models.items) |model| {
+                if (palette.score(model, q) == null) continue;
+                list.append(c.alloc(), .{
+                    .value = model,
+                    .section = provider.name,
+                    .provider = provider.name,
+                    .row = .{ .icon = if (std.mem.eql(u8, model, current)) "checkmark.circle.fill" else "cpu", .title = model, .detail = provider.base_url, .current = std.mem.eql(u8, model, current), .mono = true },
+                }) catch {};
+            }
         }
         ui.text(c, "Choose a configured model, or type a model name and press ↩. Add providers in Settings.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
     };

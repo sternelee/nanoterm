@@ -81,6 +81,8 @@ pub const Context = struct {
     commands: *const Commands.Commands,
     /// The agent's slash commands, in agent mode.
     slash: ?[]const agent_config.Command = null,
+    /// The built-in Agent's arguments for its slash commands (agent_fx).
+    fx_args: bool = false,
 };
 
 /// Fills `m` with the completions of the word ending at `caret` in `text`.
@@ -110,6 +112,13 @@ pub fn compute(m: *Menu, text: []const u8, caret: usize, ctx: Context) void {
         if (word.len == 0 or std.mem.indexOfScalar(u8, word, '/') != null) return paths(m, word, ctx);
         for (ctx.commands.withPrefix(word)) |c| m.add(c, "", .command);
         return;
+    }
+    // A built-in Agent command's argument: "/effort med…" offers its levels.
+    if (ctx.fx_args and n == 1 and words[0].len > 1 and words[0][0] == '/') {
+        if (@import("agent_fx.zig").words(words[0][1..])) |options| {
+            for (options) |option| if (std.mem.startsWith(u8, option, word)) m.add(option, "", .slash);
+            if (m.items.items.len > 0) return;
+        }
     }
     if (word.len > 0 and word[0] == '-') return;
     if (std.mem.eql(u8, words[0], "git")) {
@@ -218,6 +227,15 @@ test "completing commands, git, files" {
     compute(&m, "git switch fe", 13, ctx);
     try std.testing.expectEqualStrings("feature/menu", m.items.items[0].word);
     try std.testing.expectEqual(Kind.branch, m.items.items[0].kind);
+    // A built-in Agent command's arguments: "/effort " offers its levels.
+    compute(&m, "/effort m", 9, .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds, .fx_args = true });
+    try std.testing.expectEqual(@as(usize, 2), m.items.items.len); // minimal, medium
+    try std.testing.expectEqualStrings("minimal", m.items.items[0].word);
+    try std.testing.expectEqual(Kind.slash, m.items.items[0].kind);
+    // Without fx args (an external agent), the path completion stands.
+    compute(&m, "/effort m", 9, .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds });
+    try std.testing.expect(m.items.items.len == 0 or m.items.items[0].kind != .slash);
+
     var cmd_name = "review".*;
     var desc = "review code".*;
     var hint = "".*;

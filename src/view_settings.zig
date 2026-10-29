@@ -106,7 +106,10 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
                     &provider.open,
                 ) orelse continue;
                 defer open.end();
-                ui.text(c, c.print("{s} · {s}", .{ provider.base_url, provider.model }), .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                ui.text(c, if (provider.models.items.len > 1)
+                    c.print("{s} · {s} +{d}", .{ provider.base_url, provider.models.items[0], provider.models.items.len - 1 })
+                else
+                    c.print("{s} · {s}", .{ provider.base_url, provider.model }), .{ .size = 11.5, .color = theme.muted, .wrap = true });
                 if (provider.auth_env.len > 0) ui.text(c, c.print("Token variable: {s}", .{provider.auth_env}), .{ .size = 11, .color = theme.faint });
                 const actions = ui.div(c).row().wFull().gap(8);
                 defer actions.end();
@@ -129,11 +132,120 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
                 defer open.end();
                 _ = ui.textField(c, &store.provider_name, .{ .placeholder = "Provider id (for example local)", .width = .fill });
                 _ = ui.textField(c, &store.provider_url, .{ .placeholder = "Base URL, including /v1/", .width = .fill });
-                _ = ui.textField(c, &store.provider_model, .{ .placeholder = "Model", .width = .fill });
+                _ = ui.textField(c, &store.provider_model, .{ .placeholder = "Models, comma-separated (qwen3-coder, llama-x)", .width = .fill });
                 _ = ui.textField(c, &store.provider_auth_env, .{ .placeholder = "Bearer token environment variable (optional)", .width = .fill });
                 if (ui.button(c, "Save and select provider", .{ .variant = .primary, .size = 12 }).clicked) {
                     store.saveProvider();
                     syncAgentModel(w);
+                }
+            }
+        }
+        // fx's own dials: sign-in, permissions, effort, directories, and
+        // the instructions it reads — for the pane the panel is over.
+        {
+            const focused = w.focused();
+            const cwd = focused.cwd();
+            store.ensureRuntime(cwd);
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Sign in", .{ .size = 14, .weight = .semibold });
+                const provider_label: []const u8 = if (std.mem.eql(u8, store.selected_provider, "gateway")) "AI Gateway" else store.selected_provider;
+                ui.text(c, c.print("Provider: {s}. Sign-in runs in the terminal, as fx does.", .{provider_label}), .{ .size = 12, .color = theme.muted, .wrap = true });
+                const SignIn = struct { label: []const u8, note: []const u8, line: []const u8 };
+                const rows = [_]SignIn{
+                    .{ .label = "Codex", .note = "ChatGPT subscription", .line = "fx login codex" },
+                    .{ .label = "Grok", .note = "Grok subscription", .line = "fx login grok" },
+                    .{ .label = "AI Gateway", .note = "Vercel account or API key", .line = "fx setup" },
+                };
+                for (rows) |row| {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    ui.text(c, row.label, .{ .size = 13, .weight = .semibold });
+                    ui.text(c, row.note, .{ .size = 11.5, .color = theme.muted });
+                    ui.spacer(c);
+                    if (ui.button(c, "Sign in", .{ .size = 12 }).clicked) {
+                        const line = c.gpa.dupe(u8, row.line) catch continue;
+                        defer c.gpa.free(line);
+                        focused.input.clear();
+                        focused.run(line);
+                        w.closeOverlay();
+                    }
+                }
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Permissions", .{ .size = 14, .weight = .semibold });
+                const names = [_][]const u8{ "Ask", "Auto", "Full access" };
+                const values = [_][]const u8{ "ask", "auto", "full-access" };
+                var selected: usize = 1;
+                for (values, 0..) |value, i| if (std.mem.eql(u8, store.perm_mode, value)) {
+                    selected = i;
+                };
+                {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    if (ui.segmented(c, names[0..], &selected)) store.setPermissionMode(cwd, values[selected]);
+                    ui.spacer(c);
+                    ui.text(c, store.perm_mode, .{ .size = 11.5, .color = theme.muted });
+                }
+                ui.text(c, "What fx may do without asking. The built-in agent runs auto inside nanoterm; fx in the terminal and its new sessions follow this.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Reasoning effort", .{ .size = 14, .weight = .semibold });
+                const names = [_][]const u8{ "Default", "Minimal", "Low", "Medium", "High" };
+                const values = [_][]const u8{ "auto", "minimal", "low", "medium", "high" };
+                var selected: usize = 0;
+                for (values, 0..) |value, i| if (std.mem.eql(u8, store.effort, value)) {
+                    selected = i;
+                };
+                if (ui.segmented(c, names[0..], &selected)) store.setEffortLevel(cwd, values[selected]);
+                ui.text(c, "How much room the model is given to reason; higher takes longer. Applies from the next turn, and to fx in the terminal.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Additional workspaces", .{ .size = 14, .weight = .semibold });
+                ui.text(c, "Other directories this workspace's fx may work in.", .{ .size = 12, .color = theme.muted, .wrap = true });
+                for (store.dirs.items) |dir| {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    ui.text(c, dir, .{ .size = 12.5, .mono = true });
+                    ui.spacer(c);
+                    if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                        const path = c.gpa.dupe(u8, dir) catch continue;
+                        defer c.gpa.free(path);
+                        store.removeWorkspaceDir(cwd, path);
+                        break;
+                    }
+                }
+                const add = ui.div(c).row().wFull().gap(8).itemsCenter();
+                defer add.end();
+                _ = ui.textField(c, &store.workspace_dir, .{ .placeholder = "/another/project", .width = .fill });
+                if (ui.button(c, "Add", .{ .variant = .primary, .size = 12 }).clicked) store.addWorkspaceDir(cwd);
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Project instructions", .{ .size = 14, .weight = .semibold });
+                if (store.agents_files.items.len == 0) {
+                    ui.text(c, "No AGENTS.md found; fx reads one at the project's root, and nested ones beside the files it works on.", .{ .size = 11.5, .color = theme.faint, .wrap = true });
+                }
+                for (store.agents_files.items) |path| {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    ui.text(c, path, .{ .size = 12.5, .mono = true });
+                    ui.spacer(c);
+                    if (ui.button(c, "Open", .{ .variant = .ghost, .size = 12 }).clicked) {
+                        const line = std.fmt.allocPrint(c.gpa, "open \"{s}\"", .{path}) catch continue;
+                        defer c.gpa.free(line);
+                        focused.input.clear();
+                        focused.run(line);
+                        w.closeOverlay();
+                    }
                 }
             }
         }

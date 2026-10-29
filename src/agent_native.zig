@@ -133,6 +133,15 @@ pub const Runtime = struct {
         }
     }
 
+    /// Drops the session, so the next prompt opens a fresh conversation;
+    /// call between turns, never while one runs (a done event would race).
+    pub fn clearSession(self: *Runtime) void {
+        if (self.busy()) return;
+        const id = self.session_id orelse return;
+        self.session_id = null;
+        allocator.free(id);
+    }
+
     fn applyPending(self: *Runtime) void {
         if (self.pending_cwd) |cwd| {
             allocator.free(self.cwd);
