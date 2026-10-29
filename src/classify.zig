@@ -17,7 +17,7 @@ pub const Guess = struct {
 const one_off = [_][]const u8{ "hello", "hi", "hey", "thanks", "thank", "explain", "why", "what", "how", "help", "continue", "yes", "no", "ok", "okay", "please" };
 
 /// Programs whose arguments are free text: always shell (Warp's list).
-const shell_first = [_][]const u8{ "echo", "man", "sudo", "claude", "codex", "gemini", "agent", "printf", "export", "alias" };
+const shell_first = [_][]const u8{ "echo", "man", "sudo", "claude", "codex", "gemini", "agent", "pi", "printf", "export", "alias" };
 
 /// Common English words: requests are mostly made of them.
 const english = std.StaticStringMap(void).initComptime(blk: {

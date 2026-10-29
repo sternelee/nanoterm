@@ -39,6 +39,13 @@ pub fn words(name: []const u8) ?[]const []const u8 {
     return null;
 }
 
+/// Whether taking an argument of `name` from the menu sends the whole
+/// command: value arguments (a level, a mode, a provider) complete it, while
+/// `workspace`'s list/add/remove lead into a path.
+pub fn sendsArg(name: []const u8) bool {
+    return asciiEqlAny(name, &.{ "effort", "permissions", "login", "logout" });
+}
+
 /// Fills the agent's slash menu with the commands above; the strings are
 /// copied, as Config owns (and frees) them.
 pub fn seed(gpa: std.mem.Allocator, config: *agent_config.Config) void {
@@ -219,8 +226,8 @@ pub fn route(s: *Session, text: []const u8) bool {
     var command = text[1..];
     var arg: []const u8 = "";
     if (std.mem.indexOfScalar(u8, command, ' ')) |space| {
-        command = command[0..space];
         arg = std.mem.trim(u8, command[space + 1 ..], " \t");
+        command = command[0..space];
     }
     if (!known(command)) return false;
     _ = s.ensureAgent();
@@ -358,7 +365,14 @@ fn say(s: *Session, comptime fmt: []const u8, args: anytype) bool {
 
 /// Shows `text` as a turn of its own, done the moment it is made.
 fn note(s: *Session, text: []const u8) bool {
-    if (s.agent) |ag| ag.note(text);
+    const ag = s.agent orelse return true;
+    ag.remark(text);
+    // The pane shows it too: the finished turn joins the timeline, as a
+    // prompt's does.
+    if (ag.current()) |t| {
+        s.timeline.append(s.gpa, .{ .turn = t }) catch {};
+        s.pinLast();
+    }
     return true;
 }
 

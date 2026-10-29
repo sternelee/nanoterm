@@ -40,6 +40,8 @@ test {
     _ = @import("agent_native.zig");
     _ = @import("agent_settings.zig");
     _ = @import("agent_fx.zig");
+    _ = @import("agent_launch.zig");
+    _ = @import("pi.zig");
     _ = @import("tests_agent_native.zig");
     _ = @import("tests_settings.zig");
     _ = @import("tests_onboarding.zig");
@@ -150,6 +152,62 @@ test "a real zsh, cut into blocks" {
     const cd = try run(&sh, gpa, "cd /tmp");
     defer cd.destroy(gpa);
     try std.testing.expect(std.mem.endsWith(u8, sh.cwd.items, "/tmp"));
+}
+
+test "a finished command tells its exit status" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = try tempHome(io, arena, "shell-finished");
+
+    const Finished = struct {
+        codes: [8]i32 = undefined,
+        count: usize = 0,
+        fn f(ctx: *anyopaque, code: i32) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.count < self.codes.len) {
+                self.codes[self.count] = code;
+                self.count += 1;
+            }
+        }
+    };
+    var seen: Finished = .{};
+    var sh: shell_mod.Shell = .init(gpa, .{ .ctx = &seen, .changed = Noop.changed, .exited = Noop.exited, .command_finished = Finished.f });
+    defer sh.deinit();
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    try sh.start(arena, io, try std.fs.path.join(arena, &.{ home, "zdot" }), home, &env, home, .{ .rows = 24, .cols = 80 });
+    try pumpUntil(&sh, struct {
+        fn f(s: *shell_mod.Shell) bool {
+            return s.phase == .ready;
+        }
+    }.f);
+
+    const run = struct {
+        fn f(s: *shell_mod.Shell, g: std.mem.Allocator, id: u64, cmd: []const u8) !*blocks.Block {
+            const b = try blocks.Block.create(g, id, .shell, cmd, "/", "");
+            s.submit(b);
+            try pumpUntil(b, struct {
+                fn done(x: *blocks.Block) bool {
+                    return x.state == .done;
+                }
+            }.done);
+            return b;
+        }
+    }.f;
+
+    const ok = try run(&sh, gpa, 1, "true");
+    defer ok.destroy(gpa);
+    try std.testing.expectEqual(@as(usize, 1), seen.count);
+    try std.testing.expectEqual(@as(i32, 0), seen.codes[0]);
+
+    const fails = try run(&sh, gpa, 2, "false");
+    defer fails.destroy(gpa);
+    try std.testing.expectEqual(@as(usize, 2), seen.count);
+    try std.testing.expectEqual(@as(i32, 1), seen.codes[1]);
 }
 
 const fake_agent =

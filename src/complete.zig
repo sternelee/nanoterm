@@ -101,6 +101,20 @@ pub fn compute(m: *Menu, text: []const u8, caret: usize, ctx: Context) void {
         words[n] = w;
         n += 1;
     }
+    // The built-in Agent's command, whole and unspaced: its arguments
+    // follow it ("/effort" offers its levels right away). Falls through
+    // to the command list above when the name is not yet whole.
+    if (ctx.fx_args and n == 0 and word.len > 1 and word[0] == '/') {
+        if (@import("agent_fx.zig").words(word[1..])) |options| {
+            for (options) |option| m.add(option, "", .slash);
+            if (m.items.items.len > 0) {
+                // The command stays: an argument appends after it, so the
+                // word to replace is the empty one at the caret.
+                m.start = upto.len;
+                return;
+            }
+        }
+    }
     if (ctx.slash) |cmds| if (n == 0 and word.len > 0 and word[0] == '/') {
         for (cmds) |c| if (std.mem.startsWith(u8, c.name, word[1..])) {
             var buf: [128]u8 = undefined;

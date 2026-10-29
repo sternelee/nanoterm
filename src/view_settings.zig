@@ -119,6 +119,9 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
                     // selectProvider reloads the list this loop borrows from.
                     break;
                 }
+                if (ui.button(c, if (store.models_call.running and store.models_for != null and std.mem.eql(u8, store.models_for.?, provider.name)) "Fetching…" else "Fetch models", .{ .variant = .ghost, .size = 12 }).clicked) {
+                    store.fetchModels(provider.*, if (provider.auth_env.len > 0) w.shared.env.get(provider.auth_env) else null);
+                }
                 if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
                     const name = c.gpa.dupe(u8, provider.name) catch break;
                     defer c.gpa.free(name);
@@ -146,26 +149,33 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
             const focused = w.focused();
             const cwd = focused.cwd();
             store.ensureRuntime(cwd);
+            // Sign-in state, as fx sees it, once each time the panel opens.
+            if (!store.signed_checked and !store.checking) {
+                store.refreshSignIn(w.shared.env.get("PATH") orelse "/usr/bin:/bin");
+            }
             {
                 const b = box(c);
                 defer b.end();
                 ui.text(c, "Sign in", .{ .size = 14, .weight = .semibold });
                 const provider_label: []const u8 = if (std.mem.eql(u8, store.selected_provider, "gateway")) "AI Gateway" else store.selected_provider;
-                ui.text(c, c.print("Provider: {s}. Sign-in runs in the terminal, as fx does.", .{provider_label}), .{ .size = 12, .color = theme.muted, .wrap = true });
-                const SignIn = struct { label: []const u8, note: []const u8, line: []const u8 };
+                const state = if (store.checking) "checking…" else if (store.auth_label.len > 0) store.auth_label else "not signed in";
+                ui.text(c, c.print("Provider: {s} · {s}. Sign-in runs in the terminal, as fx does.", .{ provider_label, state }), .{ .size = 12, .color = theme.muted, .wrap = true });
+                const SignIn = struct { label: []const u8, note: []const u8, name: []const u8, sign_in: []const u8, sign_out: []const u8 };
                 const rows = [_]SignIn{
-                    .{ .label = "Codex", .note = "ChatGPT subscription", .line = "fx login codex" },
-                    .{ .label = "Grok", .note = "Grok subscription", .line = "fx login grok" },
-                    .{ .label = "AI Gateway", .note = "Vercel account or API key", .line = "fx setup" },
+                    .{ .label = "Codex", .note = "ChatGPT subscription", .name = "codex", .sign_in = "fx login codex", .sign_out = "fx logout codex" },
+                    .{ .label = "Grok", .note = "Grok subscription", .name = "grok", .sign_in = "fx login grok", .sign_out = "fx logout grok" },
+                    .{ .label = "AI Gateway", .note = "Vercel account or API key", .name = "gateway", .sign_in = "fx setup", .sign_out = "fx logout vercel" },
                 };
                 for (rows) |row| {
                     const r = ui.div(c).row().wFull().gap(10).itemsCenter();
                     defer r.end();
                     ui.text(c, row.label, .{ .size = 13, .weight = .semibold });
+                    if (store.signedIn(row.name)) ui.icon(c, "checkmark.circle.fill", .{ .size = 12, .color = theme.accent });
                     ui.text(c, row.note, .{ .size = 11.5, .color = theme.muted });
                     ui.spacer(c);
-                    if (ui.button(c, "Sign in", .{ .size = 12 }).clicked) {
-                        const line = c.gpa.dupe(u8, row.line) catch continue;
+                    const label: []const u8 = if (store.signedIn(row.name)) "Sign out" else "Sign in";
+                    if (ui.button(c, label, .{ .size = 12 }).clicked) {
+                        const line = c.gpa.dupe(u8, if (store.signedIn(row.name)) row.sign_out else row.sign_in) catch continue;
                         defer c.gpa.free(line);
                         focused.input.clear();
                         focused.run(line);

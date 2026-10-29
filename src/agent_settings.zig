@@ -3,8 +3,16 @@
 const std = @import("std");
 const engine = @import("fx");
 const ui = @import("nanoui").ui;
+const proc = @import("proc.zig");
+const web = @import("web.zig");
 
 const Allocator = std.mem.Allocator;
+
+/// Notified when something the panel shows changed off its own frame.
+pub const Changed = struct {
+    ctx: *anyopaque,
+    func: *const fn (*anyopaque) void,
+};
 
 pub const Provider = struct {
     name: []u8,
@@ -16,6 +24,8 @@ pub const Provider = struct {
     /// Every model id the provider offers (its model_metadata keys, or the
     /// single preferred one when the definition carries no list).
     models: std.ArrayList([]u8) = .empty,
+    /// Its endpoint was asked for the list once this run.
+    models_tried: bool = false,
 
     fn deinit(self: *Provider, gpa: Allocator) void {
         gpa.free(self.name);
@@ -66,6 +76,28 @@ pub const Store = struct {
     status: []u8,
     failed: bool = false,
 
+    /// Sign-in, as `fx status` reports it: the providers with working
+    /// credentials, refreshed when the panel opens and a login or logout
+    /// finishes.
+    connected: std.ArrayList([]u8) = .empty,
+    auth_label: []u8 = &.{},
+    signed_checked: bool = false,
+    checking: bool = false,
+    check_process: proc.Process = undefined,
+    check_buf: std.ArrayList(u8) = .empty,
+    /// The AI Gateway's API key lives in the keychain, not in fx's status
+    /// (which only lists the active and standby providers).
+    gateway_keychain: bool = false,
+    keychain_checking: bool = false,
+    keychain_process: proc.Process = undefined,
+    /// A provider's model list, fetched from its own endpoint.
+    models_call: web.Call,
+    models_for: ?[]u8 = null,
+    /// The app's environment, for a provider's token variable.
+    env: ?*const std.process.Environ.Map = null,
+    /// Woken when a fetch or a status check lands, to repaint.
+    changed: ?Changed = null,
+
     provider_name: ui.TextBuffer = .{},
     provider_url: ui.TextBuffer = .{},
     provider_model: ui.TextBuffer = .{},
@@ -105,7 +137,7 @@ pub const Store = struct {
     mcp_tools_note: []u8 = &.{},
     mcp_tools_failed: bool = false,
 
-    pub fn init(gpa: Allocator, io: std.Io, home: []const u8) !Store {
+    pub fn init(gpa: Allocator, io: std.Io, home: []const u8, env: ?*const std.process.Environ.Map) !Store {
         engine.shared_io.setIo(io);
         const settings_path = try std.fs.path.join(gpa, &.{ home, ".fx", "settings.json" });
         errdefer gpa.free(settings_path);
@@ -126,6 +158,8 @@ pub const Store = struct {
             .settings_path = settings_path,
             .mcp_path = mcp_path,
             .skills_dir = skills_dir,
+            .models_call = .{ .gpa = gpa },
+            .env = env,
             .selected_provider = selected_provider,
             .status = status,
         };
@@ -136,6 +170,16 @@ pub const Store = struct {
     pub fn deinit(self: *Store) void {
         self.mcp_query_cancel.store(true, .release);
         if (self.mcp_query_thread) |thread| thread.join();
+        if (self.checking) self.check_process.close();
+        if (self.keychain_checking) self.keychain_process.close();
+        self.checking = false;
+        self.keychain_checking = false;
+        self.check_buf.deinit(self.gpa);
+        for (self.connected.items) |name| self.gpa.free(name);
+        self.connected.deinit(self.gpa);
+        if (self.auth_label.len > 0) self.gpa.free(self.auth_label);
+        if (self.models_for) |name| self.gpa.free(name);
+        self.models_call.deinit();
         self.clearMcpQuery();
         self.clearMcpTools();
         self.mcp_query_names.deinit(self.gpa);
@@ -371,6 +415,201 @@ pub const Store = struct {
         self.failed = true;
     }
 
+    /// Asks fx what is signed in (`fx status --json`), off the frame; the
+    /// panel and the model picker read `connected` when it lands.
+    pub fn refreshSignIn(self: *Store, path_env: []const u8) void {
+        if (self.checking) return;
+        var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        // The keychain says whether the gateway's key is there even when fx
+        // itself is not on this PATH.
+        self.checkGatewayKeychain();
+        const fx = proc.which(arena, self.io, path_env, "fx") orelse {
+            self.signed_checked = true;
+            return;
+        };
+        const env = [_][]const u8{
+            std.fmt.allocPrint(arena, "PATH={s}", .{path_env}) catch return,
+            std.fmt.allocPrint(arena, "HOME={s}", .{self.home}) catch return,
+        };
+        self.check_buf.clearRetainingCapacity();
+        // Spawn into the field itself: the watch callbacks keep a pointer to
+        // the Process, so it must not live on this stack frame.
+        proc.spawnPipes(
+            &self.check_process,
+            proc.cStrings(arena, &.{ fx, "status", "--json" }) catch return,
+            proc.cStrings(arena, env[0..]) catch return,
+            null,
+            true,
+            .{ .ctx = self, .output = onCheckOutput, .exited = onCheckExit },
+        ) catch {
+            self.signed_checked = true;
+            return;
+        };
+        self.checking = true;
+        self.check_process.closeInput();
+    }
+
+    /// Reads whether the AI Gateway's key exists, without printing it.
+    fn checkGatewayKeychain(self: *Store) void {
+        if (self.keychain_checking) return;
+        var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const env = [_][]const u8{ std.fmt.allocPrint(arena, "HOME={s}", .{self.home}) catch return };
+        proc.spawnPipes(
+            &self.keychain_process,
+            proc.cStrings(arena, &.{ "/usr/bin/security", "find-generic-password", "-s", "FX_AI_GATEWAY_API_KEY" }) catch return,
+            proc.cStrings(arena, env[0..]) catch return,
+            null,
+            true,
+            .{ .ctx = self, .output = onDiscard, .exited = onKeychainExit },
+        ) catch return;
+        self.keychain_checking = true;
+        self.keychain_process.closeInput();
+    }
+
+    fn onDiscard(_: *anyopaque, _: []const u8) void {}
+
+    fn onKeychainExit(ctx: *anyopaque, code: i32) void {
+        const self: *Store = @ptrCast(@alignCast(ctx));
+        self.keychain_process.close();
+        self.keychain_checking = false;
+        self.gateway_keychain = code == 0;
+        if (self.changed) |c| c.func(c.ctx);
+    }
+
+    fn onCheckOutput(ctx: *anyopaque, bytes: []const u8) void {
+        const self: *Store = @ptrCast(@alignCast(ctx));
+        if (self.check_buf.items.len < 1 << 20) self.check_buf.appendSlice(self.gpa, bytes) catch {};
+    }
+
+    fn onCheckExit(ctx: *anyopaque, code: i32) void {
+        const self: *Store = @ptrCast(@alignCast(ctx));
+        if (self.checking) self.check_process.close();
+        if (self.keychain_checking) self.keychain_process.close();
+        self.checking = false;
+        self.keychain_checking = false;
+        self.applyStatus(code);
+    }
+
+    /// What fx's answer says about sign-in, into the store's own fields.
+    pub fn applyStatus(self: *Store, code: i32) void {
+        self.signed_checked = true;
+        defer if (self.changed) |c| c.func(c.ctx);
+        if (code != 0) return;
+        var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, self.check_buf.items, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        for (self.connected.items) |name| self.gpa.free(name);
+        self.connected.clearRetainingCapacity();
+        if (self.auth_label.len > 0) self.gpa.free(self.auth_label);
+        self.auth_label = &.{};
+        if (parsed.value.object.get("auth")) |v| if (v == .string) {
+            self.auth_label = self.gpa.dupe(u8, v.string) catch &.{};
+        };
+        if (parsed.value.object.get("connected_providers")) |v| if (v == .array) {
+            for (v.array.items, 0..) |entry, i| {
+                if (i >= 32) break;
+                if (entry != .string) continue;
+                self.connected.append(self.gpa, self.gpa.dupe(u8, entry.string) catch continue) catch {};
+            }
+        };
+        self.fetchNextModels();
+    }
+
+    /// Asks each provider that has an endpoint and no list of its own for
+    /// one, one request at a time.
+    fn fetchNextModels(self: *Store) void {
+        if (self.models_call.running) return;
+        for (self.providers.items) |*provider| {
+            // Only a provider without a list of its own is asked; a saved
+            // list (fx's, with its context windows) stays as it is.
+            if (provider.models_tried or provider.base_url.len == 0 or provider.models.items.len > 0) continue;
+            provider.models_tried = true;
+            return self.fetchModels(provider.*, self.providerToken(provider.*));
+        }
+    }
+
+    /// A provider's token, from the variable its definition names.
+    fn providerToken(self: *Store, provider: Provider) ?[]const u8 {
+        if (provider.auth_env.len == 0) return null;
+        const env = self.env orelse return null;
+        return env.get(provider.auth_env);
+    }
+
+    /// Whether `name` ("codex", "grok", "vercel") has working credentials.
+    /// The gateway answers to every name fx reports it under ("vercel",
+    /// "gateway", "vercel-ai-gateway").
+    pub fn signedIn(self: *Store, name: []const u8) bool {
+        if (std.mem.eql(u8, name, "gateway") and self.gateway_keychain) return true;
+        for (self.connected.items) |entry| {
+            if (std.mem.eql(u8, entry, name)) return true;
+            if (std.mem.eql(u8, name, "gateway") and (std.mem.eql(u8, entry, "vercel") or std.mem.eql(u8, entry, "gateway") or std.mem.eql(u8, entry, "vercel-ai-gateway"))) return true;
+            if (std.mem.eql(u8, name, "vercel") and (std.mem.eql(u8, entry, "gateway") or std.mem.eql(u8, entry, "vercel-ai-gateway"))) return true;
+        }
+        // The active provider names itself in fx's auth line.
+        if (self.auth_label.len > 0) {
+            if (std.mem.eql(u8, name, "codex") and std.mem.indexOf(u8, self.auth_label, "codex") != null) return true;
+            if (std.mem.eql(u8, name, "grok") and std.mem.indexOf(u8, self.auth_label, "grok") != null) return true;
+            if (std.mem.eql(u8, name, "gateway") and (std.mem.indexOf(u8, self.auth_label, "gateway") != null or std.mem.indexOf(u8, self.auth_label, "vercel") != null)) return true;
+        }
+        return false;
+    }
+
+    /// Fetches a provider's model list from its own endpoint
+    /// (`GET <base_url>/models`, the OpenAI-compatible shape Ollama and the
+    /// rest speak), and saves it as the provider's models.
+    pub fn fetchModels(self: *Store, provider: Provider, bearer: ?[]const u8) void {
+        if (self.models_call.running) return;
+        var url: [1024]u8 = undefined;
+        const base = std.mem.trimEnd(u8, provider.base_url, "/");
+        const full = std.fmt.bufPrint(&url, "{s}/models", .{base}) catch return;
+        if (self.models_for) |old| self.gpa.free(old);
+        self.models_for = self.gpa.dupe(u8, provider.name) catch return;
+        self.models_call.start(.{ .url = full, .bearer = bearer, .max_seconds = 10, .max_bytes = 1 << 20 }, .{ .ctx = self, .func = onModels }) catch |err| {
+            self.gpa.free(self.models_for.?);
+            self.models_for = null;
+            return self.fail(err);
+        };
+    }
+
+    fn onModels(ctx: *anyopaque, code: i32, body: []const u8) void {
+        const self: *Store = @ptrCast(@alignCast(ctx));
+        const name = self.models_for orelse return;
+        defer {
+            self.gpa.free(name);
+            self.models_for = null;
+        }
+        defer if (self.changed) |c| c.func(c.ctx);
+        if (code != 0) {
+            self.note("Could not reach the provider's /models");
+            self.fetchNextModels();
+            return;
+        }
+        var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, body, .{}) catch return;
+        defer parsed.deinit();
+        const root = parsed.value;
+        const list = if (root == .object) (root.object.get("data") orelse root.object.get("models") orelse root) else root;
+        if (list != .array) return;
+        var ids: std.ArrayList([]const u8) = .empty;
+        defer ids.deinit(self.gpa);
+        for (list.array.items) |entry| {
+            if (entry != .object) continue;
+            const id = if (entry.object.get("id")) |v| (if (v == .string) v.string else null) else if (entry.object.get("name")) |v| (if (v == .string) v.string else null) else null;
+            if (id == null or id.?.len == 0 or ids.items.len >= 256) continue;
+            ids.append(self.gpa, id.?) catch {};
+        }
+        if (ids.items.len == 0) return;
+        self.writeProviderModels(name, ids.items) catch |err| return self.fail(err);
+        self.reload();
+        var line: [80]u8 = undefined;
+        const said = std.fmt.bufPrint(&line, "{d} models from {s}", .{ ids.items.len, name }) catch return;
+        self.note(said);
+        self.fetchNextModels();
+    }
+
     pub fn reload(self: *Store) void {
         self.clearLists();
         self.loadProviders() catch |err| self.fail(err);
@@ -567,8 +806,13 @@ pub const Store = struct {
         if (definition.* != .object) return error.InvalidSettingsShape;
         var metadata: std.json.ObjectMap = .empty;
         // The map borrows the caller's model strings; it lives only until
-        // the settings are written back below.
-        for (models) |model| try metadata.put(arena, model, .{ .object = .empty });
+        // the settings are written back below. A model fx already described
+        // keeps its metadata (its context window, its flags).
+        const existing_metadata = if (definition.object.get("model_metadata")) |v| (if (v == .object) v.object else null) else null;
+        for (models) |model| {
+            const known = if (existing_metadata) |m| (if (m.get(model)) |v| (if (v == .object) v else null) else null) else null;
+            try metadata.put(arena, model, known orelse .{ .object = .empty });
+        }
         try definition.object.put(arena, "model_metadata", .{ .object = metadata });
         const written = try std.json.Stringify.valueAlloc(self.gpa, parsed.value, .{});
         defer self.gpa.free(written);
@@ -711,6 +955,44 @@ pub const Store = struct {
     }
 };
 
+test "sign-in state is read from fx status, under fx's own names" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-signin";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    try std.testing.expect(!store.signedIn("codex"));
+
+    store.check_buf.appendSlice(gpa, "{\"auth\":\"configured provider\",\"connected_providers\":[\"magpie\",\"vercel\"]}") catch {};
+    store.applyStatus(0);
+    try std.testing.expect(store.signed_checked);
+    try std.testing.expect(store.signedIn("magpie"));
+    // The gateway answers to either name fx gives it.
+    try std.testing.expect(store.signedIn("gateway"));
+    try std.testing.expect(store.signedIn("vercel"));
+    try std.testing.expect(!store.signedIn("codex"));
+    try std.testing.expectEqualStrings("configured provider", store.auth_label);
+
+    // fx reports a signed-in gateway as "vercel-ai-gateway", as `fx login`
+    // signs into it: the row answers to that name too.
+    store.check_buf.clearRetainingCapacity();
+    store.check_buf.appendSlice(gpa, "{\"auth\":\"fx login\",\"connected_providers\":[\"vercel-ai-gateway\"]}") catch {};
+    store.applyStatus(0);
+    try std.testing.expect(store.signedIn("gateway"));
+    try std.testing.expect(store.signedIn("vercel"));
+    try std.testing.expect(!store.signedIn("codex"));
+
+    // A fresh report replaces the old one.
+    store.check_buf.clearRetainingCapacity();
+    store.check_buf.appendSlice(gpa, "{\"auth\":\"codex\",\"connected_providers\":[\"codex\"]}") catch {};
+    store.applyStatus(0);
+    try std.testing.expect(store.signedIn("codex"));
+    try std.testing.expect(!store.signedIn("vercel"));
+}
+
 test "agent settings manage providers, MCP servers, and Skills in an isolated home" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -720,7 +1002,7 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/.fx/settings.json", .data = "{\"future\":{\"keep\":true}}" });
 
-    var store = try Store.init(gpa, io, home);
+    var store = try Store.init(gpa, io, home, null);
     defer store.deinit();
     try std.testing.expectEqualStrings("", store.currentModel());
 
@@ -849,7 +1131,7 @@ test "MCP tool listing starts a server and returns its tools" {
     try std.testing.expectEqualStrings("stamp", tools.names[1]);
 
     // The Settings panel asks through the Store's worker, not on the UI thread.
-    var store = try Store.init(gpa, io, root);
+    var store = try Store.init(gpa, io, root, null);
     defer store.deinit();
     try std.testing.expectEqual(@as(usize, 1), store.mcp_servers.items.len);
     store.startMcpQuery("fake");

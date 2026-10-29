@@ -44,6 +44,7 @@ test "the Settings page: built-in Agent, agents, appearance, updates" {
     try std.testing.expect(t.hasText("Providers"));
     try std.testing.expect(t.hasText("Add provider") and t.hasText("Add MCP server") and t.hasText("Add Skill"));
     try std.testing.expect(t.hasText("Codex") and t.hasText("opencode") and t.hasText("Hermes"));
+    try std.testing.expect(t.hasText("Pi"));
     try std.testing.expect(t.hasText("Default"));
     try std.testing.expect(t.hasText("MCP servers") and t.hasText("Skills"));
     // fx's own dials, for the pane the panel is over.

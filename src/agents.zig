@@ -22,6 +22,7 @@ pub const all = [_]Info{
     .{ .which = .grok, .cli = "grok", .blurb = "xAI's Grok Build", .install = "curl -fsSL https://x.ai/cli/install.sh | bash" },
     .{ .which = .devin, .cli = "devin", .blurb = "Cognition's Devin", .install = "curl -fsSL https://cli.devin.ai/install.sh | bash" },
     .{ .which = .hermes, .cli = "hermes", .blurb = "Nous Research's Hermes Agent", .install = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" },
+    .{ .which = .pi, .cli = "pi", .blurb = "Earendil Works' Pi, through its own RPC mode", .install = "curl -fsSL https://pi.dev/install.sh | sh", .login = "" },
 };
 
 pub fn info(which: Which) Info {
@@ -33,7 +34,7 @@ pub fn info(which: Which) Info {
 pub const extra_dirs = if (@import("builtin").os.tag == .windows)
     [_][]const u8{ "~/.local/bin", "~/AppData/Roaming/npm", "~/.bun/bin", "~/scoop/shims", "~/.cargo/bin" }
 else
-    [_][]const u8{ "~/.local/bin", "~/bin", "~/.harness/bin", "~/.opencode/bin", "~/.grok/bin", "~/.hermes/bin", "~/.claude/local", "~/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin" };
+    [_][]const u8{ "~/.local/bin", "~/bin", "~/.harness/bin", "~/.opencode/bin", "~/.grok/bin", "~/.hermes/bin", "~/.pi/agent/bin", "~/.claude/local", "~/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin" };
 
 /// PATH with the installers' folders after it, in `arena`.
 pub fn searchPath(arena: std.mem.Allocator, path: []const u8, home: []const u8) []const u8 {

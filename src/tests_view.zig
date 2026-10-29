@@ -339,3 +339,91 @@ test "typing flashes, and Backspace's glyph decays away, then rests" {
     try std.testing.expect(!t.ctx.animating);
     try t.screenshot("/tmp/nanoterm-input-rest.png");
 }
+
+test "typing a slash in the Agent's input keeps the caret after it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/nanoterm-test-caret");
+    try env.put("PATH", "/usr/bin:/bin");
+    std.Io.Dir.cwd().deleteTree(io, "/tmp/nanoterm-test-caret") catch {};
+    try std.Io.Dir.cwd().createDirPath(io, "/tmp/nanoterm-test-caret");
+    defer std.Io.Dir.cwd().deleteTree(io, "/tmp/nanoterm-test-caret") catch {};
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var shared = try session_mod.Shared.init(gpa, io, arena_state.allocator(), &env);
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab("/tmp/nanoterm-test-caret");
+    s.lock = .agent;
+    _ = s.ensureAgent();
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    t.typeText("/");
+    t.frame();
+    std.debug.print("AFTER SLASH text={s} caret={d} menu={} items={d}\n", .{ s.input.text(), s.caret, s.menu.open, s.menu.items.items.len });
+    {
+        var listed: usize = 0;
+        for (s.menu.items.items) |item| {
+            if (std.mem.eql(u8, item.word, "/compact") or std.mem.eql(u8, item.word, "/permissions") or std.mem.eql(u8, item.word, "/effort")) listed += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), listed);
+    }
+    // As an input method sends it: marked "/" with no selection inside.
+    // The caret still belongs after what was composed.
+    s.input.clear();
+    t.frame();
+    t.textOps(&.{ .{ .set_marked = .{ .text = "/", .sel_start = 0, .sel_len = 0 } }, .unmark });
+    t.frame();
+    try std.testing.expectEqualStrings("/", s.input.text());
+    try std.testing.expectEqual(@as(usize, 1), s.caret);
+    try std.testing.expectEqualStrings("/", s.input.text());
+    try std.testing.expectEqual(@as(usize, 1), s.caret);
+    t.typeText("c");
+    t.frame();
+    try std.testing.expectEqualStrings("/c", s.input.text());
+    try std.testing.expectEqual(@as(usize, 2), s.caret);
+
+    // A whole command opens straight onto its arguments, and taking one
+    // leaves the input ready to send.
+    s.input.clear();
+    t.frame();
+    t.typeText("/permissions");
+    t.frame();
+    try std.testing.expect(s.menu.open);
+    {
+        var modes: usize = 0;
+        for (s.menu.items.items) |item| {
+            if (std.mem.eql(u8, item.word, "ask") or std.mem.eql(u8, item.word, "auto") or std.mem.eql(u8, item.word, "full-access")) modes += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), modes);
+    }
+    t.key(.enter);
+    t.frame();
+    // A value argument sends the command (fx writes its own settings).
+    t.settle(1);
+    try std.testing.expectEqual(@as(usize, 0), s.input.text().len);
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "/tmp/nanoterm-test-caret/.fx/settings.json", std.testing.allocator, .limited(65536));
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"permission_mode\":\"ask\"") != null);
+    }
+    // The note lands in the timeline (the pane's own record of it).
+    {
+        // The note lands in the timeline as its own finished turn.
+        const last = s.timeline.items[s.timeline.items.len - 1];
+        try std.testing.expect(last == .turn);
+        try std.testing.expect(last.turn.done);
+        try std.testing.expectEqual(@as(usize, 1), last.turn.items.items.len);
+        try std.testing.expect(last.turn.items.items[0] == .note);
+        try std.testing.expect(std.mem.indexOf(u8, last.turn.items.items[0].note, "permission mode set to ask") != null);
+    }
+    if (s.agent) |ag| {
+        s.agent = null;
+        ag.destroy();
+    }
+}

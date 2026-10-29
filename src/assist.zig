@@ -213,16 +213,35 @@ pub fn accept(s: *Session) void {
     const items = s.menu.items.items;
     if (items.len == 0) return s.menu.close();
     const it = items[@min(s.menu.selected, items.len - 1)];
-    // A folder keeps completing; anything else is a whole word.
+    // A folder keeps completing; anything else is a whole word. A slash
+    // command stands unspaced so the menu turns straight to its arguments.
+    const command = it.kind == .slash and it.word.len > 0 and it.word[0] == '/';
+    if (command) {
+        replaceWord(s, it.word, false);
+        typed(s, s.menu.end);
+        return;
+    }
     replaceWord(s, it.word, it.kind != .folder);
     s.menu.close();
+    // A value argument (a level, a mode, a provider) completes the command:
+    // taking one sends it, as fx's own menu does.
+    if (it.kind == .slash) {
+        const text = s.input.text();
+        const before = text[0..@min(s.menu.start, text.len)];
+        var name = before[1..];
+        if (std.mem.indexOfScalar(u8, name, ' ')) |space| name = name[0..space];
+        if (@import("agent_fx.zig").sendsArg(name)) s.submit();
+    }
 }
 
 fn replaceWord(s: *Session, word: []const u8, space: bool) void {
     const text = s.input.text();
     var buf: [1024]u8 = undefined;
-    const out = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ text[0..s.menu.start], word, if (space) " " else "", text[@min(s.menu.end, text.len)..] }) catch return;
-    s.menu.end = s.menu.start + word.len;
+    // Appending at the very end (a command's argument behind its command)
+    // keeps a space between the two words.
+    const gap = if (s.menu.start == text.len and text.len > 0 and text[text.len - 1] != ' ' and word.len > 0 and word[0] != '/') " " else "";
+    const out = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}{s}", .{ text[0..s.menu.start], gap, word, if (space) " " else "", text[@min(s.menu.end, text.len)..] }) catch return;
+    s.menu.end = s.menu.start + gap.len + word.len;
     s.input.set(out);
     s.input.want_caret = s.menu.start + word.len + @intFromBool(space);
 }

@@ -65,7 +65,7 @@ test "native agent answers through an OpenAI-compatible provider (opt-in)" {
     defer engine.shared_io.resetEnvironForTest();
     runtime.init();
 
-    var store = try Store.init(gpa, io, home);
+    var store = try Store.init(gpa, io, home, null);
     defer store.deinit();
     store.provider_name.set("local-smoke");
     store.provider_url.set(base_url);

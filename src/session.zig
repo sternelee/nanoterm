@@ -98,7 +98,7 @@ pub const Shared = struct {
         s.commands.scan(io, env.get("PATH") orelse "");
         s.history.load(io, try std.fs.path.join(arena, &.{ home, ".zsh_history" }), try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "history" }));
         s.agent_store = gpa.create(@import("agent_settings.zig").Store) catch null;
-        if (s.agent_store) |store| store.* = @import("agent_settings.zig").Store.init(gpa, io, home) catch {
+        if (s.agent_store) |store| store.* = @import("agent_settings.zig").Store.init(gpa, io, home, env) catch {
             gpa.destroy(store);
             s.agent_store = null;
             return s;
@@ -114,6 +114,8 @@ pub const Shared = struct {
     pub fn wire(s: *Shared) void {
         @import("view_markdown.zig").pictures = &s.pictures;
         s.pictures.changed = .{ .ctx = s, .func = redrawCtx };
+        // Sign-in state and model lists land off the frame; repaint then.
+        if (s.agent_store) |store| store.changed = .{ .ctx = s, .func = redrawCtx };
     }
 
     pub fn deinit(s: *Shared) void {
@@ -183,6 +185,8 @@ pub const Session = struct {
     selected: ?u64 = null,
     next_id: u64 = 1,
     shell_exited: bool = false,
+    /// An fx login or logout is running: its exit re-checks the state.
+    sign_in_pending: bool = false,
     branch: [128]u8 = undefined,
     branch_len: usize = 0,
     branch_for: std.ArrayList(u8) = .empty,
@@ -229,7 +233,7 @@ pub const Session = struct {
             .io = shared.io,
             .arena = shared.arena,
             .home = shared.home,
-            .shell = .init(gpa, .{ .ctx = a, .changed = changed, .exited = shellExited }),
+            .shell = .init(gpa, .{ .ctx = a, .changed = changed, .exited = shellExited, .command_finished = commandFinished }),
             .menu = .init(gpa),
             .attachments = .{ .gpa = gpa, .uploads = std.fs.path.join(shared.arena, &.{ shared.home, "Library", "Application Support", "nanoterm", "uploads" }) catch "" },
             .which = shared.prefs.agent,
@@ -307,7 +311,29 @@ pub const Session = struct {
     fn shellExited(ctx: *anyopaque, _: i32) void {
         const a: *Session = @ptrCast(@alignCast(ctx));
         a.shell_exited = true;
+        a.checkSignIn();
         changed(a);
+    }
+
+    /// A command block ended while the shell lives on: if it was an fx
+    /// sign-in, the state is checked again with it.
+    fn commandFinished(ctx: *anyopaque, _: i32) void {
+        checkSignIn(@ptrCast(@alignCast(ctx)));
+    }
+
+    /// A command that changes what fx is signed in to: the next exit checks
+    /// the state again, and with it the providers' model lists.
+    pub fn watchSignIn(a: *Session, command: []const u8) void {
+        if (std.mem.startsWith(u8, command, "fx login") or std.mem.startsWith(u8, command, "fx logout") or std.mem.startsWith(u8, command, "fx setup")) a.sign_in_pending = true;
+    }
+
+    fn checkSignIn(a: *Session) void {
+        if (!a.sign_in_pending) return;
+        a.sign_in_pending = false;
+        const store = a.shared.agent_store orelse return;
+        for (store.providers.items) |*provider| provider.models_tried = false;
+        store.signed_checked = false;
+        store.refreshSignIn(a.shared.env.get("PATH") orelse "/usr/bin:/bin");
     }
 
     pub fn cwd(a: *Session) []const u8 {
@@ -428,6 +454,7 @@ pub const Session = struct {
             return;
         }
         if (std.mem.eql(u8, command, "clear")) return a.clear();
+        a.watchSignIn(command);
         const b = a.newBlock(.shell, command, a.cwd()) orelse return;
         a.timeline.append(a.gpa, .{ .block = b }) catch return;
         a.pinLast();
@@ -476,7 +503,7 @@ pub const Session = struct {
     pub const offerVisuals = helpers.offerVisuals;
     const syncRemote = helpers.syncRemote;
 
-    fn pinLast(a: *Session) void {
+    pub fn pinLast(a: *Session) void {
         a.pin = a.timeline.items.len - 1;
         a.pin_jump = 2;
     }
