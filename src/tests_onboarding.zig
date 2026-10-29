@@ -110,6 +110,8 @@ test "onboarding: how to start, the input's keys, analytics asked; the answers k
     // Turned on later in Settings: an id made, and shown there.
     f.w.openSettings();
     t.settle(1);
+    try t.clickText("Privacy");
+    t.settle(1);
     try std.testing.expect(!t.containsText("Install ID"));
     p.setAnalytics(.on, std.testing.io);
     t.settle(0.5);

@@ -1,7 +1,7 @@
-//! Settings (⌘,): built-in Agent providers, MCP and Skills, the agents
-//! Harness ships (installed or not, the one new tabs
-//! start with, an installer run in a new tab), appearance, text size,
-//! updates, and about.
+//! Settings (⌘,): a sidebar of categories — Agents (built-in Agent
+//! providers, MCP and Skills, the agents nanoterm ships, installed or
+//! not, the one new tabs start with), Appearance (the theme shelf,
+//! font, icons, keys, text size), Motion, Privacy, and Updates.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -10,8 +10,10 @@ const agents = @import("agents.zig");
 const agent_mod = @import("agent.zig");
 const Workspace = @import("workspace.zig").Workspace;
 
+const Page = enum(u8) { agents = 0, appearance = 1, motion = 2, privacy = 3, updates = 4 };
+
 pub fn card(c: *ui.Context, w: *Workspace) void {
-    const panel = ui.div(c).column().w(@min(680, c.size.w - 40)).bg(theme.panel).rounded(14).border(theme.border).shadowLg().clip();
+    const panel = ui.div(c).column().w(@min(720, c.size.w - 40)).bg(theme.panel).rounded(14).border(theme.border).shadowLg().clip();
     defer panel.end();
     // Clicks inside stay inside.
     _ = panel.interaction();
@@ -22,14 +24,53 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
         ui.spacer(c);
         if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "xmark" }).clicked) w.closeOverlay();
     }
-    // As tall as it is, up to the window's room; then it scrolls.
-    const body = ui.div(c).column().wFull().scrollY().maxH(c.size.h - 170).px(20).pb(20).gap(18);
+    // As tall as the Agents page is: the panel keeps that height on
+    // every other page, each of which scrolls its own content. The
+    // Agents page is content-sized (up to the window's room); its
+    // height is remembered and the other pages are held to it.
+    const body_id = c.peekId(null);
+    var body = ui.div(c).row().wFull().itemsStretch().maxH(c.size.h - 170);
+    const on_agents = w.settings_page == @intFromEnum(Page.agents);
+    if (!on_agents and w.settings_height > 0) body = body.h(@min(w.settings_height, c.size.h - 170));
     defer body.end();
-    agentList(c, w);
-    account(c, w);
-    look(c, w);
-    privacy(c, w);
-    updates(c, w);
+    if (on_agents) {
+        if (c.rects.get(body_id)) |r| w.settings_height = r.h;
+    }
+    {
+        const side = ui.div(c).column().w(168).px(8).py(10).gap(2).maxH(c.size.h - 210);
+        defer side.end();
+        sideItem(c, w, .agents, "person.2", "Agents");
+        sideItem(c, w, .appearance, "paintpalette", "Appearance");
+        sideItem(c, w, .motion, "waveform", "Motion");
+        sideItem(c, w, .privacy, "hand.raised", "Privacy");
+        sideItem(c, w, .updates, "arrow.down.circle", "Updates");
+    }
+    _ = c.leaf(.{ .width = .{ .px = 1 }, .background = theme.border }, .none, null);
+    {
+        const page = ui.div(c).column().grow().scrollY().maxH(c.size.h - 210).px(20).py(16).gap(18);
+        defer page.end();
+        switch (w.settings_page) {
+            @intFromEnum(Page.agents) => {
+                agentList(c, w);
+                account(c, w);
+            },
+            @intFromEnum(Page.appearance) => appearance(c, w),
+            @intFromEnum(Page.motion) => motionPage(c, w),
+            @intFromEnum(Page.privacy) => privacy(c, w),
+            @intFromEnum(Page.updates) => updates(c, w),
+            else => {},
+        }
+    }
+}
+
+/// A category on Settings' sidebar, lit while its page is the one shown.
+fn sideItem(c: *ui.Context, w: *Workspace, page: Page, icon: []const u8, label: []const u8) void {
+    const sel = w.settings_page == @intFromEnum(page);
+    const d = if (sel) ui.div(c).row().wFull().gap(8).itemsCenter().px(9).py(6).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(8).itemsCenter().px(9).py(6).rounded(8);
+    defer d.end();
+    if (d.clicked()) w.settings_page = @intFromEnum(page);
+    ui.icon(c, icon, .{ .size = 12, .color = if (sel) theme.accent else theme.muted });
+    ui.text(c, label, .{ .size = 12.5, .weight = if (sel) .semibold else .regular, .color = if (sel) theme.text else theme.muted });
 }
 
 fn section(c: *ui.Context, title: []const u8) ui.Div {
@@ -293,21 +334,12 @@ fn fontOptionLabels(c: *ui.Context, options: [][]const u8) [][]const u8 {
     return labels;
 }
 
-fn look(c: *ui.Context, w: *Workspace) void {
-    const s = section(c, "Appearance");
+fn appearance(c: *ui.Context, w: *Workspace) void {
+    themePicker(c, w);
+    const s = section(c, "Terminal");
     defer s.end();
     const b = box(c);
     defer b.end();
-    {
-        const r = ui.div(c).row().wFull().itemsCenter();
-        defer r.end();
-        ui.text(c, "Theme", .{ .size = 13 });
-        ui.spacer(c);
-        const names = [_][]const u8{ "System", "Light", "Dark" };
-        const order = [_]@TypeOf(w.shared.appearance){ .system, .light, .dark };
-        var picked: usize = std.mem.indexOfScalar(@TypeOf(w.shared.appearance), &order, w.shared.appearance) orelse 0;
-        if (ui.segmented(c, &names, &picked)) w.shared.setAppearance(order[picked]);
-    }
     {
         const r = ui.div(c).row().wFull().itemsCenter();
         defer r.end();
@@ -336,34 +368,6 @@ fn look(c: *ui.Context, w: *Workspace) void {
         if (ui.toggle(c, "", &on)) w.shared.prefs.setFileIcons(on);
     }
     {
-        // Motion's dials: one speed every effect's timing scales by, one
-        // amount for how far each goes; Reduce Motion turns them off.
-        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
-        defer r.end();
-        const t = ui.div(c).column().grow().gap(2);
-        defer t.end();
-        ui.text(c, "Motion", .{ .size = 13 });
-        ui.text(c, "How new output settles in, glyph at a time, and the cursor springs between cells. The system's Reduce Motion turns all of it off.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
-    }
-    {
-        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
-        defer r.end();
-        ui.text(c, "Speed", .{ .size = 13 });
-        ui.spacer(c);
-        var dur = w.shared.prefs.motion_duration;
-        if (ui.slider(c, &dur, .{ .min = 0.25, .max = 2, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(dur, w.shared.prefs.motion_intensity);
-        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_duration}), .{ .size = 12.5, .mono = true, .color = theme.muted });
-    }
-    {
-        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
-        defer r.end();
-        ui.text(c, "Amount", .{ .size = 13 });
-        ui.spacer(c);
-        var inten = w.shared.prefs.motion_intensity;
-        if (ui.slider(c, &inten, .{ .min = 0, .max = 1.5, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(w.shared.prefs.motion_duration, inten);
-        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_intensity}), .{ .size = 12.5, .mono = true, .color = theme.muted });
-    }
-    {
         const r = ui.div(c).row().wFull().itemsCenter();
         defer r.end();
         ui.text(c, "Keys in the input", .{ .size = 13 });
@@ -382,6 +386,80 @@ fn look(c: *ui.Context, w: *Workspace) void {
         ui.text(c, c.print("{d:.0}%", .{w.zoom * 100}), .{ .size = 12.5, .mono = true, .color = theme.muted });
         if (ui.button(c, "", .{ .size = 11, .icon = "plus" }).clicked) w.zoomBy(0.1);
         if (ui.button(c, "Reset", .{ .variant = .ghost, .size = 12 }).clicked) w.zoom = 1;
+    }
+}
+
+/// The theme shelf, as Metalterm's settings lay it out: System first —
+/// light or dark, as the system is — then every named theme, a row of
+/// its name, its line, and a row of its colors.
+fn themePicker(c: *ui.Context, w: *Workspace) void {
+    const s = section(c, "Theme");
+    defer s.end();
+    const b = box(c);
+    defer b.end();
+    const prefs = &w.shared.prefs;
+    // System: follows the appearance the palette sets.
+    {
+        const sel = prefs.theme.len == 0;
+        const r = if (sel) ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8);
+        defer r.end();
+        if (r.clicked()) prefs.setTheme("");
+        {
+            const t = ui.div(c).column().grow().gap(2);
+            defer t.end();
+            ui.text(c, "System", .{ .size = 13, .weight = .semibold });
+            ui.text(c, "Light or dark, as the system is.", .{ .size = 11.5, .color = theme.muted });
+        }
+        ui.icon(c, "circle.lefthalf.filled", .{ .size = 14, .color = theme.muted });
+        if (sel) ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = theme.accent });
+    }
+    for (&theme.list) |*e| {
+        const sel = std.mem.eql(u8, prefs.theme, e.id);
+        const r = if (sel) ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8);
+        defer r.end();
+        if (r.clicked()) prefs.setTheme(e.id);
+        {
+            const t = ui.div(c).column().grow().gap(2);
+            defer t.end();
+            ui.text(c, e.name, .{ .size = 13, .weight = .semibold });
+            ui.text(c, e.note, .{ .size = 11.5, .color = theme.muted });
+        }
+        {
+            const dots = ui.div(c).row().gap(5).itemsCenter();
+            defer dots.end();
+            const colors = [5]u24{ e.seeds.background, e.seeds.text, e.seeds.accent, e.seeds.danger, e.seeds.success };
+            for (colors) |col| _ = c.leaf(.{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .radius = 6, .background = ui.Color.hex(col) }, .none, null);
+        }
+        if (sel) ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = theme.accent });
+    }
+    ui.text(c, "The System theme follows the appearance the palette (⌘P) sets.", .{ .size = 11.5, .color = theme.faint, .wrap = true });
+}
+
+/// Motion's page: one speed every effect's timing scales by, one amount
+/// for how far each goes; Reduce Motion turns them off.
+fn motionPage(c: *ui.Context, w: *Workspace) void {
+    const s = section(c, "Motion");
+    defer s.end();
+    const b = box(c);
+    defer b.end();
+    ui.text(c, "How new output settles in, glyph at a time, and the cursor springs between cells. The system's Reduce Motion turns all of it off.", .{ .size = 12, .color = theme.muted, .wrap = true });
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Speed", .{ .size = 13 });
+        ui.spacer(c);
+        var dur = w.shared.prefs.motion_duration;
+        if (ui.slider(c, &dur, .{ .min = 0.25, .max = 2, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(dur, w.shared.prefs.motion_intensity);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_duration}), .{ .size = 12.5, .mono = true, .color = theme.muted });
+    }
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Amount", .{ .size = 13 });
+        ui.spacer(c);
+        var inten = w.shared.prefs.motion_intensity;
+        if (ui.slider(c, &inten, .{ .min = 0, .max = 1.5, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(w.shared.prefs.motion_duration, inten);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_intensity}), .{ .size = 12.5, .mono = true, .color = theme.muted });
     }
 }
 

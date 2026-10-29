@@ -4,6 +4,8 @@
 //! analytics choice (with the install's random id, sent only with it), in
 //! `~/Library/Application Support/nanoterm/settings.json`; and which
 //! external agents are installed, looked for when Settings opens.
+const theme = @import("theme.zig");
+
 const std = @import("std");
 const agent_mod = @import("agent.zig");
 const Which = agent_mod.Which;
@@ -27,6 +29,9 @@ pub const Prefs = struct {
     install_id: [32]u8 = @splat('0'),
     /// The terminal's font: empty is the system's monospaced face.
     terminal_font: []const u8 = "",
+    /// The named theme Settings chose; empty follows the system's own
+    /// light and dark.
+    theme: []const u8 = "",
     /// Whether `ls` output gets a Nerd Font icon before each file.
     file_icons: bool = true,
     /// Motion's dials: every effect's timings scale by `motion_duration`,
@@ -44,7 +49,7 @@ pub const Prefs = struct {
         p.path = std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "settings.json" }) catch "";
         const data = std.Io.Dir.cwd().readFileAlloc(io, p.path, gpa, .limited(64 * 1024)) catch return p;
         defer gpa.free(data);
-        const S = struct { agent: []const u8 = "agent", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1 };
+        const S = struct { agent: []const u8 = "agent", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1 };
         const parsed = std.json.parseFromSlice(S, gpa, data, .{ .ignore_unknown_fields = true }) catch return p;
         defer parsed.deinit();
         const v = parsed.value;
@@ -55,6 +60,7 @@ pub const Prefs = struct {
         p.onboarded = v.onboarded;
         p.analytics = std.meta.stringToEnum(Analytics, v.analytics) orelse .unset;
         p.setTerminalFont(v.font);
+        p.setTheme(v.theme);
         p.file_icons = v.file_icons;
         p.motion_duration = std.math.clamp(v.motion_duration, 0.25, 2);
         p.motion_intensity = std.math.clamp(v.motion_intensity, 0, 1.5);
@@ -65,6 +71,7 @@ pub const Prefs = struct {
     pub fn deinit(p: *Prefs) void {
         p.telemetry.deinit();
         if (p.terminal_font.len > 0) p.gpa.free(p.terminal_font);
+        if (p.theme.len > 0) p.gpa.free(p.theme);
     }
 
     /// Records an anonymous usage event, if the user shares analytics.
@@ -76,7 +83,7 @@ pub const Prefs = struct {
         if (p.path.len == 0) return;
         if (std.fs.path.dirname(p.path)) |dir| std.Io.Dir.cwd().createDirPath(p.io, dir) catch {};
         var buf: [512]u8 = undefined;
-        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2}\n}}\n", .{ @tagName(p.agent), p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.file_icons, p.motion_duration, p.motion_intensity }) catch return;
+        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2}\n}}\n", .{ @tagName(p.agent), p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity }) catch return;
         std.Io.Dir.cwd().writeFile(p.io, .{ .sub_path = p.path, .data = json }) catch {};
     }
 
@@ -132,6 +139,17 @@ pub const Prefs = struct {
         p.save();
     }
 
+    /// The theme by its id, kept for the next launch; a theme that is
+    /// not on the shelf reads as none, following the system instead.
+    pub fn setTheme(p: *Prefs, id: []const u8) void {
+        const kept_id = if (theme.find(id) == null) "" else id;
+        if (std.mem.eql(u8, p.theme, kept_id)) return;
+        const kept = p.gpa.dupe(u8, kept_id) catch return;
+        if (p.theme.len > 0) p.gpa.free(p.theme);
+        p.theme = kept;
+        p.save();
+    }
+
     /// Whether `ls` output gets a Nerd Font icon before each file.
     pub fn setFileIcons(p: *Prefs, on: bool) void {
         if (p.file_icons == on) return;
@@ -175,6 +193,7 @@ test "settings are kept across launches" {
         p.setAgents(false);
         p.setAnalytics(.on, io);
         p.setTerminalFont("JetBrainsMono Nerd Font");
+        p.setTheme("soot");
         p.setFileIcons(false);
         p.setMotion(1.5, 0.5);
         p.finishOnboarding();
@@ -188,6 +207,7 @@ test "settings are kept across launches" {
     try std.testing.expect(p.onboarded);
     try std.testing.expectEqual(Analytics.on, p.analytics);
     try std.testing.expectEqualStrings("JetBrainsMono Nerd Font", p.terminal_font);
+    try std.testing.expectEqualStrings("soot", p.theme);
     try std.testing.expect(!p.file_icons);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), p.motion_duration, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), p.motion_intensity, 0.001);

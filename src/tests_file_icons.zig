@@ -203,6 +203,8 @@ test "the real view shows ls with its icons, and Settings can turn them off" {
     // Settings: the terminal font and the icons are there, and off means off.
     w.openSettings();
     t.settle(1);
+    try t.clickText("Appearance");
+    t.settle(1);
     try std.testing.expect(t.hasText("Terminal font"));
     try std.testing.expect(t.hasText("File icons in ls"));
     try std.testing.expect(t.hasText("System"));

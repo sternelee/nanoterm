@@ -1,8 +1,12 @@
-//! nanoterm's look: Harness's default palettes, CodeGraff Dark and
-//! CodeGraff Light (warm neutrals, an amber accent), with its roles derived
-//! as Harness derives them (hover and borders from white or black, the
-//! selection from the accent). `apply` switches the palette; the view
-//! hands nanoui the result every frame.
+//! nanoterm's look: palettes in the shape of Harness's defaults,
+//! CodeGraff Dark and CodeGraff Light (warm neutrals, an amber accent),
+//! with their roles derived as Harness derives them (hover and borders
+//! from white or black, the selection from the accent). Around them, a
+//! shelf of named themes in the manner of Metalterm's — soot and orange,
+//! a black dome, a green tube — one chosen in Settings or the system's
+//! own light and dark. `apply` switches the palette; the view hands
+//! nanoui the result every frame.
+const std = @import("std");
 const nanoui = @import("nanoui");
 const Color = nanoui.ui.Color;
 
@@ -25,6 +29,45 @@ const Seeds = struct {
     /// comment, keyword, string, number, type, function.
     syntax: [6]u24,
 };
+
+/// A named theme on Settings' shelf: what it is called, a line under
+/// the name, and the seeds it grows from.
+pub const Entry = struct {
+    id: []const u8,
+    name: []const u8,
+    note: []const u8,
+    seeds: Seeds,
+};
+
+/// The shelf. CodeGraff first — they are the house pair — then the
+/// rest, each of which stands on its own in light of its seeds' own
+/// `dark` flag, whatever the system is doing.
+pub const list = [_]Entry{
+    .{ .id = "codegraff-dark", .name = "CodeGraff Dark", .note = "warm neutrals, amber accent", .seeds = codegraff_dark },
+    .{ .id = "codegraff-light", .name = "CodeGraff Light", .note = "paper, warm white", .seeds = codegraff_light },
+    .{ .id = "soot", .name = "Soot", .note = "soot, orange accent", .seeds = soot },
+    .{ .id = "soft-oled", .name = "Soft OLED", .note = "a black dome, panels off", .seeds = soft_oled },
+    .{ .id = "nocturne", .name = "Nocturne", .note = "velvet indigo, lavender", .seeds = nocturne },
+    .{ .id = "phosphor", .name = "Phosphor", .note = "a green tube in a dark room", .seeds = phosphor },
+    .{ .id = "abyss", .name = "Abyss", .note = "ink water, cyan light", .seeds = abyss },
+    .{ .id = "palenight", .name = "Palenight", .note = "dusk indigo, soft violet", .seeds = palenight },
+};
+
+/// The theme Settings chose — its id, or nothing for the system's own
+/// light and dark. What is not on the shelf is nothing.
+pub var chosen: []const u8 = "";
+
+pub fn select(id: []const u8) void {
+    chosen = if (find(id) == null) "" else id;
+}
+
+/// The entry `id` names, if it is on the shelf.
+pub fn find(id: []const u8) ?*const Entry {
+    for (&list) |*e| {
+        if (std.mem.eql(u8, e.id, id)) return e;
+    }
+    return null;
+}
 
 const codegraff_dark: Seeds = .{
     .dark = true,
@@ -56,6 +99,102 @@ const codegraff_light: Seeds = .{
     .success = 0x5c7e47,
     .ansi = .{ 0x1a1813, 0xb14228, 0x5c7e47, 0x9a6e1b, 0x3b6fb0, 0x7a4ea3, 0x2f8f9d, 0x6b6557, 0xa8a090, 0xb14228, 0x5c7e47, 0xc77d20, 0x3b6fb0, 0x7a4ea3, 0x2f8f9d, 0x1a1813 },
     .syntax = .{ 0xa8a090, 0xc77d20, 0x5c7e47, 0x9a6e1b, 0x1a1813, 0xc77d20 },
+};
+
+const soot: Seeds = .{
+    .dark = true,
+    .background = 0x0e0d0b,
+    .shell = 0x161513,
+    .raised = 0x211f1b,
+    .text = 0xf2efe9,
+    .muted = 0x8f8a80,
+    .faint = 0x55514a,
+    .accent = 0xff9e2c,
+    .danger = 0xe05644,
+    .warning = 0xe0a63f,
+    .success = 0x6fbf73,
+    .ansi = .{ 0x0e0d0b, 0xe05644, 0x6fbf73, 0xe0a63f, 0x6da2c8, 0xc08ae0, 0x64c7c3, 0xf2efe9, 0x55514a, 0xf07a68, 0x8fd994, 0xf0bb61, 0x8cc0e6, 0xd6a8ee, 0x8ce0dc, 0xfffdf7 },
+    .syntax = .{ 0x55514a, 0xff9e2c, 0x86c98a, 0xe0a63f, 0xf2efe9, 0xffb15e },
+};
+
+const soft_oled: Seeds = .{
+    .dark = true,
+    .background = 0x000000,
+    .shell = 0x0a0a0c,
+    .raised = 0x141418,
+    .text = 0xf4f4f6,
+    .muted = 0x8e8e96,
+    .faint = 0x54545c,
+    .accent = 0x64d2ff,
+    .danger = 0xff6961,
+    .warning = 0xffd60a,
+    .success = 0x32d74b,
+    .ansi = .{ 0x000000, 0xff6961, 0x32d74b, 0xffd60a, 0x64d2ff, 0xbf5af2, 0x66e0d8, 0xf4f4f6, 0x54545c, 0xff8a82, 0x6ae682, 0xffe566, 0x8ee0ff, 0xd48af5, 0x8eeae6, 0xffffff },
+    .syntax = .{ 0x54545c, 0x64d2ff, 0x32d74b, 0xffd60a, 0xf4f4f6, 0x8ee0ff },
+};
+
+const nocturne: Seeds = .{
+    .dark = true,
+    .background = 0x12121f,
+    .shell = 0x1a1a2b,
+    .raised = 0x252538,
+    .text = 0xeceaf8,
+    .muted = 0x9490b0,
+    .faint = 0x585475,
+    .accent = 0xa78bfa,
+    .danger = 0xf2705d,
+    .warning = 0xdfb35c,
+    .success = 0x79c99e,
+    .ansi = .{ 0x12121f, 0xf2705d, 0x79c99e, 0xdfb35c, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xeceaf8, 0x585475, 0xf89485, 0x9adcb6, 0xecc984, 0x9cbcff, 0xd0bcfa, 0xa5e3ff, 0xfdfcff },
+    .syntax = .{ 0x585475, 0xbb9af7, 0x9adcb6, 0xdfb35c, 0xeceaf8, 0x7aa2f7 },
+};
+
+const phosphor: Seeds = .{
+    .dark = true,
+    .background = 0x071008,
+    .shell = 0x0c1a0e,
+    .raised = 0x14261a,
+    .text = 0xd8f5dd,
+    .muted = 0x7fae87,
+    .faint = 0x43614a,
+    .accent = 0x42e07a,
+    .danger = 0xe05644,
+    .warning = 0xd9c85c,
+    .success = 0x42e07a,
+    .ansi = .{ 0x071008, 0xe05644, 0x42e07a, 0xd9c85c, 0x63b9c9, 0xb18ad4, 0x59c2b6, 0xd8f5dd, 0x43614a, 0xea7a70, 0x6fee9a, 0xe8da86, 0x86d4e2, 0xc6a5e6, 0x7fded2, 0xf0fff2 },
+    .syntax = .{ 0x43614a, 0x59c2b6, 0xb8e89a, 0xd9c85c, 0xd8f5dd, 0x42e07a },
+};
+
+const abyss: Seeds = .{
+    .dark = true,
+    .background = 0x060a12,
+    .shell = 0x0b1220,
+    .raised = 0x122033,
+    .text = 0xe6f0f5,
+    .muted = 0x7e93a6,
+    .faint = 0x495e70,
+    .accent = 0x39c5cf,
+    .danger = 0xe05644,
+    .warning = 0xdcae4a,
+    .success = 0x59b58a,
+    .ansi = .{ 0x060a12, 0xe05644, 0x59b58a, 0xdcae4a, 0x5f9fd4, 0x9d8ad4, 0x39c5cf, 0xe6f0f5, 0x495e70, 0xea7a70, 0x7ace9f, 0xe9c473, 0x83bce8, 0xb5a3e6, 0x6adde7, 0xf2f9fb },
+    .syntax = .{ 0x495e70, 0x39c5cf, 0x7ace9f, 0xdcae4a, 0xe6f0f5, 0x83bce8 },
+};
+
+const palenight: Seeds = .{
+    .dark = true,
+    .background = 0x22243a,
+    .shell = 0x2a2d47,
+    .raised = 0x343858,
+    .text = 0xe3e6f3,
+    .muted = 0x8f94b8,
+    .faint = 0x5b6088,
+    .accent = 0x82aaff,
+    .danger = 0xff5370,
+    .warning = 0xffcb6b,
+    .success = 0xc3e88d,
+    .ansi = .{ 0x22243a, 0xff5370, 0xc3e88d, 0xffcb6b, 0x82aaff, 0xc792ea, 0x89ddff, 0xe3e6f3, 0x5b6088, 0xff8a9f, 0xd4f4ab, 0xffdd98, 0xa3c2ff, 0xdbb1f4, 0xa8e9ff, 0xf7f9ff },
+    .syntax = .{ 0x5b6088, 0xc792ea, 0xc3e88d, 0xf78c6c, 0xffcb6b, 0x82aaff },
 };
 
 pub var appearance: Appearance = .dark;
@@ -143,13 +282,15 @@ const Palette = struct {
     ansi: [16]Color,
 };
 
-const default = palette(.dark);
+const default = palette(codegraff_dark);
 
-/// Puts appearance `a`'s palette in place.
+/// Puts the chosen theme's — or, with none chosen, appearance `a`'s —
+/// palette in place.
 pub fn apply(a: Appearance) void {
-    const p = palette(a);
+    const s = seeds(a);
+    const p = palette(s);
     appearance = a;
-    dark = a == .dark;
+    dark = s.dark;
     background = p.background;
     panel = p.panel;
     raised = p.raised;
@@ -184,10 +325,16 @@ pub fn apply(a: Appearance) void {
     ansi = p.ansi;
 }
 
-/// Appearance `a`'s palette, from its seeds.
-fn palette(a: Appearance) Palette {
+/// The seeds in play: the chosen theme's, else the house pair the
+/// appearance asks for.
+fn seeds(a: Appearance) Seeds {
+    if (find(chosen)) |e| return e.seeds;
+    return if (a == .dark) codegraff_dark else codegraff_light;
+}
+
+/// A palette, from its seeds.
+fn palette(s: Seeds) Palette {
     @setEvalBranchQuota(10_000);
-    const s = if (a == .dark) codegraff_dark else codegraff_light;
     var p: Palette = undefined;
     const white: Color = .{ .r = 1, .g = 1, .b = 1 };
     const black: Color = .{};

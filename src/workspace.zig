@@ -57,6 +57,10 @@ pub const Workspace = struct {
     /// Where the panes of the active tab were laid out in the last frame.
     placed: std.ArrayList(Tree.Placed) = .empty,
     overlay: Overlay = .none,
+    /// Settings' page: which category its sidebar is on, and the height
+    /// the Agents page gave the panel, held on every other page.
+    settings_page: u8 = 0,
+    settings_height: f32 = 0,
     /// What the palette searches (Tab cycles).
     scope: @import("palette.zig").Scope = .all,
     /// The overlay's search, and its row chosen with ↑↓.

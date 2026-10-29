@@ -28,13 +28,15 @@ const title_height = 40;
 pub fn view(w: *Workspace, c: *ui.Context) void {
     if (w.tabs.items.len == 0) return;
     focusOnPress(w, c);
-    // Harness's palettes: light, dark, or as the system is.
+    // Harness's palettes: the theme Settings chose, or light and dark as
+    // the system is.
     const want: theme.Appearance = switch (w.shared.appearance) {
         .system => if (nanoui.isDark()) .dark else .light,
         .dark => .dark,
         .light => .light,
     };
-    if (want != theme.appearance) theme.apply(want);
+    theme.select(w.shared.prefs.theme);
+    theme.apply(want);
     theme.mono_font = if (w.shared.prefs.terminal_font.len == 0) null else w.shared.prefs.terminal_font;
     c.theme = theme.ui();
     // Motion's dials, as the settings and the system ask for them.

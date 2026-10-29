@@ -67,6 +67,52 @@ fn printed(_: *ui.Tester, s: *session_mod.Session) bool {
     };
 }
 
+test "the theme shelf: a named theme takes, and keeps across launches" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-settings-theme";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    var t: ui.Tester = undefined;
+    _ = try w.newTab(home);
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 800, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Appearance");
+    t.settle(1);
+    // The shelf is there: System, the house pair, and the named themes.
+    try std.testing.expect(t.hasText("System"));
+    try std.testing.expect(t.hasText("Soot"));
+    try std.testing.expect(t.hasText("Palenight"));
+    // A click takes a theme — the palette moves with it.
+    try t.clickText("Phosphor");
+    t.settle(1);
+    try std.testing.expectEqualStrings("phosphor", w.shared.prefs.theme);
+    try std.testing.expect(t.hasText("a green tube in a dark room"));
+    // Kept: a fresh workspace reads it back.
+    var again: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer again.deinit();
+    _ = try again.newTab(home);
+    var t2: ui.Tester = undefined;
+    try t2.init(gpa, .init(&again, view.view), .{ .width = 1000, .height = 800, .theme = theme.ui() });
+    defer t2.deinit();
+    t2.settle(1);
+    try std.testing.expectEqualStrings("phosphor", again.shared.prefs.theme);
+}
+
 test "a command run in a new tab (an installer, a sign-in) waits for its shell's first prompt" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
