@@ -35,7 +35,8 @@ pub const Config = struct {
         c.commands.deinit(c.gpa);
     }
 
-    fn clearOptions(c: *Config) void {
+    /// Forgets every option: another agent's list is built in its place.
+    pub fn clearOptions(c: *Config) void {
         for (c.options.items) |o| {
             for (o.choices) |ch| {
                 c.gpa.free(ch.value);
@@ -96,6 +97,19 @@ pub const Config = struct {
                 .choices = out.toOwnedSlice(c.gpa) catch continue,
             }) catch {};
         }
+    }
+
+    /// Adds an option built by hand (Pi's model and thinking level): its
+    /// strings are copied and its choices are taken.
+    pub fn append(c: *Config, id: []const u8, name: []const u8, category: []const u8, current: []const u8, choices: []Choice) !void {
+        errdefer c.gpa.free(choices);
+        try c.options.append(c.gpa, .{
+            .id = try c.gpa.dupe(u8, id),
+            .name = try c.gpa.dupe(u8, name),
+            .category = try c.gpa.dupe(u8, category),
+            .current = try c.gpa.dupe(u8, current),
+            .choices = choices,
+        });
     }
 
     /// A choice, or a group of them ({group, name, options: [...]}).

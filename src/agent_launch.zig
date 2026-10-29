@@ -11,12 +11,24 @@ pub fn installed(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ
     return proc.which(arena, io, path, agents.info(which).cli) != null;
 }
 
-/// How to start each external agent in ACP mode. The built-in Agent runtime
+/// How to start each external agent: ACP over stdio, except Pi, whose own
+/// RPC mode (`pi.zig`) nanoterm speaks directly. The built-in Agent runtime
 /// never comes through this process launcher.
 pub fn argv(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, which: agent_mod.Which, model: ?[]const u8) ![*:null]const ?[*:0]const u8 {
-    _ = model;
     const path = agents.searchPath(arena, env.get("PATH") orelse "", env.get("HOME") orelse "/");
     switch (which) {
+        .pi => {
+            // Pi's own RPC mode (`pi.zig`), not ACP: no adapter, no npx.
+            // Its session is new each start (`--no-session`), like an ACP
+            // session: the conversation lives in this pane.
+            const bin = proc.which(arena, io, path, "pi") orelse return error.NotInstalled;
+            if (model) |m| {
+                const p = @import("pi.zig").providerId(m, "");
+                if (p.provider.len > 0) return proc.cStrings(arena, &.{ bin, "--mode", "rpc", "--no-session", "--provider", p.provider, "--model", p.id });
+                return proc.cStrings(arena, &.{ bin, "--mode", "rpc", "--no-session", "--model", p.id });
+            }
+            return proc.cStrings(arena, &.{ bin, "--mode", "rpc", "--no-session" });
+        },
         .codex => {
             if (proc.which(arena, io, path, "codex-acp")) |bin| return proc.cStrings(arena, &.{bin});
             if (proc.which(arena, io, path, "codex") == null) return error.NotInstalled;
@@ -51,4 +63,40 @@ pub fn argv(arena: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map,
             return proc.cStrings(arena, &.{ npx, "-y", "@zed-industries/claude-agent-acp" });
         },
     }
+}
+
+test "Pi starts in RPC mode, with the chosen model" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A PATH of stand-ins, so the test never starts a real agent.
+    const dir = "/tmp/nanoterm-test-agent-launch";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir ++ "/bin");
+    for ([_][]const u8{ "pi", "npx" }) |name| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(arena, "{s}/bin/{s}", .{ dir, name }), .data = "#!/bin/sh\n", .flags = .{ .permissions = .executable_file } });
+    }
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", dir);
+    try env.put("PATH", dir ++ "/bin");
+
+    // Pi is its own RPC client: `pi --mode rpc`, never an ACP adapter.
+    const pi = try argv(arena, io, &env, .pi, null);
+    try std.testing.expectEqualStrings(dir ++ "/bin/pi", std.mem.span(pi[0].?));
+    try std.testing.expectEqualStrings("--mode", std.mem.span(pi[1].?));
+    try std.testing.expectEqualStrings("rpc", std.mem.span(pi[2].?));
+    try std.testing.expectEqualStrings("--no-session", std.mem.span(pi[3].?));
+    try std.testing.expect(pi[4] == null);
+
+    // A chosen model goes as Pi's own flags: provider and id apart.
+    const pi_model = try argv(arena, io, &env, .pi, "openai/gpt-5");
+    try std.testing.expectEqualStrings("--provider", std.mem.span(pi_model[4].?));
+    try std.testing.expectEqualStrings("openai", std.mem.span(pi_model[5].?));
+    try std.testing.expectEqualStrings("--model", std.mem.span(pi_model[6].?));
+    try std.testing.expectEqualStrings("gpt-5", std.mem.span(pi_model[7].?));
+    try std.testing.expect(pi_model[8] == null);
+
+    try std.Io.Dir.cwd().deleteTree(io, dir);
 }

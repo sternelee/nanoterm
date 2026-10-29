@@ -39,6 +39,8 @@ test {
     _ = @import("agents.zig");
     _ = @import("agent_native.zig");
     _ = @import("agent_settings.zig");
+    _ = @import("agent_launch.zig");
+    _ = @import("pi.zig");
     _ = @import("tests_agent_native.zig");
     _ = @import("tests_settings.zig");
     _ = @import("tests_onboarding.zig");
