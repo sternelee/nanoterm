@@ -23,7 +23,7 @@ pub fn replyStart(items: []const Item) usize {
 /// Whether item `i` folds into a group.
 pub fn folds(items: []const Item, i: usize, reply: usize) bool {
     return switch (items[i]) {
-        .thought, .tool, .command => true,
+        .thought, .tool, .command, .note => true,
         .text => i < reply,
         else => false,
     };
@@ -65,6 +65,7 @@ pub fn summary(c: *ui.Context, t: *agent_mod.Turn, items: []const Item) []const 
         switch (it.*) {
             .thought => thoughts += 1,
             .text => notes += 1,
+            .note => notes += 1,
             .command => commands += 1,
             .tool => |tl| {
                 if (tl.status == .failed) failed += 1;
