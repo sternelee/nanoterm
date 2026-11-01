@@ -1,0 +1,18 @@
+.{
+    .name = .nanoterm_mobile,
+    .version = "0.1.0",
+    .fingerprint = 0x733dbed852eeefca,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // The same nanoui nanoterm builds against, by the same commit.
+        .nanoui = .{
+            .url = "git+https://github.com/justrach/nanoui#bd2ad8b3ee01d6ecf3bdefe8462feb9f028cb024",
+            .hash = "nanoui-0.9.0-we0KMQgwIQBAs8PvnZFGRXHcj21JOZHdIVSVDU6YrpUc",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
