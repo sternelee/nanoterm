@@ -223,11 +223,15 @@ pub const Phone = struct {
     host_len: usize = 0,
     /// Theme preference: system, light, or dark.
     theme_pref: settings.ThemePreference = .system,
+    /// Track how many items have been shown for each turn, so updates
+    /// only add new items instead of duplicating all of them.
+    turn_items_seen: std.AutoHashMap(u64, usize) = .init(undefined),
     arena_state: std.heap.ArenaAllocator,
 
     fn create(init: std.process.Init, args: []const []const u8) !*Phone {
         const p = try init.gpa.create(Phone);
         p.* = .{ .gpa = init.gpa, .io = init.io, .arena_state = .init(init.gpa) };
+        p.turn_items_seen = .init(init.gpa);
         @memcpy(p.host[0..9], "127.0.0.1");
         p.host_len = 9;
         // What was typed on the phone last time, then the arguments over
@@ -466,21 +470,32 @@ pub const Phone = struct {
             }
         } else if (std.mem.eql(u8, e.kind, "turn")) {
             p.mark(e.id | turn_bit, !e.done);
-            if (e.prompt.len > 0) p.addEntry(.agent_thought, e.prompt, e.id);
-            for (e.items) |item| {
-                if (std.mem.eql(u8, item.kind, "permission")) {
-                    if (item.chosen != null) {
-                        p.answered(item.rpc);
-                    } else {
-                        p.ask(item);
+            // Track which items we've already shown for this turn, so updates
+            // only add new items instead of duplicating everything.
+            const turn_key = e.id | turn_bit;
+            const seen = p.turn_items_seen.get(turn_key) orelse 0;
+            // Show the prompt only once (when we haven't seen any items yet).
+            if (seen == 0 and e.prompt.len > 0) p.addEntry(.agent_thought, e.prompt, e.id);
+            // Only add items we haven't seen before.
+            if (e.items.len > seen) {
+                for (e.items[seen..]) |item| {
+                    if (std.mem.eql(u8, item.kind, "permission")) {
+                        if (item.chosen != null) {
+                            p.answered(item.rpc);
+                        } else {
+                            p.ask(item);
+                        }
+                    } else if (std.mem.eql(u8, item.kind, "text") and item.text.len > 0) {
+                        p.addEntry(.agent_reply, item.text, e.id);
+                    } else if (std.mem.eql(u8, item.kind, "tool")) {
+                        const msg = std.fmt.allocPrint(arena, "{s}: {s}", .{ item.title, item.status }) catch return;
+                        p.addEntry(.agent_tool, msg, e.id);
                     }
-                } else if (std.mem.eql(u8, item.kind, "text") and item.text.len > 0) {
-                    p.addEntry(.agent_reply, item.text, e.id);
-                } else if (std.mem.eql(u8, item.kind, "tool")) {
-                    const msg = std.fmt.allocPrint(arena, "{s}: {s}", .{ item.title, item.status }) catch return;
-                    p.addEntry(.agent_tool, msg, e.id);
                 }
+                p.turn_items_seen.put(turn_key, e.items.len) catch {};
             }
+            // Clean up when the turn is done to avoid unbounded growth.
+            if (e.done) p.turn_items_seen.remove(turn_key);
         } else if (std.mem.eql(u8, e.kind, "ack")) {
             // What was sent was taken: nothing to show.
         } else if (std.mem.eql(u8, e.kind, "error")) {
@@ -800,6 +815,14 @@ pub const Phone = struct {
         if (text.len == 0) return;
         if (p.session == 0) {
             p.push("no tab to send to: is the workstation's relay up?", .{});
+            return;
+        }
+        // "clear" is a local command: wipe the feed, do not send it.
+        if (std.mem.eql(u8, text, "clear")) {
+            for (p.entries.items) |*e| e.deinit(p.gpa);
+            p.entries.clearRetainingCapacity();
+            p.input.clear();
+            p.push("feed cleared", .{});
             return;
         }
         var aw: std.Io.Writer.Allocating = .init(p.gpa);
