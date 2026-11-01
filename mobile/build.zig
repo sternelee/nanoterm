@@ -17,13 +17,32 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const dep = b.dependency("nanoui", .{ .target = target, .optimize = optimize });
 
+    // The desktop's Markdown parser and syntax colors, so agent text on
+    // the phone is read exactly as it is at the workstation.
+    const markdown = b.createModule(.{
+        .root_source_file = b.path("../src/markdown.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+    });
+    const highlight = b.createModule(.{
+        .root_source_file = b.path("../src/highlight.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+    });
+
     const exe = b.addExecutable(.{
         .name = "nanoterm",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+            .imports = &.{
+                .{ .name = "nanoui", .module = dep.module("nanoui") },
+                .{ .name = "markdown", .module = markdown },
+                .{ .name = "highlight", .module = highlight },
+            },
         }),
     });
 
