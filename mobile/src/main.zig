@@ -495,7 +495,7 @@ pub const Phone = struct {
                 p.turn_items_seen.put(turn_key, e.items.len) catch {};
             }
             // Clean up when the turn is done to avoid unbounded growth.
-            if (e.done) p.turn_items_seen.remove(turn_key);
+            if (e.done) _ = p.turn_items_seen.remove(turn_key);
         } else if (std.mem.eql(u8, e.kind, "ack")) {
             // What was sent was taken: nothing to show.
         } else if (std.mem.eql(u8, e.kind, "error")) {
