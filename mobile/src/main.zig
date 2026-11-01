@@ -385,6 +385,7 @@ pub const Phone = struct {
 
     /// One event, rendered as the thing it is, not as JSON.
     pub fn event(p: *Phone, line: []const u8) void {
+        note("received event: {d} bytes", .{line.len});
         const Option = struct { id: []const u8 = "", name: []const u8 = "" };
         const Item = struct {
             kind: []const u8 = "",
@@ -413,7 +414,11 @@ pub const Phone = struct {
         };
         const arena = p.arena_state.allocator();
         defer _ = p.arena_state.reset(.retain_capacity);
-        const e = std.json.parseFromSliceLeaky(Event, arena, line, .{ .ignore_unknown_fields = true }) catch return;
+        const e = std.json.parseFromSliceLeaky(Event, arena, line, .{ .ignore_unknown_fields = true }) catch |err| {
+            note("JSON parse failed: {}", .{err});
+            return;
+        };
+        note("parsed event kind: {s}", .{e.kind});
         if (std.mem.eql(u8, e.kind, "welcome")) {
             p.tabs = e.sessions.len;
             if (p.session == 0 and e.sessions.len > 0) p.session = e.sessions[0];
