@@ -385,7 +385,6 @@ pub const Phone = struct {
 
     /// One event, rendered as the thing it is, not as JSON.
     pub fn event(p: *Phone, line: []const u8) void {
-        note("received event: {d} bytes", .{line.len});
         const Option = struct { id: []const u8 = "", name: []const u8 = "" };
         const Item = struct {
             kind: []const u8 = "",
@@ -400,7 +399,7 @@ pub const Phone = struct {
             seq: u64 = 0,
             kind: []const u8 = "",
             id: u64 = 0,
-            title: []const u8 = "",
+            title: ?[]const u8 = null,
             cwd: []const u8 = "",
             command: []const u8 = "",
             state: []const u8 = "",
@@ -414,11 +413,7 @@ pub const Phone = struct {
         };
         const arena = p.arena_state.allocator();
         defer _ = p.arena_state.reset(.retain_capacity);
-        const e = std.json.parseFromSliceLeaky(Event, arena, line, .{ .ignore_unknown_fields = true }) catch |err| {
-            note("JSON parse failed: {}", .{err});
-            return;
-        };
-        note("parsed event kind: {s}", .{e.kind});
+        const e = std.json.parseFromSliceLeaky(Event, arena, line, .{ .ignore_unknown_fields = true }) catch return;
         if (std.mem.eql(u8, e.kind, "welcome")) {
             p.tabs = e.sessions.len;
             if (p.session == 0 and e.sessions.len > 0) p.session = e.sessions[0];
@@ -436,18 +431,19 @@ pub const Phone = struct {
             p.addEntry(.system, msg, 0);
         } else if (std.mem.eql(u8, e.kind, "session")) {
             if (p.session == 0) p.session = e.id;
+            const title_text = if (e.title) |t| if (t.len > 0) t else "~" else "~";
             for (p.sessions.items) |*s| {
                 if (s.id == e.id) {
                     if (s.title.len > 0) p.gpa.free(s.title);
                     if (s.cwd.len > 0) p.gpa.free(s.cwd);
                     if (s.mode.len > 0) p.gpa.free(s.mode);
-                    s.title = p.gpa.dupe(u8, if (e.title.len > 0) e.title else "~") catch s.title;
+                    s.title = p.gpa.dupe(u8, title_text) catch s.title;
                     s.cwd = p.gpa.dupe(u8, e.cwd) catch s.cwd;
                     s.mode = p.gpa.dupe(u8, e.mode) catch s.mode;
                     break;
                 }
             }
-            const msg = std.fmt.allocPrint(arena, "tab {d}: {s} — {s} ({s})", .{ e.id, if (e.title.len > 0) e.title else "~", e.cwd, e.mode }) catch return;
+            const msg = std.fmt.allocPrint(arena, "tab {d}: {s} — {s} ({s})", .{ e.id, title_text, e.cwd, e.mode }) catch return;
             p.addEntry(.system, msg, e.id);
         } else if (std.mem.eql(u8, e.kind, "gone")) {
             if (p.session == e.id) p.session = 0;
@@ -474,13 +470,11 @@ pub const Phone = struct {
                 }
             }
         } else if (std.mem.eql(u8, e.kind, "turn")) {
-            note("received turn id={d}, items={d}, done={}", .{ e.id, e.items.len, e.done });
             p.mark(e.id | turn_bit, !e.done);
             // Track which items we've already shown for this turn, so updates
             // only add new items instead of duplicating everything.
             const turn_key = e.id | turn_bit;
             const seen = p.turn_items_seen.get(turn_key) orelse 0;
-            note("  turn_key={d}, seen={d}, will add {d} items", .{ turn_key, seen, if (e.items.len > seen) e.items.len - seen else 0 });
             // Show the prompt only once (when we haven't seen any items yet).
             if (seen == 0 and e.prompt.len > 0) p.addEntry(.agent_thought, e.prompt, e.id);
             // Only add items we haven't seen before.
@@ -493,7 +487,6 @@ pub const Phone = struct {
                             p.ask(item);
                         }
                     } else if (std.mem.eql(u8, item.kind, "text") and item.text.len > 0) {
-                        note("  adding text item: {d} bytes", .{item.text.len});
                         p.addEntry(.agent_reply, item.text, e.id);
                     } else if (std.mem.eql(u8, item.kind, "tool")) {
                         const msg = std.fmt.allocPrint(arena, "{s}: {s}", .{ item.title, item.status }) catch return;
