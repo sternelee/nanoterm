@@ -26,6 +26,8 @@ const Tree = ws_mod.Tree;
 const title_height = 40;
 
 pub fn view(w: *Workspace, c: *ui.Context) void {
+    // What the relay held back at its last change goes out in this frame.
+    if (w.shared.relay) |h| h.tick();
     if (w.tabs.items.len == 0) return;
     focusOnPress(w, c);
     // Harness's palettes: the theme Settings chose, or light and dark as

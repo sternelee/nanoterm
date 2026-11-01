@@ -10,9 +10,14 @@ const std = @import("std");
 const agent_mod = @import("agent.zig");
 const Which = agent_mod.Which;
 const launch = @import("agent_launch.zig");
+const relay = @import("relay.zig");
 
 /// Whether anonymous usage analytics are shared: not asked yet, yes, no.
 pub const Analytics = enum { unset, on, off };
+
+/// The relay: off, or on for a phone on the same Wi-Fi, or on over
+/// Tailscale.
+pub const Relay = enum { off, lan, tailscale };
 
 pub const Prefs = struct {
     gpa: std.mem.Allocator,
@@ -39,6 +44,10 @@ pub const Prefs = struct {
     /// Motion turns them all off regardless.
     motion_duration: f32 = 1,
     motion_intensity: f32 = 1,
+    /// The relay for the phone: off, or on over the LAN, or over Tailscale,
+    /// and on which port.
+    relay: Relay = .off,
+    relay_port: u16 = relay.default_port,
     installed: std.EnumArray(Which, bool) = .initFill(false),
     /// Anonymous usage analytics, sent only when `analytics` is on.
     telemetry: @import("analytics.zig").Client,
@@ -49,7 +58,7 @@ pub const Prefs = struct {
         p.path = std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "settings.json" }) catch "";
         const data = std.Io.Dir.cwd().readFileAlloc(io, p.path, gpa, .limited(64 * 1024)) catch return p;
         defer gpa.free(data);
-        const S = struct { agent: []const u8 = "agent", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1 };
+        const S = struct { agent: []const u8 = "agent", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1, relay: []const u8 = "off", relay_port: u16 = relay.default_port };
         const parsed = std.json.parseFromSlice(S, gpa, data, .{ .ignore_unknown_fields = true }) catch return p;
         defer parsed.deinit();
         const v = parsed.value;
@@ -64,6 +73,8 @@ pub const Prefs = struct {
         p.file_icons = v.file_icons;
         p.motion_duration = std.math.clamp(v.motion_duration, 0.25, 2);
         p.motion_intensity = std.math.clamp(v.motion_intensity, 0, 1.5);
+        p.relay = std.meta.stringToEnum(Relay, v.relay) orelse .off;
+        p.relay_port = if (v.relay_port == 0) relay.default_port else v.relay_port;
         if (v.install_id.len == p.install_id.len) @memcpy(&p.install_id, v.install_id);
         return p;
     }
@@ -83,7 +94,7 @@ pub const Prefs = struct {
         if (p.path.len == 0) return;
         if (std.fs.path.dirname(p.path)) |dir| std.Io.Dir.cwd().createDirPath(p.io, dir) catch {};
         var buf: [512]u8 = undefined;
-        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2}\n}}\n", .{ @tagName(p.agent), p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity }) catch return;
+        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"relay\": \"{s}\",\n  \"relay_port\": {d}\n}}\n", .{ @tagName(p.agent), p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.relay), p.relay_port }) catch return;
         std.Io.Dir.cwd().writeFile(p.io, .{ .sub_path = p.path, .data = json }) catch {};
     }
 
@@ -164,6 +175,14 @@ pub const Prefs = struct {
         if (@abs(p.motion_duration - d) < 0.001 and @abs(p.motion_intensity - i) < 0.001) return;
         p.motion_duration = d;
         p.motion_intensity = i;
+        p.save();
+    }
+
+    /// The relay for the phone: off, or on over the LAN or Tailscale.
+    pub fn setRelay(p: *Prefs, mode: Relay, port: u16) void {
+        if (p.relay == mode and p.relay_port == port) return;
+        p.relay = mode;
+        p.relay_port = port;
         p.save();
     }
 

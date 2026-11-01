@@ -7,6 +7,7 @@ const nanoui = @import("nanoui");
 const session_mod = @import("session.zig");
 const ws_mod = @import("workspace.zig");
 const actions = @import("actions.zig");
+const relay = @import("relay.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
 const Workspace = ws_mod.Workspace;
@@ -77,6 +78,7 @@ pub fn main(init: std.process.Init) !void {
     defer splits.deinit(init.gpa);
     var ask: ?[]const u8 = null;
     var which: ?Which = null;
+    var relay_port: ?u16 = null;
     var i: usize = 1;
     while (i + 1 < args.len) : (i += 1) {
         const flag = args[i];
@@ -91,8 +93,24 @@ pub fn main(init: std.process.Init) !void {
             which = std.meta.stringToEnum(Which, value);
         } else if (std.mem.eql(u8, flag, "--split")) {
             try splits.append(init.gpa, value);
+        } else if (std.mem.eql(u8, flag, "--relay")) {
+            relay_port = std.fmt.parseInt(u16, value, 10) catch relay.default_port;
         } else continue;
         i += 1;
+    }
+
+    // nanoterm --relay PORT: these sessions, for a phone to reach; or the
+    // relay Settings left on, on the port and the network it chose.
+    const settings = @import("settings.zig");
+    const mode: settings.Relay = if (relay_port != null)
+        (if (shared.prefs.relay == .off) .lan else shared.prefs.relay)
+    else shared.prefs.relay;
+    const port: ?u16 = relay_port orelse (if (shared.prefs.relay != .off) shared.prefs.relay_port else null);
+    if (port) |p| {
+        shared.setRelay(mode, p) catch |err| {
+            std.log.err("nanoterm: the relay did not start: {s}", .{@errorName(err)});
+        };
+        if (shared.relay) |h| std.log.info("nanoterm: relay on port {d}, token {s}", .{ h.port(), relay.Hub.tokenHex(h) });
     }
 
     shared.window = try app.newWindow(.{

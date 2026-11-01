@@ -17,6 +17,7 @@ test {
     _ = @import("tests_find.zig");
     _ = @import("tests_visual.zig");
     _ = @import("tests_visual_mcp.zig");
+    _ = @import("tests_relay.zig");
     _ = @import("tests_visual_view.zig");
     _ = @import("tests_fold.zig");
     _ = @import("tests_palette.zig");

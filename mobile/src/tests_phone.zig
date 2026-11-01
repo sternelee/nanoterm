@@ -150,14 +150,14 @@ test "Connect validates, saves, and opens when the fields are right" {
     const p = try phone(std.testing.allocator);
     defer p.destroy();
     p.host_input.set("127.0.0.1");
-    p.port_input.set("4789");
+    p.port_input.set("59999");
     p.token_input.set("0123456789abcdef0123456789abcdef");
-    // The relay is not running here, so open() fails and status is .down:
+    // Use a port that's not listening, so open() fails and status is .down:
     // the fields were still taken, and the file was written. The connection
     // failure is now shown to the user via connectFail().
     p.connect();
     try std.testing.expectEqualStrings("127.0.0.1", p.host[0..p.host_len]);
-    try std.testing.expectEqual(@as(u16, 4789), p.port);
+    try std.testing.expectEqual(@as(u16, 59999), p.port);
     try std.testing.expect(p.has_token);
     try std.testing.expect(p.connect_why_len > 0); // Connection refused is shown
     // A wrong token is refused before anything is tried.

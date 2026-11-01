@@ -168,3 +168,57 @@ test "a command run in a new tab (an installer, a sign-in) waits for its shell's
     defer gpa.free(text);
     try std.testing.expectEqualStrings("signed in", text);
 }
+
+test "Settings' Relay page: off by default, and LAN turns the relay on" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-relay-settings";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    // A port of its own, so a relay left running by another test cannot
+    // take this one's.
+    shared.prefs.relay_port = 4799;
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    _ = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 2400, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Relay");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Phone · relay"));
+    try std.testing.expect(t.hasText("The relay is off."));
+    try std.testing.expect(shared.relay == null);
+    // A LAN relay starts listening and shows its address and token.
+    try t.clickText("LAN");
+    t.settle(1);
+    try std.testing.expect(shared.relay != null);
+    try std.testing.expect(shared.prefs.relay == .lan);
+    try std.testing.expect(t.containsText("Token"));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        home ++ "/Library/Application Support/nanoterm/relay-token",
+        gpa,
+        .limited(64),
+    );
+    defer gpa.free(bytes);
+    try std.testing.expect(bytes.len == 32);
+    try t.screenshot("/tmp/nanoterm-settings-relay.png");
+    // Turning it off again stops it.
+    try t.clickText("Off");
+    t.settle(1);
+    try std.testing.expect(shared.relay == null);
+    try std.testing.expect(t.hasText("The relay is off."));
+}

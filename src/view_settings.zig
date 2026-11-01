@@ -9,8 +9,10 @@ const theme = @import("theme.zig");
 const agents = @import("agents.zig");
 const agent_mod = @import("agent.zig");
 const Workspace = @import("workspace.zig").Workspace;
+const settings = @import("settings.zig");
+const relay = @import("relay.zig");
 
-const Page = enum(u8) { agents = 0, appearance = 1, motion = 2, privacy = 3, updates = 4 };
+const Page = enum(u8) { agents = 0, appearance = 1, motion = 2, privacy = 3, updates = 4, relay = 5 };
 
 pub fn card(c: *ui.Context, w: *Workspace) void {
     const panel = ui.div(c).column().w(@min(720, c.size.w - 40)).bg(theme.panel).rounded(14).border(theme.border).shadowLg().clip();
@@ -44,6 +46,7 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
         sideItem(c, w, .motion, "waveform", "Motion");
         sideItem(c, w, .privacy, "hand.raised", "Privacy");
         sideItem(c, w, .updates, "arrow.down.circle", "Updates");
+        sideItem(c, w, .relay, "globe", "Relay");
     }
     _ = c.leaf(.{ .width = .{ .px = 1 }, .background = theme.border }, .none, null);
     {
@@ -58,6 +61,7 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
             @intFromEnum(Page.motion) => motionPage(c, w),
             @intFromEnum(Page.privacy) => privacy(c, w),
             @intFromEnum(Page.updates) => updates(c, w),
+            @intFromEnum(Page.relay) => relayPage(c, w),
             else => {},
         }
     }
@@ -611,6 +615,53 @@ fn privacy(c: *ui.Context, w: *Workspace) void {
     defer links.end();
     if (ui.button(c, "Privacy Policy", .{ .variant = .ghost, .size = 11.5, .icon = "hand.raised" }).clicked) _ = nanoui.shell.openUrl(an.privacy_url);
     if (ui.button(c, "Terms", .{ .variant = .ghost, .size = 11.5, .icon = "doc.text" }).clicked) _ = nanoui.shell.openUrl(an.terms_url);
+}
+
+/// The phone's relay: off, on the LAN, or over Tailscale — the addresses a
+/// phone must be told, and the token it has to say when it connects.
+fn relayPage(c: *ui.Context, w: *Workspace) void {
+    const p = &w.shared.prefs;
+    const s = section(c, "Phone · relay");
+    defer s.end();
+    {
+        const b = box(c);
+        defer b.end();
+        ui.text(c, "A phone reads this machine's tabs through the relay, and runs in them too.", .{ .size = 12, .color = theme.muted, .wrap = true });
+
+        const order = [_][]const u8{ "Off", "LAN", "Tailscale" };
+        var picked: usize = @intFromEnum(p.relay);
+        if (ui.segmented(c, &order, &picked)) {
+            p.relay = @as(settings.Relay, @enumFromInt(picked));
+            w.shared.setRelay(p.relay, p.relay_port) catch |err| {
+                ui.text(c, c.print("The relay did not start: {s}", .{@errorName(err)}), .{ .size = 11, .color = theme.failure, .wrap = true });
+            };
+        }
+
+        const h = w.shared.relay;
+        const port = if (h) |x| x.port() else p.relay_port;
+        ui.text(c, c.print("Port   {d}", .{port}), .{ .size = 12.5 });
+
+        const addr = if (h) |hub|
+            if (p.relay == .lan) hub.lan
+            else hub.ts
+        else "";
+        if (addr.len > 0) {
+            const line = c.print("{s}:{d}", .{ addr, port });
+            ui.text(c, c.print("Open     {s}", .{line}), .{ .size = 12.5, .weight = .semibold });
+            if (ui.button(c, "Copy", .{ .size = 12 }).clicked) c.clipboard.write(c.clipboard.ctx, line);
+        } else if (p.relay != .off) {
+            ui.text(c, "No address found yet.", .{ .size = 12, .color = theme.muted });
+        }
+
+        if (h) |hub| {
+            const token = relay.Hub.tokenHex(hub);
+            ui.text(c, c.print("Token   {s}", .{token}), .{ .size = 12.5, .weight = .semibold });
+            if (ui.button(c, "Copy", .{ .size = 12 }).clicked) c.clipboard.write(c.clipboard.ctx, token);
+            ui.text(c, "Paste it into the phone's Connect screen.", .{ .size = 11, .color = theme.muted });
+        } else if (p.relay == .off) {
+            ui.text(c, "The relay is off.", .{ .size = 12, .color = theme.muted });
+        }
+    }
 }
 
 fn updates(c: *ui.Context, w: *Workspace) void {

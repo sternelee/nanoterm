@@ -53,6 +53,11 @@ pub const Shared = struct {
     /// Where agents' visuals come in (show_visual), and this program, which
     /// is their MCP server too.
     visuals: ?*visual_host.Host = null,
+    /// The phone's relay (--relay), when one was started: what it shows,
+    /// and the commands it sends back.
+    relay: ?*@import("relay.zig").Hub = null,
+    /// Every session made, so a relay started later finds them all.
+    sessions: std.ArrayList(*Session) = .empty,
     exe: []const u8 = "",
     /// The conversations had, this run and before (the palette's history).
     log: Log,
@@ -119,6 +124,8 @@ pub const Shared = struct {
     }
 
     pub fn deinit(s: *Shared) void {
+        if (s.relay) |h| h.destroy();
+        s.sessions.deinit(s.gpa);
         if (s.visuals) |h| h.destroy();
         s.log.deinit();
         s.pictures.deinit();
@@ -136,6 +143,37 @@ pub const Shared = struct {
     fn redrawCtx(ctx: *anyopaque) void {
         const s: *Shared = @ptrCast(@alignCast(ctx));
         s.redraw();
+    }
+
+    /// Turns the relay on for a phone — over the LAN or over Tailscale —
+    /// or off. A relay already running keeps its sessions and its token,
+    /// and only listens somewhere else.
+    pub fn setRelay(s: *Shared, mode: @import("settings.zig").Relay, port: u16) !void {
+        const hub = @import("relay.zig");
+        if (mode == .off) {
+            if (s.relay) |h| h.destroy();
+            s.relay = null;
+            return;
+        }
+        const token_path = hub.Hub.tokenPath(s.gpa, s.home);
+        defer s.gpa.free(token_path);
+        const options: hub.Options = .{
+            .port = port,
+            .mode = if (mode == .lan) .lan else .tailscale,
+            .token = s.env.get("NANOTERM_RELAY_TOKEN") orelse "",
+            .token_path = token_path,
+        };
+        if (s.relay) |h| {
+            h.rebind(s.io, options) catch |err| {
+                std.log.err("nanoterm: the relay cannot listen on port {d}: {s}", .{ port, @errorName(err) });
+                return error.ListenFailed;
+            };
+        } else {
+            const h = try hub.Hub.create(s.gpa, s.io, options);
+            for (s.sessions.items) |sess| h.attach(sess);
+            s.relay = h;
+        }
+        std.log.info("nanoterm: relay on port {d}, token {s}", .{ port, hub.Hub.tokenHex(s.relay.?) });
     }
 
     pub fn redraw(s: *Shared) void {
@@ -239,11 +277,23 @@ pub const Session = struct {
             .which = shared.prefs.agent,
         };
         shared.next_session += 1;
+        shared.sessions.append(gpa, a) catch {};
         a.startShell(cwd_) catch |err| {
             std.log.err("nanoterm: the shell did not start: {s}", .{@errorName(err)});
             a.shell_exited = true;
         };
+        if (shared.relay) |h| h.attach(a);
         return a;
+    }
+
+    fn removeSession(shared: *Shared, s: *Session) void {
+        var i: usize = 0;
+        while (i < shared.sessions.items.len) : (i += 1) {
+            if (shared.sessions.items[i] == s) {
+                _ = shared.sessions.swapRemove(i);
+                return;
+            }
+        }
     }
 
     pub fn destroy(a: *Session) void {
@@ -252,6 +302,9 @@ pub const Session = struct {
     }
 
     fn deinit(a: *Session) void {
+        // Before the blocks and turns it holds go: the relay forgets them.
+        if (a.shared.relay) |h| h.detach(a);
+        removeSession(a.shared, a);
         if (a.agent) |ag| ag.destroy();
         for (a.retired.items) |ag| ag.destroy();
         a.retired.deinit(a.gpa);
@@ -292,6 +345,8 @@ pub const Session = struct {
     pub fn changed(ctx: *anyopaque) void {
         const a: *Session = @ptrCast(@alignCast(ctx));
         a.pump();
+        // A phone watching this tab hears of it, at most once a frame.
+        if (a.shared.relay) |h| h.touched(a);
         a.shared.redraw();
     }
 
