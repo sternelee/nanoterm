@@ -59,7 +59,7 @@ test "the Settings page: built-in Agent, agents, appearance, updates" {
     {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(65536));
         defer gpa.free(bytes);
-        try std.testing.expect(std.mem.indexOf(u8, bytes, "yolo") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "full-access") != null);
     }
     // New configurations hide in expandable panels until their title is clicked.
     // They sit below fx's dials now: scroll the page to reach them.
