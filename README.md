@@ -270,6 +270,40 @@ agent). A new pane starts in the focused pane's directory; unfocused panes
 are dimmed; dividers drag, and a double-click equalizes. The keys live in
 the menus (Shell, Window), as Ghostty's do.
 
+## Phone
+
+`--relay PORT` puts these tabs on `127.0.0.1` for a phone to watch and
+drive, through a tunnel you already have (Tailscale, a Cloudflare tunnel):
+nanoterm itself is never on the network, and the port only ever listens on
+the loopback.
+
+```sh
+zig build run -- --relay 4789
+```
+
+A 32-character token is made the first time and kept in
+`~/Library/Application Support/nanoterm/relay-token` (or passed in
+`NANOTERM_RELAY_TOKEN`); the terminal it was started from says the port and
+the token to copy into the phone. Nothing is answered without it.
+
+A client sends `{"op":"hello","token":"…"}` and is told the tabs
+(`session`, and `gone` when one closes), then every command and every
+answer of the agent as it changes (`block`, `turn`) — what changed since
+the last frame, at most every 50 ms, never all of it. It sends its own
+back: `run`, `ask`, `interrupt`, `answer` for a permission (by `rpc` and
+option), and `list` for everything again. Each event carries a `seq`, so a
+phone whose tunnel dropped knows what it missed and can start over.
+
+What a phone gets is the tail of each block's text (8 KB), not a terminal
+screen: it reads the command and what it printed, it does not emulate the
+pane. The client is a nanoui app with native UI (`Content.page` is not on
+mobile), in `mobile/` — iOS first, Android after; read
+[mobile/README.md](mobile/README.md) to run it. It shows the tabs and sends
+back too: a command to run, a question for the agent, an answer to a
+permission it is waiting on, a stop for what that tab is doing. `src/tests_relay.zig` drives the whole path — a
+wrong token refused, a tab shown, a command run from the phone, a closed tab
+leaving its list — over a real socket and a real shell.
+
 ## Finding, zooming, long output
 
 ⌘F opens a find bar over the panes: every match in the focused pane's
