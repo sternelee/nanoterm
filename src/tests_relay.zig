@@ -7,6 +7,7 @@ const nanoui = @import("nanoui");
 const relay = @import("relay.zig");
 const ws_mod = @import("workspace.zig");
 const session_mod = @import("session.zig");
+const agent_mod = @import("agent.zig");
 
 const token = "relay-test-token-0123456789abcde";
 
@@ -151,8 +152,11 @@ fn phone(port: u16, r: *Result) void {
         return;
     }
     var buf: [16 * 1024]u8 = undefined;
-    // The tabs, then how the one tab is; then a command run from here.
+    // The tabs, then how the one tab is; then a command run from here,
+    // and the agent switched from here.
     var ran = false;
+    var switched = false;
+    var saw_switch = false;
     var tries: usize = 0;
     while (tries < 4000) : (tries += 1) {
         const said = c.next(&buf) orelse {
@@ -176,6 +180,26 @@ fn phone(port: u16, r: *Result) void {
             }
             r.session = id;
         }
+        // A session event says whose agent and model it is, and what the
+        // phone may pick.
+        if (!switched and std.mem.indexOf(u8, said, "\"kind\":\"session\"") != null) {
+            if (std.mem.indexOf(u8, said, "\"agent\":\"Agent\"") == null or
+                std.mem.indexOf(u8, said, "\"model\":") == null or
+                std.mem.indexOf(u8, said, "\"models\":[") == null or
+                std.mem.indexOf(u8, said, "\"agents\":[") == null)
+            {
+                r.failed = "a session without its agent and models";
+                return;
+            }
+            var switch_buf: [96]u8 = undefined;
+            const switch_line = std.fmt.bufPrint(&switch_buf, "{{\"op\":\"agent\",\"session\":{d},\"text\":\"grok\"}}\n", .{r.session}) catch return;
+            if (!c.send(switch_line)) {
+                r.failed = "an agent switch could not be sent";
+                return;
+            }
+            switched = true;
+        }
+        if (switched and std.mem.indexOf(u8, said, "\"agent_key\":\"grok\"") != null) saw_switch = true;
         if (!ran and r.session != 0) {
             var run_buf: [128]u8 = undefined;
             const run_line = std.fmt.bufPrint(&run_buf, "{{\"op\":\"run\",\"session\":{d},\"text\":\"echo from-the-phone\"}}\n", .{r.session}) catch return;
@@ -185,8 +209,9 @@ fn phone(port: u16, r: *Result) void {
             }
             ran = true;
         }
-        // The block, done, saying what it printed.
-        if (std.mem.indexOf(u8, said, "\"command\":\"echo from-the-phone\"") != null and
+        // The block, done, saying what it printed; and the switch, heard.
+        if (saw_switch and
+            std.mem.indexOf(u8, said, "\"command\":\"echo from-the-phone\"") != null and
             std.mem.indexOf(u8, said, "\"state\":\"done\"") != null and
             std.mem.indexOf(u8, said, "\"output\":\"from-the-phone") != null)
         {
@@ -349,4 +374,120 @@ test "the relay: a closed tab leaves the phone's list, and list shows what is le
         return error.RelayTest;
     }
     try std.testing.expectEqual(@as(u64, 1), result.session);
+}
+
+/// A phone watching a turn grow: the whole of it first, then only the text
+/// that is new — the whole turn again for every few words is what kept a
+/// slower phone behind a long answer.
+const Watch = struct {
+    failed: ?[]const u8 = null,
+    done: bool = false,
+    /// The turn's first, whole event was seen.
+    whole: bool = false,
+    /// Its next event carried only what grew.
+    grew: bool = false,
+};
+
+fn watchTurn(port: u16, r: *Watch) void {
+    defer @atomicStore(bool, &r.done, true, .release);
+    var c = Client.open(port) orelse {
+        r.failed = "the relay took no connection";
+        return;
+    };
+    defer c.close();
+    var hello: [128]u8 = undefined;
+    const hello_line = std.fmt.bufPrint(&hello, "{{\"op\":\"hello\",\"token\":\"{s}\"}}\n", .{token}) catch return;
+    if (!c.send(hello_line)) {
+        r.failed = "hello could not be sent";
+        return;
+    }
+    var buf: [16 * 1024]u8 = undefined;
+    var tries: usize = 0;
+    while (tries < 4000) : (tries += 1) {
+        const said = c.next(&buf) orelse {
+            r.failed = "the relay stopped talking";
+            return;
+        };
+        if (std.mem.indexOf(u8, said, "\"kind\":\"turn\"") == null) continue;
+        if (!r.whole) {
+            if (std.mem.indexOf(u8, said, "\"items\":[{\"kind\":\"text\",\"text\":\"Hel\"}]") == null) continue;
+            @atomicStore(bool, &r.whole, true, .release);
+            continue;
+        }
+        if (std.mem.indexOf(u8, said, "\"append\":{\"index\":0,\"len\":3,\"text\":\"lo\"}") == null) {
+            r.failed = "a turn that only grew went out whole again";
+            return;
+        }
+        if (std.mem.indexOf(u8, said, "\"items\":") != null) {
+            r.failed = "an append carried the whole turn too";
+            return;
+        }
+        @atomicStore(bool, &r.grew, true, .release);
+        return;
+    }
+    r.failed = "the turn was never shown";
+}
+
+test "the relay: a turn that only grew goes out as what is new" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-relay-stream";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    const h = try relay.Hub.create(gpa, io, .{ .port = 0, .token = token });
+    shared.relay = h;
+    defer {
+        h.destroy();
+        shared.relay = null;
+    }
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    var result: Watch = .{};
+    const thread = try std.Thread.spawn(.{}, watchTurn, .{ h.port(), &result });
+    // The turn is the test's own: no agent runs for it here.
+    var t: agent_mod.Turn = .{
+        .prompt = try gpa.dupe(u8, "hi"),
+        .agent = .claude,
+        .started = 0,
+        .items = .empty,
+    };
+    try t.items.append(gpa, .{ .text = std.ArrayList(u8).fromOwnedSlice(try gpa.dupe(u8, "Hel")) });
+    try s.timeline.append(gpa, .{ .turn = &t });
+    h.touched(s);
+    var waited: f64 = 0;
+    while (!@atomicLoad(bool, &result.whole, .acquire) and waited < 30) : (waited += 0.02) {
+        nanoui.runFor(0.02);
+        h.tick();
+    }
+    // The answer goes on: only those two bytes are news.
+    try t.items.items[0].text.appendSlice(gpa, "lo");
+    h.touched(s);
+    while (!@atomicLoad(bool, &result.done, .acquire) and waited < 30) : (waited += 0.02) {
+        nanoui.runFor(0.02);
+        h.tick();
+    }
+    thread.join();
+    // The turn was the test's, so is its memory.
+    _ = s.timeline.pop();
+    t.items.items[0].text.deinit(gpa);
+    t.items.deinit(gpa);
+    gpa.free(t.prompt);
+    if (result.failed) |why| {
+        std.debug.print("relay test: {s}\n", .{why});
+        return error.RelayTest;
+    }
+    try std.testing.expect(result.whole);
+    try std.testing.expect(result.grew);
 }

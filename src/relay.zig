@@ -19,6 +19,7 @@ const blocks = @import("blocks.zig");
 const vt = @import("vt.zig");
 const session_mod = @import("session.zig");
 const agent_mod = @import("agent.zig");
+const assist = @import("assist.zig");
 
 /// The protocol's version; a field in `welcome` and in `hello`.
 pub const protocol = 1;
@@ -75,9 +76,44 @@ pub const Bind = enum {
     tailscale,
 };
 
+/// One of a turn's items as the wire last carried it: its content's
+/// digest, what it is, the parts that do not grow (a tool's id, title and
+/// status), and how much of the text that does grow it had — with the
+/// bytes at that edge, to know the next change is only more text.
+const SentItem = struct {
+    digest: u64,
+    kind: u8,
+    base: u64,
+    len: usize = 0,
+    tail: [max_tail]u8 = @splat(0),
+    tail_len: u8 = 0,
+};
+
+/// How much of an item's growing text is kept to know where an append
+/// starts: as much as `entryDigest` looks at.
+const max_tail = 64;
+
 /// What an entry looked like when it was last sent: `id` it went out
-/// under, and the digest of its content then.
-const Slot = struct { id: u64, digest: u64 };
+/// under, the digest of its content then, and — for a turn — what its
+/// items were, so a change that only appends is sent as the text that is
+/// new rather than the whole turn again.
+const Slot = struct {
+    id: u64,
+    digest: u64,
+    /// The turn's items as last sent; empty for a block.
+    items: []SentItem = &.{},
+    /// The turn's own fields (done, title, timings): when they change, a
+    /// turn goes out whole.
+    meta: u64 = 0,
+};
+
+/// What a turn changed into since it was sent: new text at the end of its
+/// last item, everything, or nothing the wire would show.
+const Change = union(enum) {
+    none,
+    full,
+    append: struct { index: usize, old_len: usize, text: []const u8 },
+};
 
 pub const Options = struct {
     port: u16 = default_port,
@@ -110,6 +146,10 @@ pub const Hub = struct {
     watch: ?fdwatch.Watch = null,
     conns: std.ArrayList(*Conn) = .empty,
     sessions: std.ArrayList(*session_mod.Session) = .empty,
+    /// What each session's metadata looked like when it was last sent: its
+    /// agent, model and the choices it offers. A change goes out as a
+    /// new `session` event, so the phone's picker stays current.
+    session_sigs: std.AutoHashMapUnmanaged(*session_mod.Session, u64) = .empty,
     slots: std.AutoHashMapUnmanaged(*const anyopaque, Slot) = .empty,
     /// The event being made; `send` hands it to every client that can take it.
     out: std.ArrayList(u8) = .empty,
@@ -205,7 +245,10 @@ pub const Hub = struct {
         if (h.lan.len > 0) h.gpa.free(h.lan);
         if (h.ts.len > 0) h.gpa.free(h.ts);
         h.server.deinit(h.io);
+        var slots = h.slots.valueIterator();
+        while (slots.next()) |slot| h.freeSlot(slot);
         h.slots.deinit(h.gpa);
+        h.session_sigs.deinit(h.gpa);
         h.out.deinit(h.gpa);
         h.scratch.deinit(h.gpa);
         h.sessions.deinit(h.gpa);
@@ -230,7 +273,8 @@ pub const Hub = struct {
                 break;
             }
         }
-        for (s.timeline.items) |e| _ = h.slots.remove(entryKey(e));
+        for (s.timeline.items) |e| if (h.slots.fetchRemove(entryKey(e))) |kv| h.freeSlot(&kv.value);
+        _ = h.session_sigs.remove(s);
         // A tab closed here leaves the phone's list too, rather than
         // staying on it showing what it last showed.
         if (gone and h.conns.items.len > 0) {
@@ -276,24 +320,39 @@ pub const Hub = struct {
     }
 
     /// Every entry of `s`, each event going out only if it is new or
-    /// different from what went out before.
+    /// different from what went out before; then the session itself, when
+    /// its agent, model or choices changed.
     fn pump(h: *Hub, s: *session_mod.Session) void {
+        const sig = sessionDigest(s);
+        if (h.conns.items.len > 0) {
+            const known = h.session_sigs.get(s);
+            if (known == null or known.? != sig) {
+                h.session_sigs.put(h.gpa, s, sig) catch {};
+                h.sendSession(null, s);
+            }
+        } else h.session_sigs.put(h.gpa, s, sig) catch {};
         for (s.timeline.items) |e| h.emit(s, e);
     }
 
     fn emit(h: *Hub, s: *session_mod.Session, e: session_mod.Entry) void {
         const key = entryKey(e);
         const digest = entryDigest(e);
-        if (h.slots.get(key)) |slot| {
+        if (h.slots.getPtr(key)) |slot| {
             if (slot.digest == digest) return;
-            h.slots.put(h.gpa, key, .{ .id = slot.id, .digest = digest }) catch return;
-            h.sendEntry(null, s, slot.id, e);
+            slot.digest = digest;
+            h.sendEntry(null, s, slot.id, e, slot);
             return;
         }
         const id = h.next_id;
         h.next_id += 1;
-        h.slots.put(h.gpa, key, .{ .id = id, .digest = digest }) catch return;
-        h.sendEntry(null, s, id, e);
+        const slot = h.slots.getOrPut(h.gpa, key) catch return;
+        if (!slot.found_existing) slot.value_ptr.* = .{ .id = id, .digest = digest };
+        h.sendEntry(null, s, id, e, slot.value_ptr);
+    }
+
+    /// A slot's item memory goes with it.
+    fn freeSlot(h: *Hub, slot: *const Slot) void {
+        if (slot.items.len > 0) h.gpa.free(slot.items);
     }
 
     /// A new client's view: the tabs, then everything in them.
@@ -315,7 +374,7 @@ pub const Hub = struct {
             h.sendSession(c, s);
             for (s.timeline.items) |e| {
                 const id = h.idFor(e);
-                h.sendEntry(c, s, id, e);
+                h.sendEntry(c, s, id, e, h.slots.getPtr(entryKey(e)));
             }
         }
     }
@@ -330,7 +389,7 @@ pub const Hub = struct {
         return id;
     }
 
-    fn sendSession(h: *Hub, c: *Conn, s: *session_mod.Session) void {
+    fn sendSession(h: *Hub, c: ?*Conn, s: *session_mod.Session) void {
         var aw: std.Io.Writer.Allocating = .init(h.gpa);
         defer aw.deinit();
         h.begin(&aw, "session");
@@ -341,14 +400,115 @@ pub const Hub = struct {
         json(w, s.cwd());
         w.writeAll(",\"mode\":") catch {};
         json(w, @tagName(s.mode()));
+        w.writeAll(",\"agent\":") catch {};
+        json(w, s.which.label());
+        w.writeAll(",\"agent_key\":") catch {};
+        json(w, @tagName(s.which));
+        w.writeAll(",\"agent_status\":") catch {};
+        json(w, if (s.agent) |ag| @tagName(ag.status) else "off");
+        w.writeAll(",\"model\":") catch {};
+        json(w, modelName(s));
+        w.writeAll(",\"models\":[") catch {};
+        writeModels(w, s);
+        w.writeAll("],\"agents\":[") catch {};
+        writeAgents(w, s);
+        w.writeByte(']') catch {};
         w.writeByte('}') catch {};
         h.finish(&aw, c);
     }
 
-    fn sendEntry(h: *Hub, c: ?*Conn, s: *session_mod.Session, id: u64, e: session_mod.Entry) void {
+    /// What the tab's picker shows as its model: the agent's own choice
+    /// once it has one, else the one saved for it.
+    fn modelName(s: *session_mod.Session) []const u8 {
+        if (s.agent) |ag| if (ag.config.find("model")) |o| return o.currentName();
+        if (s.model_choice) |m| return m;
+        if (s.which == .agent) if (s.shared.agent_store) |store| if (store.currentModel().len > 0) return store.currentModel();
+        return "default model";
+    }
+
+    /// The models the tab offers: its agent's, once started; else the
+    /// providers configured for the built-in Agent.
+    fn writeModels(w: anytype, s: *session_mod.Session) void {
+        var first = true;
+        if (s.agent) |ag| if (ag.config.find("model")) |o| {
+            for (o.choices) |ch| {
+                if (!first) w.writeByte(',') catch {};
+                first = false;
+                w.writeAll("{\"value\":") catch {};
+                json(w, ch.value);
+                w.writeAll(",\"name\":") catch {};
+                json(w, ch.name);
+                w.writeAll(",\"provider\":\"\"}") catch {};
+            }
+        };
+        if (first and s.which == .agent) if (s.shared.agent_store) |store| {
+            for (store.providers.items) |provider| {
+                for (provider.models.items) |model| {
+                    if (!first) w.writeByte(',') catch {};
+                    first = false;
+                    w.writeAll("{\"value\":") catch {};
+                    json(w, model);
+                    w.writeAll(",\"name\":") catch {};
+                    json(w, model);
+                    w.writeAll(",\"provider\":") catch {};
+                    json(w, provider.name);
+                    w.writeByte('}') catch {};
+                }
+            }
+        };
+    }
+
+    /// The agents the phone may switch to: as Settings found them, plus
+    /// the built-in Agent and Claude Code, as the desktop's picker shows.
+    fn writeAgents(w: anytype, s: *session_mod.Session) void {
+        var first = true;
+        for (std.enums.values(agent_mod.Which)) |which| {
+            if (which != s.which and which != .agent and which != .claude and !s.shared.prefs.installed.get(which)) continue;
+            if (!first) w.writeByte(',') catch {};
+            first = false;
+            w.writeAll("{\"key\":") catch {};
+            json(w, @tagName(which));
+            w.writeAll(",\"name\":") catch {};
+            json(w, which.label());
+            w.writeByte('}') catch {};
+        }
+    }
+
+    /// What the phone's picker depends on: a change means a new `session`
+    /// event.
+    fn sessionDigest(s: *session_mod.Session) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        const put = struct {
+            fn text(hh: *std.hash.Wyhash, t: []const u8) void {
+                hh.update(t);
+                hh.update(&[_]u8{0});
+            }
+        }.text;
+        put(&hash, s.title());
+        put(&hash, s.cwd());
+        put(&hash, @tagName(s.mode()));
+        put(&hash, @tagName(s.which));
+        put(&hash, if (s.agent) |ag| @tagName(ag.status) else "off");
+        put(&hash, modelName(s));
+        if (s.agent) |ag| if (ag.config.find("model")) |o| {
+            for (o.choices) |ch| {
+                put(&hash, ch.value);
+                put(&hash, ch.name);
+            }
+        };
+        if (s.which == .agent) if (s.shared.agent_store) |store| {
+            for (store.providers.items) |provider| {
+                put(&hash, provider.name);
+                for (provider.models.items) |model| put(&hash, model);
+            }
+        };
+        return hash.final();
+    }
+
+    fn sendEntry(h: *Hub, c: ?*Conn, s: *session_mod.Session, id: u64, e: session_mod.Entry, slot: ?*Slot) void {
         switch (e) {
             .block => |b| h.sendBlock(c, s, id, b),
-            .turn => |t| h.sendTurn(c, s, id, t),
+            .turn => |t| h.sendTurn(c, s, id, t, slot),
         }
     }
 
@@ -373,21 +533,65 @@ pub const Hub = struct {
         h.finish(&aw, c);
     }
 
-    fn sendTurn(h: *Hub, c: ?*Conn, s: *session_mod.Session, id: u64, t: *agent_mod.Turn) void {
+    /// A turn as the phone needs it now: whole, or — when only its last
+    /// item grew — just the text that is new. A phone on a slower link
+    /// could never keep up with the whole turn going out again and again,
+    /// so a long answer arrived long after the workstation's.
+    fn sendTurn(h: *Hub, c: ?*Conn, s: *session_mod.Session, id: u64, t: *agent_mod.Turn, slot: ?*Slot) void {
+        const meta = turnMeta(t);
+        // A client just shown everything (`welcome`) needs all of it, not
+        // what changed since the hub last sent it.
+        if (c == null) {
+            if (slot) |sl| {
+                if (sl.meta == meta) switch (turnChange(t, sl.items)) {
+                    .none => return,
+                    .append => |at| {
+                        h.sendTurnAppend(null, s, id, t, at);
+                        sl.items[at.index] = sentItem(t.items.items[at.index]);
+                        return;
+                    },
+                    .full => {},
+                };
+            }
+        }
+        h.sendTurnFull(c, s, id, t);
+        if (slot) |sl| {
+            sl.meta = meta;
+            h.setSent(sl, t.items.items);
+        }
+    }
+
+    fn sendTurnFull(h: *Hub, c: ?*Conn, s: *session_mod.Session, id: u64, t: *agent_mod.Turn) void {
         var aw: std.Io.Writer.Allocating = .init(h.gpa);
         defer aw.deinit();
         h.begin(&aw, "turn");
         const w = &aw.writer;
-        w.print(",\"session\":{d},\"id\":{d},\"agent\":", .{ s.id, id }) catch {};
-        json(w, t.agent.label());
-        w.writeAll(",\"prompt\":") catch {};
-        json(w, t.prompt);
-        w.writeAll(",\"title\":") catch {};
-        if (t.title) |title| json(w, title) else w.writeAll("null") catch {};
-        w.print(",\"sent\":{},\"done\":{},\"items\":", .{ t.sent, t.done }) catch {};
+        writeTurnHead(w, s.id, id, t);
+        w.writeAll(",\"items\":") catch {};
         writeItems(w, t.items.items);
         w.writeByte('}') catch {};
         h.finish(&aw, c);
+    }
+
+    fn sendTurnAppend(h: *Hub, c: ?*Conn, s: *session_mod.Session, id: u64, t: *agent_mod.Turn, at: anytype) void {
+        var aw: std.Io.Writer.Allocating = .init(h.gpa);
+        defer aw.deinit();
+        h.begin(&aw, "turn");
+        const w = &aw.writer;
+        writeTurnAppend(w, s.id, id, t, at);
+        w.writeByte('}') catch {};
+        h.finish(&aw, c);
+    }
+
+    /// The items as last sent, kept to know what the next change added.
+    fn setSent(h: *Hub, slot: *Slot, items: []const agent_mod.Item) void {
+        const fresh = h.gpa.alloc(SentItem, items.len) catch {
+            h.freeSlot(slot);
+            return;
+        };
+        for (items, 0..) |item, i| fresh[i] = sentItem(item);
+        h.freeSlot(slot);
+        slot.items = fresh;
     }
 
     /// The first fields of every event: its place in the stream and what
@@ -455,29 +659,72 @@ pub const Hub = struct {
         return null;
     }
 
-    /// The block's last lines, joined: as much of them as one event holds.
+    /// The block's last lines, joined, their colored spans as SGR escapes
+    /// (the phone draws them as the desktop does): as much as one event
+    /// holds.
     fn tail(h: *Hub, o: *const vt.Output) []const u8 {
         h.scratch.clearRetainingCapacity();
-        const lines = o.lines.items;
+        // The empty line after a last newline is not output, as the
+        // desktop's line count puts it.
+        const lines = o.lines.items[0..o.lineCount()];
         if (lines.len == 0) return h.scratch.items;
         var total: usize = 0;
         var start = lines.len;
         while (start > 0) {
-            const n = lines[start - 1].text.items.len + 1;
-            if (total + n > max_output) break;
-            total += n;
+            if (total + styledLen(&lines[start - 1]) + 1 > max_output) break;
+            total += styledLen(&lines[start - 1]) + 1;
             start -= 1;
         }
         if (start == lines.len) {
             // One line, longer than an event holds: its end is what is new.
-            h.scratch.appendSlice(h.gpa, tailOf(lines[lines.len - 1].text.items, max_output)) catch {};
+            const l = &lines[lines.len - 1];
+            const text = l.text.items;
+            var from = text.len -| max_output / 2;
+            while (from < text.len and (text[from] & 0xc0) == 0x80) from += 1;
+            styled(h, l, from);
             return h.scratch.items;
         }
-        for (lines[start..], 0..) |l, i| {
+        for (lines[start..], 0..) |*l, i| {
             if (i > 0) h.scratch.append(h.gpa, '\n') catch break;
-            h.scratch.appendSlice(h.gpa, l.text.items) catch break;
+            styled(h, l, 0);
         }
         return h.scratch.items;
+    }
+
+    /// How many bytes a line takes as escapes and text.
+    fn styledLen(l: *const vt.Line) usize {
+        var n = l.text.items.len;
+        for (l.spans.items) |sp| {
+            if (sp.color != null) n += 24;
+        }
+        return n;
+    }
+
+    /// A line's text from `from`, each span's color as `\x1b[38;2;r;g;bm`
+    /// and closed with `\x1b[0m`: what a terminal would have received.
+    fn styled(h: *Hub, l: *const vt.Line, from: usize) void {
+        const text = l.text.items;
+        var at = @min(from, text.len);
+        for (l.spans.items) |sp| {
+            const col = sp.color orelse continue;
+            const start: usize = @min(@as(usize, sp.start), text.len);
+            const end: usize = @min(@as(usize, sp.end), text.len);
+            if (end <= at) continue;
+            if (start >= text.len) break;
+            if (start > at) {
+                h.scratch.appendSlice(h.gpa, text[at..start]) catch return;
+                at = start;
+            }
+            sgr(h, col);
+            h.scratch.appendSlice(h.gpa, text[at..end]) catch return;
+            h.scratch.appendSlice(h.gpa, "\x1b[0m") catch return;
+            at = end;
+        }
+        if (at < text.len) h.scratch.appendSlice(h.gpa, text[at..]) catch {};
+    }
+
+    fn sgr(h: *Hub, col: nanoui.ui.Color) void {
+        h.scratch.print(h.gpa, "\x1b[38;2;{d};{d};{d}m", .{ channel(col.r), channel(col.g), channel(col.b) }) catch {};
     }
 
     /// A line from a client: what it asks for, done here.
@@ -492,6 +739,7 @@ pub const Hub = struct {
             text: []const u8 = "",
             rpc: []const u8 = "",
             option: usize = 0,
+            provider: []const u8 = "",
         };
         const m = std.json.parseFromSliceLeaky(Msg, arena_state.allocator(), line, .{ .ignore_unknown_fields = true }) catch {
             h.refuse(c, "a command must be JSON: {\"op\":\"run\",\"session\":1,\"text\":\"ls\"}");
@@ -560,6 +808,37 @@ pub const Hub = struct {
             }
             ag.answer(p, m.option);
             h.ack(c, "answer");
+            return true;
+        }
+        if (std.mem.eql(u8, m.op, "agent")) {
+            const which = std.meta.stringToEnum(agent_mod.Which, m.text) orelse {
+                h.refuse(c, "no such agent");
+                return true;
+            };
+            s.choose(which);
+            // Its choices (models) are what the picker asks for next; the
+            // session event carries whatever it already knows.
+            h.pump(s);
+            h.ack(c, "agent");
+            return true;
+        }
+        if (std.mem.eql(u8, m.op, "model")) {
+            if (m.text.len == 0) {
+                h.refuse(c, "model needs a name");
+                return true;
+            }
+            if (m.provider.len > 0 and s.which == .agent) if (s.shared.agent_store) |store| store.selectProviderByName(m.provider);
+            assist.chooseModel(s, m.text);
+            h.pump(s);
+            h.ack(c, "model");
+            return true;
+        }
+        if (std.mem.eql(u8, m.op, "models")) {
+            // Opens the agent so it can say what it offers; the session
+            // event goes out again once its options arrive.
+            _ = s.ensureAgent();
+            h.pump(s);
+            h.ack(c, "models");
             return true;
         }
         h.refuse(c, "no such op");
@@ -659,7 +938,7 @@ fn tokenFor(io: std.Io, options: Options) ![32]u8 {
         if (std.fs.path.dirname(options.token_path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
         // Only the user who started nanoterm reads it: the phone is shown
         // the same 32 characters on the terminal it was started from.
-        const mode: std.Io.File.Permissions = if (windows) .default_file else @enumFromInt(0o600);
+        const mode: std.Io.File.Permissions = if (windows) .default_file else @fromBackingInt(@intCast(0o600));
         std.Io.Dir.cwd().writeFile(io, .{
             .sub_path = options.token_path,
             .data = &out,
@@ -692,6 +971,11 @@ fn clip(s: []const u8, max: usize) []const u8 {
     return s[0..n];
 }
 
+/// A color channel as an SGR byte.
+fn channel(v: f32) u8 {
+    return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
+}
+
 /// The last `max` bytes of `s`, cut at a character's edge.
 fn tailOf(s: []const u8, max: usize) []const u8 {
     if (s.len <= max) return s;
@@ -718,6 +1002,8 @@ fn writeItems(w: *std.Io.Writer, items: []const agent_mod.Item) void {
             .tool => |tool| {
                 w.writeAll("{\"kind\":\"tool\",\"id\":") catch {};
                 json(w, tool.id);
+                w.writeAll(",\"tool\":") catch {};
+                json(w, tool.kind);
                 w.writeAll(",\"title\":") catch {};
                 json(w, tool.title.items);
                 w.writeAll(",\"status\":") catch {};
@@ -860,6 +1146,197 @@ fn digestItem(h: *std.hash.Wyhash, item: agent_mod.Item) void {
     }
 }
 
+/// Everything of a turn but its items: the same fields whichever way its
+/// items go.
+fn writeTurnHead(w: anytype, session: u64, id: u64, t: *agent_mod.Turn) void {
+    w.print(",\"session\":{d},\"id\":{d},\"agent\":", .{ session, id }) catch {};
+    json(w, t.agent.label());
+    w.writeAll(",\"prompt\":") catch {};
+    json(w, t.prompt);
+    w.writeAll(",\"title\":") catch {};
+    if (t.title) |title| json(w, title) else w.writeAll("null") catch {};
+    w.print(",\"sent\":{},\"done\":{},\"started\":{d:.3},\"ended\":{d:.3}", .{ t.sent, t.done, t.started, t.ended }) catch {};
+}
+
+/// What grew, against the whole turn: where it goes, how much the item had,
+/// and the text that is new, for a phone whose copy ends where it says.
+fn writeTurnAppend(w: anytype, session: u64, id: u64, t: *agent_mod.Turn, at: anytype) void {
+    writeTurnHead(w, session, id, t);
+    w.print(",\"append\":{{\"index\":{d},\"len\":{d},\"text\":", .{ at.index, at.old_len }) catch {};
+    json(w, at.text);
+    w.writeAll("}}") catch {};
+}
+
+/// What a turn's own fields looked like when it was sent: a change here
+/// means the whole turn goes out, since it is not text that grew.
+fn turnMeta(t: *const agent_mod.Turn) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(std.mem.asBytes(&t.sent));
+    h.update(std.mem.asBytes(&t.done));
+    h.update(@tagName(t.agent));
+    h.update(t.prompt);
+    if (t.title) |title| h.update(title);
+    h.update(std.mem.asBytes(&t.started));
+    h.update(std.mem.asBytes(&t.ended));
+    return h.final();
+}
+
+/// The text an item streams, cut where the wire cuts it; null when it is
+/// not an item that grows.
+fn shownText(item: agent_mod.Item) ?[]const u8 {
+    const text = switch (item) {
+        .text => |text| text.items,
+        .thought => |text| text.items,
+        .note => |note| note,
+        .tool => |tool| tool.detail.items,
+        else => return null,
+    };
+    return clip(text, max_text);
+}
+
+fn itemKind(item: agent_mod.Item) u8 {
+    return switch (item) {
+        .text => 't',
+        .thought => 'k',
+        .note => 'n',
+        .tool => 'T',
+        .plan => 'P',
+        .permission => 'Q',
+        .command => 'C',
+        .visual => 'v',
+    };
+}
+
+/// The parts of an item that growing it leaves alone.
+fn itemBase(item: agent_mod.Item) u64 {
+    var h = std.hash.Wyhash.init(0);
+    switch (item) {
+        .text, .thought, .note => {},
+        .tool => |tool| {
+            h.update(tool.id);
+            h.update(tool.kind);
+            h.update(tool.title.items);
+            h.update(@tagName(tool.status));
+        },
+        else => {
+            const digest = itemDigest(item);
+            h.update(std.mem.asBytes(&digest));
+        },
+    }
+    return h.final();
+}
+
+fn itemDigest(item: agent_mod.Item) u64 {
+    var h = std.hash.Wyhash.init(0);
+    digestItem(&h, item);
+    return h.final();
+}
+
+fn sentItem(item: agent_mod.Item) SentItem {
+    var sent: SentItem = .{ .digest = itemDigest(item), .kind = itemKind(item), .base = itemBase(item) };
+    if (shownText(item)) |shown| {
+        sent.len = shown.len;
+        const edge = tailOf(shown, max_tail);
+        @memcpy(sent.tail[0..edge.len], edge);
+        sent.tail_len = @intCast(edge.len);
+    }
+    return sent;
+}
+
+/// What `t` has to say since it went out as `was`: the new text when only
+/// the last item grew, the whole turn when more changed (or the phone
+/// could not put the new text where it belongs), nothing when the wire
+/// would carry the same bytes.
+fn turnChange(t: *const agent_mod.Turn, was: []const SentItem) Change {
+    const items = t.items.items;
+    if (items.len == 0 or was.len != items.len) return .full;
+    const last = items.len - 1;
+    for (items[0..last], was[0..last]) |item, before| {
+        if (itemDigest(item) != before.digest) return .full;
+    }
+    const item = items[last];
+    const before = was[last];
+    const now = sentItem(item);
+    if (now.kind != before.kind or now.base != before.base) return .full;
+    if (now.digest == before.digest) return .none;
+    const shown = shownText(item) orelse return .full;
+    if (shown.len < before.len) return .full;
+    // The bytes it had must still be where the new ones start.
+    const edge = before.tail[0..before.tail_len];
+    if (edge.len > 0 and !std.mem.eql(u8, shown[before.len - edge.len .. before.len], edge)) return .full;
+    // At its clip, the wire would carry the same bytes: nothing to send.
+    if (shown.len == before.len) return .none;
+    return .{ .append = .{ .index = last, .old_len = before.len, .text = shown[before.len..] } };
+}
+
+test "a turn that only grew goes out as what is new" {
+    const gpa = std.testing.allocator;
+    var t: agent_mod.Turn = .{
+        .prompt = try gpa.dupe(u8, "hi"),
+        .agent = .claude,
+        .started = 0,
+        .items = .empty,
+    };
+    defer {
+        for (t.items.items) |*it| switch (it.*) {
+            .text => |*l| l.deinit(gpa),
+            else => {},
+        };
+        t.items.deinit(gpa);
+        gpa.free(t.prompt);
+    }
+    try t.items.append(gpa, .{ .text = std.ArrayList(u8).fromOwnedSlice(try gpa.dupe(u8, "Hel")) });
+    var was: [2]SentItem = undefined;
+    was[0] = sentItem(t.items.items[0]);
+    try std.testing.expect(turnChange(&t, was[0..1]) == .none);
+
+    // More of the same text: the new bytes, and where they start.
+    try t.items.items[0].text.appendSlice(gpa, "lo");
+    const grew = turnChange(&t, was[0..1]);
+    try std.testing.expect(grew == .append);
+    try std.testing.expectEqual(@as(usize, 0), grew.append.index);
+    try std.testing.expectEqual(@as(usize, 3), grew.append.old_len);
+    try std.testing.expectEqualStrings("lo", grew.append.text);
+    was[0] = sentItem(t.items.items[0]);
+
+    // A second item: the whole turn, so the phone learns about it.
+    try t.items.append(gpa, .{ .text = std.ArrayList(u8).fromOwnedSlice(try gpa.dupe(u8, "there")) });
+    try std.testing.expect(turnChange(&t, was[0..1]) == .full);
+    was[1] = sentItem(t.items.items[1]);
+
+    // The text it had, rewritten: not an append, so whole again.
+    t.items.items[1].text.items.len = 0;
+    try t.items.items[1].text.appendSlice(gpa, "hello");
+    try std.testing.expect(turnChange(&t, was[0..2]) == .full);
+}
+
+test "an append event says where the new text goes" {
+    const gpa = std.testing.allocator;
+    var t: agent_mod.Turn = .{
+        .prompt = try gpa.dupe(u8, "hi"),
+        .agent = .claude,
+        .started = 0,
+        .items = .empty,
+    };
+    defer {
+        for (t.items.items) |*it| switch (it.*) {
+            .text => |*l| l.deinit(gpa),
+            else => {},
+        };
+        t.items.deinit(gpa);
+        gpa.free(t.prompt);
+    }
+    try t.items.append(gpa, .{ .text = std.ArrayList(u8).fromOwnedSlice(try gpa.dupe(u8, "Hello")) });
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    writeTurnAppend(&aw.writer, 3, 11, &t, .{ .index = 0, .old_len = 3, .text = "lo" });
+    const line = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, line, "\"session\":3,\"id\":11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, ",\"append\":{\"index\":0,\"len\":3,\"text\":\"lo\"}") != null);
+    // What grew, not the whole turn again.
+    try std.testing.expect(std.mem.indexOf(u8, line, "\"items\":") == null);
+}
+
 /// The permission question a turn still waits on, by the id the agent gave it.
 fn permissionOf(ag: *agent_mod.Agent, rpc: []const u8) ?*agent_mod.Permission {
     var i = ag.turns.items.len;
@@ -884,7 +1361,7 @@ pub fn lanAddress(gpa: std.mem.Allocator, io: std.Io) []const u8 {
     if (windows) return "";
     const argv: []const []const u8 = switch (builtin.os.tag) {
         .linux => &.{ "ip", "-4", "addr" },
-        else => &.{ "ifconfig" },
+        else => &.{"ifconfig"},
     };
     return firstAddress(gpa, io, argv, inetAddress);
 }
@@ -905,7 +1382,7 @@ fn output(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, out: *st
     var reader = std.Io.File.Reader.init(file, io, buffer[0..]);
     var lines: std.ArrayListUnmanaged(u8) = .empty;
     defer lines.deinit(gpa);
-    var chunk: [1][]u8 = .{ buffer[0..] };
+    var chunk: [1][]u8 = .{buffer[0..]};
     while (true) {
         const n = reader.interface.readVec(&chunk) catch break;
         if (n == 0) break;
@@ -958,7 +1435,7 @@ fn isIpv4(s: []const u8) bool {
 /// label an interface's address.
 fn inetAddress(line: []const u8) ?[]const u8 {
     const marker = std.mem.indexOf(u8, line, "inet ") orelse return null;
-    var rest = line[marker + "inet ".len..];
+    var rest = line[marker + "inet ".len ..];
     const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
     var token = rest[0..end];
     if (std.mem.indexOfScalar(u8, token, '/')) |_| token = token[0..std.mem.indexOfScalar(u8, token, '/').?];
@@ -974,9 +1451,26 @@ fn tokenAddress(line: []const u8) ?[]const u8 {
     while (rest.len > 0) {
         const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
         const token = rest[0..end];
-        rest = if (end < rest.len) rest[end + 1..] else &.{};
+        rest = if (end < rest.len) rest[end + 1 ..] else &.{};
         if (token.len == 0) continue;
         if (isIpv4(token) and !std.mem.eql(u8, token, "127.0.0.1") and !std.mem.eql(u8, token, "0.0.0.0")) return token;
     }
     return null;
+}
+
+test "a block's tail carries its spans' colors as escapes" {
+    const t = std.testing;
+    var h: Hub = undefined;
+    h.gpa = t.allocator;
+    h.scratch = .empty;
+    defer h.scratch.deinit(h.gpa);
+    var o = vt.Output.init(t.allocator);
+    defer o.deinit();
+    try o.feed("plain \x1b[31mred\x1b[0m end\n");
+    const out = Hub.tail(&h, &o);
+    try t.expect(std.mem.indexOf(u8, out, "\x1b[38;2;") != null);
+    try t.expect(std.mem.indexOf(u8, out, "red") != null);
+    try t.expect(std.mem.indexOf(u8, out, "\x1b[0m") != null);
+    try t.expect(std.mem.startsWith(u8, out, "plain \x1b[38;2;"));
+    try t.expect(std.mem.endsWith(u8, out, "\x1b[0m end"));
 }
