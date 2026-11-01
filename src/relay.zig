@@ -286,12 +286,22 @@ pub const Hub = struct {
         const digest = entryDigest(e);
         if (h.slots.get(key)) |slot| {
             if (slot.digest == digest) return;
+            // Debug: turn digest changed, will re-emit
+            if (e == .turn) {
+                const t = e.turn;
+                std.debug.print("relay: turn {d} digest changed (items: {d}, done: {}), re-emitting\n", .{ slot.id, t.items.items.len, t.done });
+            }
             h.slots.put(h.gpa, key, .{ .id = slot.id, .digest = digest }) catch return;
             h.sendEntry(null, s, slot.id, e);
             return;
         }
         const id = h.next_id;
         h.next_id += 1;
+        // Debug: new turn emitted
+        if (e == .turn) {
+            const t = e.turn;
+            std.debug.print("relay: new turn {d} emitted (items: {d}, done: {})\n", .{ id, t.items.items.len, t.done });
+        }
         h.slots.put(h.gpa, key, .{ .id = id, .digest = digest }) catch return;
         h.sendEntry(null, s, id, e);
     }

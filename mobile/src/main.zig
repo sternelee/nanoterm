@@ -469,11 +469,13 @@ pub const Phone = struct {
                 }
             }
         } else if (std.mem.eql(u8, e.kind, "turn")) {
+            note("received turn id={d}, items={d}, done={}", .{ e.id, e.items.len, e.done });
             p.mark(e.id | turn_bit, !e.done);
             // Track which items we've already shown for this turn, so updates
             // only add new items instead of duplicating everything.
             const turn_key = e.id | turn_bit;
             const seen = p.turn_items_seen.get(turn_key) orelse 0;
+            note("  turn_key={d}, seen={d}, will add {d} items", .{ turn_key, seen, if (e.items.len > seen) e.items.len - seen else 0 });
             // Show the prompt only once (when we haven't seen any items yet).
             if (seen == 0 and e.prompt.len > 0) p.addEntry(.agent_thought, e.prompt, e.id);
             // Only add items we haven't seen before.
@@ -486,6 +488,7 @@ pub const Phone = struct {
                             p.ask(item);
                         }
                     } else if (std.mem.eql(u8, item.kind, "text") and item.text.len > 0) {
+                        note("  adding text item: {d} bytes", .{item.text.len});
                         p.addEntry(.agent_reply, item.text, e.id);
                     } else if (std.mem.eql(u8, item.kind, "tool")) {
                         const msg = std.fmt.allocPrint(arena, "{s}: {s}", .{ item.title, item.status }) catch return;
