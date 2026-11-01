@@ -367,7 +367,7 @@ fn mdBlock(c: *ui.Context, b: md.Block) void {
         .item => |it| {
             const r = ui.div(c).row().wFull().gap(8).pl(@as(f32, @floatFromInt(it.depth)) * 16);
             defer r.end();
-            const m = ui.div(c).row().w(c.text.lineHeight(.{ .size = 13.5 })).itemsCenter();
+            const m = ui.div(c).row().minW(20).itemsCenter();
             defer m.end();
             if (it.task) |done| {
                 ui.icon(c, if (done) "checkmark.circle.fill" else "circle", .{ .size = 12, .color = if (done) c.theme.success else c.theme.muted });
