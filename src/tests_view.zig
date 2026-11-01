@@ -377,7 +377,7 @@ test "typing a slash in the Agent's input keeps the caret after it" {
     // The caret still belongs after what was composed.
     s.input.clear();
     t.frame();
-    t.textOps(&.{ .{ .set_marked = .{ .text = "/", .sel_start = 0, .sel_len = 0 } }, .unmark });
+    t.textOps(&.{ .{ .set_marked = .{ .text = "/", .sel_start = 1, .sel_len = 0 } }, .unmark });
     t.frame();
     try std.testing.expectEqualStrings("/", s.input.text());
     try std.testing.expectEqual(@as(usize, 1), s.caret);
