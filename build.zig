@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
     fx_options.addOption([]const u8, "update_channel", "stable");
     fx_options.addOption(enum { none, core, term }, "wasm_surface", .none);
     fx_options.addOption(bool, "libfx", false);
+    fx_options.addOption(bool, "builtin_tools", true);
     const session_options = b.addOptions();
     session_options.addOption(bool, "hooks", false);
     session_options.addOptionPathUntracked("trace_dir", b.graph.path(.install_prefix, "session-manager-traces"));
