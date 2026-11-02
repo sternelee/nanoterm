@@ -20,8 +20,9 @@ pub fn turn(c: *ui.Context, app: *App, t: *agent_mod.Turn) void {
     ui.key(c, c.print("turn-{x}", .{@intFromPtr(t)}));
     const d = ui.div(c).column().wFull().px(16).py(14).gap(12);
     defer d.end();
+    const it = d.interaction();
     // The palette jumped here: say where, for the timeline to scroll.
-    if (app.reveal == t) if (d.interaction().rect) |r| {
+    if (app.reveal == t) if (it.rect) |r| {
         app.shared.find.target_y = r.y;
         app.reveal = null;
     };
@@ -41,8 +42,10 @@ pub fn turn(c: *ui.Context, app: *App, t: *agent_mod.Turn) void {
         }
     }
     {
-        // …and the agent answered.
-        const h = ui.div(c).row().wFull().gap(12).itemsCenter();
+        // …and the agent answered. The hover action is 24px tall; keep the
+        // row that tall whether it shows or not, so the reply under it does
+        // not move as the pointer enters the turn.
+        const h = ui.div(c).row().wFull().h(26).gap(12).itemsCenter();
         defer h.end();
         avatar(c, "sparkles", theme.agent);
         ui.text(c, t.agent.label(), .{ .size = 12.5, .weight = .semibold, .color = theme.agent });
@@ -53,6 +56,12 @@ pub fn turn(c: *ui.Context, app: *App, t: *agent_mod.Turn) void {
         } else if (t.ended > 0) {
             ui.text(c, view_block.duration(c, t.ended - t.started), .{ .size = 11.5, .color = theme.muted, .mono = true });
         }
+        // The reply, copied whole, on hover as a block's actions are: its
+        // messages, in order, a blank line between them. Not just "Copy":
+        // a code block in the answer has its own.
+        if (it.hovered) if (replyText(c.alloc(), t)) |text| {
+            if (ui.button(c, "Copy reply", .{ .variant = .ghost, .size = 11.5, .icon = "doc.on.doc" }).clicked) c.clipboard.write(c.clipboard.ctx, text);
+        };
     }
     const body = ui.div(c).column().wFull().pl(gutter).gap(12);
     defer body.end();
@@ -106,6 +115,26 @@ pub fn shownByTool(t: *agent_mod.Turn, b: *@import("blocks.zig").Block) bool {
         else => {},
     };
     return false;
+}
+
+/// The agent's reply as one text — its messages, in order, a blank line
+/// between them — for the clipboard; null when it has said nothing.
+pub fn replyText(gpa: std.mem.Allocator, t: *const agent_mod.Turn) ?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var wrote = false;
+    for (t.items.items) |it| switch (it) {
+        .text => |l| {
+            const text = std.mem.trim(u8, l.items, " \n");
+            if (text.len == 0) continue;
+            if (wrote) out.appendSlice(gpa, "\n\n") catch return null;
+            out.appendSlice(gpa, text) catch return null;
+            wrote = true;
+        },
+        else => {},
+    };
+    if (!wrote) return null;
+    return out.toOwnedSlice(gpa) catch null;
 }
 
 fn thought(c: *ui.Context, text: []const u8) void {

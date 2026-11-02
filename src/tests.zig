@@ -20,6 +20,7 @@ test {
     _ = @import("tests_relay.zig");
     _ = @import("tests_visual_view.zig");
     _ = @import("tests_fold.zig");
+    _ = @import("tests_copy.zig");
     _ = @import("tests_palette.zig");
     _ = @import("tests_pictures.zig");
     _ = @import("tests_pin.zig");
