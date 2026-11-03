@@ -249,14 +249,14 @@ test "a failed agent's error stays inside the model picker" {
     ag.status = .failed;
     ag.error_text = try gpa.dupe(u8, "could not start hermes: zsh:1: command not found: hermes-agent --mode acp --stdio");
     var t: ui.Tester = undefined;
-    try t.init(gpa, .init(&w, view.view), .{ .width = 660, .height = 640, .theme = theme.ui() });
+    try t.init(gpa, .init(&w, view.view), .{ .width = 800, .height = 640, .theme = theme.ui() });
     defer t.deinit();
     t.settle(1);
     try std.testing.expect(t.shortcut(binds.shortcut("Cmd+Shift+M")));
     t.settle(1);
     // The picker's card: as wide as the window allows, centered.
-    const card_w: f32 = @min(560, 660 - 40);
-    const card_right = (660 - card_w) / 2 + card_w;
+    const card_w: f32 = @min(680, 800 - 40);
+    const card_right = (800 - card_w) / 2 + card_w;
     // The header carries only the word; the failure's words are a line of
     // their own, wrapped inside the card.
     try std.testing.expect(t.hasText("failed"));
@@ -268,6 +268,9 @@ test "a failed agent's error stays inside the model picker" {
         else => {},
     };
     try std.testing.expect(err_right >= 0);
+    // The wrapped line fills the card's width, so the card is as wide as
+    // it should be, and no wider than the window's edge.
+    try std.testing.expect(err_right >= card_right - 20);
     try std.testing.expect(err_right <= card_right + 0.5);
     try t.screenshot("/tmp/nanoterm-picker-error.png");
 }

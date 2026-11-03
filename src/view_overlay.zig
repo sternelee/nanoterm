@@ -30,7 +30,7 @@ pub fn overlay(c: *ui.Context, w: *Workspace) void {
     if (scrim.clicked()) return w.closeOverlay();
     if (w.overlay == .palette) return @import("view_palette.zig").card(c, w);
     if (w.overlay == .settings) return @import("view_settings.zig").card(c, w);
-    const card = ui.div(c).column().w(@min(560, c.size.w - 40)).p(8).gap(6).bg(theme.panel).rounded(12).border(theme.border).shadowLg();
+    const card = ui.div(c).column().w(@min(680, c.size.w - 40)).p(8).gap(6).bg(theme.panel).rounded(12).border(theme.border).shadowLg();
     defer card.end();
     // Clicks inside the card stay in it.
     _ = card.interaction();
