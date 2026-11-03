@@ -30,7 +30,7 @@ pub fn overlay(c: *ui.Context, w: *Workspace) void {
     if (scrim.clicked()) return w.closeOverlay();
     if (w.overlay == .palette) return @import("view_palette.zig").card(c, w);
     if (w.overlay == .settings) return @import("view_settings.zig").card(c, w);
-    const card = ui.div(c).column().w(@min(620, c.size.w - 40)).p(8).gap(6).bg(theme.panel).rounded(12).border(theme.border).shadowLg();
+    const card = ui.div(c).column().w(@min(720, c.size.w - 40)).p(8).gap(6).bg(theme.panel).rounded(12).border(theme.border).shadowLg();
     defer card.end();
     // Clicks inside the card stay in it.
     _ = card.interaction();
@@ -122,6 +122,7 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
         ui.spacer(c);
         status(c, s);
     }
+    failure(c, s);
     options(c, s);
     const enter = search(c, w, "Search models…");
     const Choice = struct { value: []const u8, row: Row, section: []const u8 = "", provider: ?[]const u8 = null };
@@ -184,9 +185,18 @@ fn status(c: *ui.Context, s: *Session) void {
         .starting => "starting…",
         .ready => "ready",
         .working => "working…",
-        .failed => ag.error_text orelse "failed",
+        // The failure's words are the line under the header; here the word.
+        .failed => "failed",
     };
-    ui.text(c, text[0..@min(text.len, 60)], .{ .size = 11.5, .color = if (ag.status == .failed) theme.failure else theme.muted });
+    ui.text(c, text, .{ .size = 11.5, .color = if (ag.status == .failed) theme.failure else theme.muted });
+}
+
+/// The failure's own words, wrapped: the header row only says "failed".
+fn failure(c: *ui.Context, s: *Session) void {
+    const ag = s.agent orelse return;
+    if (ag.status != .failed) return;
+    const why = ag.error_text orelse return;
+    ui.text(c, why, .{ .size = 11.5, .color = theme.failure, .wrap = true, .max_lines = 2 });
 }
 
 /// The agent's other choices (mode, thought level), one row each.

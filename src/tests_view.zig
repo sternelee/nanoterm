@@ -214,6 +214,64 @@ test "a ready update shows in the title bar; one that can't install keeps nanote
     try std.testing.expect(t.hasText("Restart to update to 9.9.9"));
 }
 
+test "a failed agent's error stays inside the model picker" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-picker-error";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    // Several agents installed, hermes chosen but not starting: the
+    // picker's header carries the failure in red, on its right.
+    shared.prefs.installed.set(.codex, true);
+    shared.prefs.installed.set(.opencode, true);
+    shared.prefs.installed.set(.grok, true);
+    shared.prefs.installed.set(.devin, true);
+    s.which = .hermes;
+    const ag = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = struct {
+        fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
+            return null;
+        }
+    }.f }, .hermes, home);
+    s.agent = ag;
+    ag.status = .failed;
+    ag.error_text = try gpa.dupe(u8, "could not start hermes: zsh:1: command not found: hermes-agent --mode acp --stdio");
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 660, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    try std.testing.expect(t.shortcut(binds.shortcut("Cmd+Shift+M")));
+    t.settle(1);
+    // The picker's card: as wide as the window allows, centered.
+    const card_w: f32 = @min(720, 660 - 40);
+    const card_right = (660 - card_w) / 2 + card_w;
+    // The header carries only the word; the failure's words are a line of
+    // their own, wrapped inside the card.
+    try std.testing.expect(t.hasText("failed"));
+    var err_right: f32 = -1;
+    for (t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| {
+            if (std.mem.indexOf(u8, tx.str, "could not start hermes") != null) err_right = n.rect.x + n.rect.w;
+        },
+        else => {},
+    };
+    try std.testing.expect(err_right >= 0);
+    try std.testing.expect(err_right <= card_right + 0.5);
+    try t.screenshot("/tmp/nanoterm-picker-error.png");
+}
+
 test "a block's header keeps its height when its hover actions appear" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
