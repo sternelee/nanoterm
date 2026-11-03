@@ -255,7 +255,7 @@ test "a failed agent's error stays inside the model picker" {
     try std.testing.expect(t.shortcut(binds.shortcut("Cmd+Shift+M")));
     t.settle(1);
     // The picker's card: as wide as the window allows, centered.
-    const card_w: f32 = @min(720, 660 - 40);
+    const card_w: f32 = @min(560, 660 - 40);
     const card_right = (660 - card_w) / 2 + card_w;
     // The header carries only the word; the failure's words are a line of
     // their own, wrapped inside the card.
