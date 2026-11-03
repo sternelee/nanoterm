@@ -865,7 +865,8 @@ pub const Agent = struct {
         a.app.changed(a.app.ctx);
     }
 
-    /// Stops the turn running.
+    /// Stops the turn running. A turn left waiting by `send` (native's
+    /// one-at-a-time queue) still goes after it, unchanged.
     pub fn cancel(a: *Agent) void {
         if (a.which == .pi) return a.pi_client.commandNoReply("abort", .{});
         if (a.native) |native| return native.cancel();

@@ -6,7 +6,7 @@
 
 <p align="center">A terminal of blocks with a coding agent beside you, drawn on the GPU.</p>
 
-<p align="center">Built on <a href="https://github.com/justrach/nanoui"><strong>nanoui</strong></a>, with <a href="https://fx.sh/">fx(040d5bbbf214e35fdcdfc4e365773bae09a5eb23)</a> compiled in as <strong>Agent</strong>. Claude Code and other external agents connect over ACP; Pi speaks its own RPC mode.</p>
+<p align="center">Built on <a href="https://github.com/justrach/nanoui"><strong>nanoui</strong></a>, with <a href="https://fx.sh/">fx(818b04f247bbd24f375ea1a4e858bdd0b15cadf2)</a> compiled in as <strong>Agent</strong>. Claude Code and other external agents connect over ACP; Pi speaks its own RPC mode.</p>
 
 <p align="center">
   <img alt="macOS · Linux" src="https://img.shields.io/badge/macOS%20·%20Linux-555">
@@ -55,7 +55,7 @@ or [arm64](https://github.com/justrach/nanoterm/releases/latest/download/nanoter
 
 ## Get started
 
-nanoterm builds on its own. It fetches nanoui 0.8.0, pinned by commit in
+nanoterm builds on its own. It fetches nanoui 0.9.2, pinned by commit in
 `build.zig.zon`, and checks out the built-in Agent's fx core as the
 `vendor/fx` submodule:
 
