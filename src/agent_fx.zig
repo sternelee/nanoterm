@@ -27,11 +27,12 @@ pub const specs = [_]Spec{
 };
 
 /// The argument words a command takes, for the slash menu's next word.
+const effort_words = [_][]const u8{ "auto", "minimal", "low", "medium", "high" };
+const permission_words = [_][]const u8{ "ask", "auto", "full-access", "reset" };
+const workspace_words = [_][]const u8{ "list", "add", "remove" };
+const login_words = [_][]const u8{ "codex", "grok", "vercel" };
+
 pub fn words(name: []const u8) ?[]const []const u8 {
-    const effort_words = [_][]const u8{ "auto", "minimal", "low", "medium", "high" };
-    const permission_words = [_][]const u8{ "ask", "auto", "full-access", "reset" };
-    const workspace_words = [_][]const u8{ "list", "add", "remove" };
-    const login_words = [_][]const u8{ "codex", "grok", "vercel" };
     if (std.mem.eql(u8, name, "effort")) return effort_words[0..];
     if (std.mem.eql(u8, name, "permissions")) return permission_words[0..];
     if (std.mem.eql(u8, name, "workspace")) return workspace_words[0..];
@@ -159,7 +160,6 @@ pub const DirPatch = blk: {
 /// the saved path as its observed source — fx only removes what a session
 /// sees — so the entry drops even when no session is running.
 pub fn changeDir(gpa: std.mem.Allocator, workspace_root: []const u8, patch: DirPatch) !void {
-    var identity: [2048]u8 = undefined;
     const observed = switch (patch) {
         .remove => |path| path,
         else => null,
@@ -173,7 +173,6 @@ pub fn changeDir(gpa: std.mem.Allocator, workspace_root: []const u8, patch: DirP
         .observed_sources = if (observed != null) sources[0..] else &.{},
     });
     defer outcome.deinit(gpa);
-    _ = &identity;
 }
 
 /// The observed-source shape fx's directory mutation takes.
@@ -268,6 +267,9 @@ pub fn carry(s: *Session, reply: []const u8) void {
         _ = note(s, "nothing to carry over; the conversation continues.");
         return;
     }
+    // The handoff continues the work, not the conversation: the next
+    // prompt opens a fresh session, as /new does.
+    if (s.agent) |ag| if (ag.native) |native| native.clearSession();
     const prompt = std.fmt.allocPrint(s.gpa, "We are continuing in a fresh session. This is the handoff from the previous conversation:\n\n{s}", .{reply}) catch return;
     defer s.gpa.free(prompt);
     s.askAs("/compact", prompt);
@@ -503,4 +505,33 @@ test "the built-in Agent's command words, and AGENTS.md found root-first" {
     try std.testing.expectEqual(@as(usize, 2), found.len);
     try std.testing.expect(std.mem.endsWith(u8, found[0], "/AGENTS.md"));
     try std.testing.expect(std.mem.endsWith(u8, found[1], "/nested/AGENTS.md"));
+}
+
+test "a /compact handoff opens a fresh session" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-carry";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    const s = try session_mod.Session.create(&shared, home);
+    defer s.destroy();
+    s.which = .agent;
+    const ag = s.ensureAgent() orelse return error.NoAgent;
+    const native = ag.native orelse return error.NoNative;
+    // A conversation ran: the runtime holds its session.
+    native.session_id = try std.heap.c_allocator.dupe(u8, "old");
+    carry(s, "the handoff note");
+    // The handoff continues the work, not the conversation: the next
+    // prompt opens a fresh session, as /new does.
+    try std.testing.expect(native.session_id == null);
 }

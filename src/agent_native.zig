@@ -51,6 +51,9 @@ pub const Runtime = struct {
     model: ?[]u8,
     pending_cwd: ?[]u8 = null,
     pending_model: ?[]u8 = null,
+    /// A clearSession while busy: the next start opens a fresh session.
+    pending_clear: bool = false,
+    /// The conversation so far, as fx names it; null opens a fresh one.
     session_id: ?[]u8 = null,
     /// Borrowed from Agent.mcp, which outlives every worker turn.
     extra_mcp: ?ExtraStdioServer = null,
@@ -133,16 +136,27 @@ pub const Runtime = struct {
         }
     }
 
-    /// Drops the session, so the next prompt opens a fresh conversation;
-    /// call between turns, never while one runs (a done event would race).
+    /// Drops the session, so the next prompt opens a fresh conversation.
+    /// A clear asked while a turn runs (or its worker is still ending)
+    /// waits for the next start, as a pending cwd or model does.
     pub fn clearSession(self: *Runtime) void {
-        if (self.busy()) return;
+        if (self.busy()) {
+            self.pending_clear = true;
+            return;
+        }
         const id = self.session_id orelse return;
         self.session_id = null;
         allocator.free(id);
     }
 
     fn applyPending(self: *Runtime) void {
+        if (self.pending_clear) {
+            self.pending_clear = false;
+            if (self.session_id) |id| {
+                self.session_id = null;
+                allocator.free(id);
+            }
+        }
         if (self.pending_cwd) |cwd| {
             allocator.free(self.cwd);
             self.cwd = cwd;
@@ -338,3 +352,52 @@ pub const Runtime = struct {
         }
     }
 };
+
+test "a session clear asked while a turn runs waits for the next start" {
+    const r = try Runtime.create("/tmp", null, null);
+    defer r.deinit();
+    r.session_id = try std.heap.c_allocator.dupe(u8, "old");
+    // The worker is still ending: the clear cannot take hold yet, but it
+    // must not be lost either.
+    r.running.store(true, .release);
+    r.clearSession();
+    r.running.store(false, .release);
+    r.applyPending();
+    try std.testing.expect(r.session_id == null);
+}
+
+test "queued events land before idle is announced" {
+    const gpa = std.testing.allocator;
+    const r = try Runtime.create("/tmp", null, null);
+    var seen: std.ArrayList([]const u8) = .empty;
+    defer seen.deinit(gpa);
+    const Seen = struct {
+        fn on(context: ?*anyopaque, event: Event) void {
+            const list: *std.ArrayList([]const u8) = @ptrCast(@alignCast(context.?));
+            const kind = switch (event) {
+                .text => "text",
+                .diagnostic => "diagnostic",
+                .tool => "tool",
+                .done => "done",
+                .failed => "failed",
+                .idle => "idle",
+            };
+            list.append(std.testing.allocator, kind) catch {};
+        }
+    };
+    r.setCallback(&seen, Seen.on);
+    // A worker mid-flight whose answer is already queued, then it leaves
+    // busy: everything it said arrives before the next turn may start.
+    r.running.store(true, .release);
+    r.was_busy = true;
+    try r.emit(.{ .text = "" });
+    try r.emit(.{ .done = .{ .session_id = "", .model = "", .interrupted = false } });
+    r.running.store(false, .release);
+    r.retain();
+    Runtime.drainMain(@ptrCast(r));
+    r.deinit();
+    try std.testing.expectEqual(@as(usize, 3), seen.items.len);
+    try std.testing.expectEqualStrings("text", seen.items[0]);
+    try std.testing.expectEqualStrings("done", seen.items[1]);
+    try std.testing.expectEqualStrings("idle", seen.items[2]);
+}
