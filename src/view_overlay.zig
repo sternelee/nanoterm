@@ -8,6 +8,7 @@ const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const palette = @import("palette.zig");
 const assist = @import("assist.zig");
+const agent_settings = @import("agent_settings.zig");
 const agent_mod = @import("agent.zig");
 const Workspace = @import("workspace.zig").Workspace;
 const Session = @import("session.zig").Session;
@@ -98,6 +99,8 @@ fn row(c: *ui.Context, w: *Workspace, i: usize, r: Row) bool {
 
 fn modelsView(c: *ui.Context, w: *Workspace) void {
     const s = w.focused();
+    // The picker lists the providers' models, so fx is asked for them.
+    if (s.shared.agent_store) |store| store.showModels();
     {
         const r = ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(2);
         defer r.end();
@@ -140,13 +143,25 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
                 if (palette.score(model, q) == null) continue;
                 list.append(c.alloc(), .{
                     .value = model,
-                    .section = provider.name,
+                    .section = agent_settings.label(provider.name),
                     .provider = provider.name,
-                    .row = .{ .icon = if (std.mem.eql(u8, model, current)) "checkmark.circle.fill" else "cpu", .title = model, .detail = provider.base_url, .current = std.mem.eql(u8, model, current), .mono = true },
+                    .row = .{ .icon = if (std.mem.eql(u8, model, current)) "checkmark.circle.fill" else "cpu", .title = model, .detail = provider.detail(), .current = std.mem.eql(u8, model, current), .mono = true },
                 }) catch {};
             }
         }
-        ui.text(c, "Choose a configured model, or type a model name and press ↩. Add providers in Settings.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        // One line per provider whose models could not be listed, each named,
+        // so what one provider said is never read as the next one's.
+        var said = false;
+        for (store.providers.items) |provider| {
+            const note = store.modelsNote(provider.name) orelse continue;
+            said = true;
+            ui.text(c, c.print("{s}: {s}", .{ agent_settings.label(provider.name), note.text }), .{ .size = 11.5, .color = if (note.failed) theme.failure else theme.muted, .wrap = true });
+        }
+        if (store.models_thread != null) {
+            ui.text(c, "Reading the providers' models…", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        } else if (!said) {
+            ui.text(c, "Choose a configured model, or type a model name and press ↩. Add providers in Settings.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
     };
     const items = list.items;
     w.pick = @min(w.pick, items.len -| 1);
@@ -171,7 +186,7 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
     // Selecting a provider reloads the store and frees the row's strings.
     const owned_value = c.alloc().dupe(u8, value) catch return;
     const owned_provider = if (chosen_provider) |provider| c.alloc().dupe(u8, provider) catch return else null;
-    if (owned_provider) |provider| if (s.shared.agent_store) |store| store.selectProviderByName(provider);
+    if (owned_provider) |provider| if (s.shared.agent_store) |store| store.chooseProviderModel(provider, owned_value);
     // The name outlives the frame: it is copied before the overlay goes.
     assist.chooseModel(s, owned_value);
     w.closeOverlay();

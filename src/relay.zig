@@ -827,7 +827,7 @@ pub const Hub = struct {
                 h.refuse(c, "model needs a name");
                 return true;
             }
-            if (m.provider.len > 0 and s.which == .agent) if (s.shared.agent_store) |store| store.selectProviderByName(m.provider);
+            if (m.provider.len > 0 and s.which == .agent) if (s.shared.agent_store) |store| store.chooseProviderModel(m.provider, m.text);
             assist.chooseModel(s, m.text);
             h.pump(s);
             h.ack(c, "model");
@@ -835,8 +835,10 @@ pub const Hub = struct {
         }
         if (std.mem.eql(u8, m.op, "models")) {
             // Opens the agent so it can say what it offers; the session
-            // event goes out again once its options arrive.
+            // event goes out again once its options arrive. The built-in
+            // Agent's providers are fx's, so fx is asked for their models.
             _ = s.ensureAgent();
+            if (s.which == .agent) if (s.shared.agent_store) |store| store.showModels();
             h.pump(s);
             h.ack(c, "models");
             return true;

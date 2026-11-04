@@ -32,7 +32,7 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
     // height is remembered and the other pages are held to it.
     const body_id = c.peekId(null);
     var body = ui.div(c).row().wFull().itemsStretch().maxH(c.size.h - 170);
-    const on_agents = w.settings_page == @intFromEnum(Page.agents);
+    const on_agents = w.settings_page == @backingInt(Page.agents);
     if (!on_agents and w.settings_height > 0) body = body.h(@min(w.settings_height, c.size.h - 170));
     defer body.end();
     if (on_agents) {
@@ -53,15 +53,15 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
         const page = ui.div(c).column().grow().scrollY().maxH(c.size.h - 210).px(20).py(16).gap(18);
         defer page.end();
         switch (w.settings_page) {
-            @intFromEnum(Page.agents) => {
+            @backingInt(Page.agents) => {
                 agentList(c, w);
                 account(c, w);
             },
-            @intFromEnum(Page.appearance) => appearance(c, w),
-            @intFromEnum(Page.motion) => motionPage(c, w),
-            @intFromEnum(Page.privacy) => privacy(c, w),
-            @intFromEnum(Page.updates) => updates(c, w),
-            @intFromEnum(Page.relay) => relayPage(c, w),
+            @backingInt(Page.appearance) => appearance(c, w),
+            @backingInt(Page.motion) => motionPage(c, w),
+            @backingInt(Page.privacy) => privacy(c, w),
+            @backingInt(Page.updates) => updates(c, w),
+            @backingInt(Page.relay) => relayPage(c, w),
             else => {},
         }
     }
@@ -69,10 +69,10 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
 
 /// A category on Settings' sidebar, lit while its page is the one shown.
 fn sideItem(c: *ui.Context, w: *Workspace, page: Page, icon: []const u8, label: []const u8) void {
-    const sel = w.settings_page == @intFromEnum(page);
+    const sel = w.settings_page == @backingInt(page);
     const d = if (sel) ui.div(c).row().wFull().gap(8).itemsCenter().px(9).py(6).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(8).itemsCenter().px(9).py(6).rounded(8);
     defer d.end();
-    if (d.clicked()) w.settings_page = @intFromEnum(page);
+    if (d.clicked()) w.settings_page = @backingInt(page);
     ui.icon(c, icon, .{ .size = 12, .color = if (sel) theme.accent else theme.muted });
     ui.text(c, label, .{ .size = 12.5, .weight = if (sel) .semibold else .regular, .color = if (sel) theme.text else theme.muted });
 }
@@ -101,40 +101,55 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
             const b = box(c);
             defer b.end();
             ui.text(c, "Providers", .{ .size = 14, .weight = .semibold });
-            ui.text(c, "Custom OpenAI-compatible providers, with their model and optional bearer token variable.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            ui.text(c, "fx's own providers, and custom OpenAI-compatible ones with their model and optional bearer token variable.", .{ .size = 12, .color = theme.muted, .wrap = true });
             for (store.providers.items) |*provider| {
+                const name = @import("agent_settings.zig").label(provider.name);
                 const open = kit.collapsible(
                     c,
                     c.print("provider-{s}", .{provider.name}),
-                    if (provider.selected) c.print("{s} · selected", .{provider.name}) else provider.name,
+                    if (provider.selected) c.print("{s} · selected", .{name}) else name,
                     &provider.open,
                 ) orelse continue;
                 defer open.end();
                 ui.text(c, if (provider.models.items.len > 1)
-                    c.print("{s} · {s} +{d}", .{ provider.base_url, provider.models.items[0], provider.models.items.len - 1 })
+                    c.print("{s} · {s} +{d}", .{ provider.detail(), provider.models.items[0], provider.models.items.len - 1 })
                 else
-                    c.print("{s} · {s}", .{ provider.base_url, provider.model }), .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                    c.print("{s} · {s}", .{ provider.detail(), provider.model }), .{ .size = 11.5, .color = theme.muted, .wrap = true });
                 if (provider.auth_env.len > 0) ui.text(c, c.print("Token variable: {s}", .{provider.auth_env}), .{ .size = 11, .color = theme.faint });
-                const actions = ui.div(c).row().wFull().gap(8);
-                defer actions.end();
-                if (!provider.selected and ui.button(c, "Select", .{ .size = 12 }).clicked) {
-                    store.selectProvider(provider.*);
-                    syncAgentModel(w);
-                    // selectProvider reloads the list this loop borrows from.
-                    break;
+                const listing = store.models_thread != null and std.mem.eql(u8, store.models_query, provider.name);
+                {
+                    const actions = ui.div(c).row().wFull().gap(8);
+                    defer actions.end();
+                    if (!provider.selected and ui.button(c, "Select", .{ .size = 12 }).clicked) {
+                        store.selectProvider(provider.*);
+                        syncAgentModel(w);
+                        // selectProvider reloads the list this loop borrows from.
+                        break;
+                    }
+                    const fetch_label = if (listing)
+                        "Listing…"
+                    else if (provider.builtin)
+                        "List models"
+                    else if (store.models_call.running and store.models_for != null and std.mem.eql(u8, store.models_for.?, provider.name))
+                        "Fetching…"
+                    else
+                        "Fetch models";
+                    if (ui.button(c, fetch_label, .{ .variant = .ghost, .size = 12 }).clicked) {
+                        store.fetchModels(provider.*, if (provider.auth_env.len > 0) w.shared.env.get(provider.auth_env) else null);
+                    }
+                    // fx's own providers cannot be removed: fx always has them.
+                    if (!provider.builtin) if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                        const owned = c.gpa.dupe(u8, provider.name) catch break;
+                        defer c.gpa.free(owned);
+                        store.removeProvider(owned);
+                        syncAgentModel(w);
+                        break;
+                    };
                 }
-                if (ui.button(c, if (store.models_call.running and store.models_for != null and std.mem.eql(u8, store.models_for.?, provider.name)) "Fetching…" else "Fetch models", .{ .variant = .ghost, .size = 12 }).clicked) {
-                    store.fetchModels(provider.*, if (provider.auth_env.len > 0) w.shared.env.get(provider.auth_env) else null);
-                }
-                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
-                    const name = c.gpa.dupe(u8, provider.name) catch break;
-                    defer c.gpa.free(name);
-                    store.removeProvider(name);
-                    syncAgentModel(w);
-                    break;
-                }
+                // Why this provider's models could not be listed, if they
+                // could not: said here, under the provider it is about.
+                if (store.modelsNote(provider.name)) |said| ui.text(c, said.text, .{ .size = 11.5, .color = if (said.failed) theme.failure else theme.muted, .wrap = true });
             }
-            if (store.providers.items.len == 0) ui.text(c, "No custom providers yet.", .{ .size = 11.5, .color = theme.faint });
             if (kit.collapsible(c, "provider-add", "Add provider", &store.provider_form_open)) |open| {
                 defer open.end();
                 _ = ui.textField(c, &store.provider_name, .{ .placeholder = "Provider id (for example local)", .width = .fill });
@@ -153,6 +168,8 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
             const focused = w.focused();
             const cwd = focused.cwd();
             store.ensureRuntime(cwd);
+            // The panel shows the providers' models, so fx is asked for them.
+            store.showModels();
             // Sign-in state, as fx sees it, once each time the panel opens.
             if (!store.signed_checked and !store.checking) {
                 store.refreshSignIn(w.shared.env.get("PATH") orelse "/usr/bin:/bin");
@@ -629,9 +646,9 @@ fn relayPage(c: *ui.Context, w: *Workspace) void {
         ui.text(c, "A phone reads this machine's tabs through the relay, and runs in them too.", .{ .size = 12, .color = theme.muted, .wrap = true });
 
         const order = [_][]const u8{ "Off", "LAN", "Tailscale" };
-        var picked: usize = @intFromEnum(p.relay);
+        var picked: usize = @backingInt(p.relay);
         if (ui.segmented(c, &order, &picked)) {
-            p.relay = @as(settings.Relay, @enumFromInt(picked));
+            p.relay = @as(settings.Relay, @fromBackingInt(@intCast(picked)));
             w.shared.setRelay(p.relay, p.relay_port) catch |err| {
                 ui.text(c, c.print("The relay did not start: {s}", .{@errorName(err)}), .{ .size = 11, .color = theme.failure, .wrap = true });
             };
@@ -642,9 +659,9 @@ fn relayPage(c: *ui.Context, w: *Workspace) void {
         ui.text(c, c.print("Port   {d}", .{port}), .{ .size = 12.5 });
 
         const addr = if (h) |hub|
-            if (p.relay == .lan) hub.lan
-            else hub.ts
-        else "";
+            if (p.relay == .lan) hub.lan else hub.ts
+        else
+            "";
         if (addr.len > 0) {
             const line = c.print("{s}:{d}", .{ addr, port });
             ui.text(c, c.print("Open     {s}", .{line}), .{ .size = 12.5, .weight = .semibold });

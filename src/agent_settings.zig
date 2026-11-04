@@ -8,6 +8,34 @@ const web = @import("web.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// fx's own providers. They have no entry in the profile's "providers" map:
+/// fx keeps their identity in its own enum and each one's preferred model in
+/// the top-level "models" map, and lists what each offers through its own
+/// catalog. The names are the ids fx parses.
+pub const Builtin = struct { name: []const u8, label: []const u8, detail: []const u8 };
+
+pub const builtins = [_]Builtin{
+    .{ .name = "gateway", .label = "AI Gateway", .detail = "Vercel account or AI Gateway billing" },
+    .{ .name = "codex", .label = "Codex", .detail = "ChatGPT subscription" },
+    .{ .name = "grok", .label = "Grok", .detail = "Grok subscription" },
+};
+
+/// The built-in provider `name` names, or null when it is a configured one.
+pub fn builtin(name: []const u8) ?Builtin {
+    for (builtins) |entry| if (std.mem.eql(u8, entry.name, name)) return entry;
+    return null;
+}
+
+/// What the panel and the picker call a provider: fx's own name for one of
+/// its providers, the profile's id for a configured one.
+pub fn label(name: []const u8) []const u8 {
+    return if (builtin(name)) |entry| entry.label else name;
+}
+
+/// Why a provider's models could not be listed, and whether that is a failure
+/// or a state to show plainly, such as not being signed in.
+pub const ModelsNote = struct { text: []u8, failed: bool };
+
 /// Notified when something the panel shows changed off its own frame.
 pub const Changed = struct {
     ctx: *anyopaque,
@@ -21,11 +49,20 @@ pub const Provider = struct {
     auth_env: []u8,
     selected: bool,
     open: bool = false,
+    /// One of fx's own providers (gateway, codex, grok): fx lists its models
+    /// itself, and the profile holds only its preferred one.
+    builtin: bool = false,
     /// Every model id the provider offers (its model_metadata keys, or the
     /// single preferred one when the definition carries no list).
     models: std.ArrayList([]u8) = .empty,
-    /// Its endpoint was asked for the list once this run.
+    /// Its models were asked for once this run.
     models_tried: bool = false,
+
+    /// What the panel and the picker say about where the provider lives: a
+    /// configured provider's endpoint, or fx's own words for a built-in one.
+    pub fn detail(self: Provider) []const u8 {
+        return if (builtin(self.name)) |entry| entry.detail else self.base_url;
+    }
 
     fn deinit(self: *Provider, gpa: Allocator) void {
         gpa.free(self.name);
@@ -136,6 +173,23 @@ pub const Store = struct {
     mcp_tools: std.ArrayList([]u8) = .empty,
     mcp_tools_note: []u8 = &.{},
     mcp_tools_failed: bool = false,
+    /// fx's own model list for one built-in provider, asked for off the UI
+    /// thread (fx resolves that provider's credentials and reads its catalog).
+    /// Nothing is asked until something shows models: see `showModels`.
+    models_wanted: bool = false,
+    models_thread: ?std.Thread = null,
+    models_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    models_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    models_query: []u8 = &.{},
+    models_query_ids: std.ArrayList([]u8) = .empty,
+    models_query_note: []u8 = &.{},
+    /// That note is a failure, as opposed to a state such as not signed in.
+    models_query_failed: bool = false,
+    /// Why a provider's models could not be listed, by provider name: fx's
+    /// words for its own providers, the endpoint's answer for a configured
+    /// one. Kept by name, not on the row, so a reload that rebuilds the rows
+    /// keeps what was learned about them.
+    models_notes: std.StringHashMapUnmanaged(ModelsNote) = .empty,
 
     pub fn init(gpa: Allocator, io: std.Io, home: []const u8, env: ?*const std.process.Environ.Map) !Store {
         engine.shared_io.setIo(io);
@@ -170,6 +224,8 @@ pub const Store = struct {
     pub fn deinit(self: *Store) void {
         self.mcp_query_cancel.store(true, .release);
         if (self.mcp_query_thread) |thread| thread.join();
+        self.models_cancel.store(true, .release);
+        if (self.models_thread) |thread| thread.join();
         if (self.checking) self.check_process.close();
         if (self.keychain_checking) self.keychain_process.close();
         self.checking = false;
@@ -184,6 +240,10 @@ pub const Store = struct {
         self.clearMcpTools();
         self.mcp_query_names.deinit(self.gpa);
         self.mcp_tools.deinit(self.gpa);
+        self.clearModelsQuery();
+        self.models_query_ids.deinit(self.gpa);
+        self.clearModelsNotes();
+        self.models_notes.deinit(self.gpa);
         self.clearLists();
         self.providers.deinit(self.gpa);
         self.mcp_servers.deinit(self.gpa);
@@ -306,6 +366,131 @@ pub const Store = struct {
             self.clearMcpQuery();
         }
         self.mcp_query_done.store(false, .release);
+    }
+
+    // What a listing said about each provider, by name: a provider whose
+    // models cannot be read (a subscription that is not signed in, an
+    // endpoint that is down) is a fact about that provider, so the panel and
+    // the picker show it there instead of as one line for the whole list.
+
+    /// Why `name`'s models could not be listed, when they could not.
+    pub fn modelsNote(self: *const Store, name: []const u8) ?ModelsNote {
+        return self.models_notes.get(name);
+    }
+
+    /// Records what a listing said about `name`, and forgets it when `text`
+    /// is empty: it listed its models, or nothing has been asked of it yet.
+    fn setModelsNote(self: *Store, name: []const u8, text: []const u8, failed: bool) void {
+        self.clearModelsNote(name);
+        if (text.len == 0) return;
+        const key = self.gpa.dupe(u8, name) catch return;
+        const said = self.gpa.dupe(u8, text) catch {
+            self.gpa.free(key);
+            return;
+        };
+        self.models_notes.put(self.gpa, key, .{ .text = said, .failed = failed }) catch {
+            self.gpa.free(key);
+            self.gpa.free(said);
+        };
+    }
+
+    fn clearModelsNote(self: *Store, name: []const u8) void {
+        const entry = self.models_notes.fetchRemove(name) orelse return;
+        self.gpa.free(entry.key);
+        self.gpa.free(entry.value.text);
+    }
+
+    fn clearModelsNotes(self: *Store) void {
+        var entries = self.models_notes.iterator();
+        while (entries.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+            self.gpa.free(entry.value_ptr.text);
+        }
+        self.models_notes.clearRetainingCapacity();
+    }
+
+    // fx's own model lists. The profile's "providers" map carries a custom
+    // provider's models as its definition's metadata, but a built-in
+    // provider's are only ever fx's answer, so they are read from fx itself.
+
+    fn clearModelsQuery(self: *Store) void {
+        if (self.models_query.len > 0) self.gpa.free(self.models_query);
+        self.models_query = &.{};
+        for (self.models_query_ids.items) |id| self.gpa.free(id);
+        self.models_query_ids.clearRetainingCapacity();
+        if (self.models_query_note.len > 0) self.gpa.free(self.models_query_note);
+        self.models_query_note = &.{};
+        self.models_query_failed = false;
+    }
+
+    /// Asks fx what one of its own providers offers, off the UI thread: fx
+    /// resolves that provider's credential and reads its catalog there. The
+    /// UI calls `finishModelsQuery` when `modelsQueryDone` says it landed.
+    fn startModelsQuery(self: *Store, provider: Provider) void {
+        if (self.models_thread != null) return;
+        self.clearModelsQuery();
+        self.models_query = self.gpa.dupe(u8, provider.name) catch {
+            self.fail(error.OutOfMemory);
+            return;
+        };
+        self.models_cancel.store(false, .release);
+        self.models_done.store(false, .release);
+        const thread = std.Thread.spawn(.{}, modelsQueryWorker, .{self}) catch |err| {
+            self.gpa.free(self.models_query);
+            self.models_query = &.{};
+            self.fail(err);
+            return;
+        };
+        self.models_thread = thread;
+    }
+
+    fn modelsQueryWorker(self: *Store) void {
+        const id = engine.model_provider.parse(self.models_query) orelse {
+            self.models_query_note = self.gpa.dupe(u8, "unknown provider") catch &.{};
+            self.models_query_failed = true;
+            self.models_done.store(true, .release);
+            return;
+        };
+        const list = engine.listProviderModels(self.gpa, id, &self.models_cancel) catch |err| {
+            self.models_query_note = self.gpa.dupe(u8, @errorName(err)) catch &.{};
+            self.models_query_failed = true;
+            self.models_done.store(true, .release);
+            return;
+        };
+        // The list is the worker's now: it moves into the store below.
+        // A provider that is not signed in is a state to show, not a failure.
+        self.models_query_failed = list.note != null and !list.needs_sign_in;
+        self.models_query_ids = std.ArrayList([]u8).fromOwnedSlice(list.ids);
+        self.models_query_note = list.note orelse &.{};
+        self.models_done.store(true, .release);
+    }
+
+    pub fn modelsQueryDone(self: *Store) bool {
+        return self.models_done.load(.acquire);
+    }
+
+    /// Joins the finished worker on the UI thread and puts its list on the
+    /// provider it was asked for, then asks the next one.
+    pub fn finishModelsQuery(self: *Store) void {
+        if (!self.modelsQueryDone()) return;
+        if (self.models_thread) |thread| {
+            thread.join();
+            self.models_thread = null;
+        }
+        const name = self.models_query;
+        var found = false;
+        for (self.providers.items) |*provider| {
+            if (!std.mem.eql(u8, provider.name, name)) continue;
+            for (provider.models.items) |model| self.gpa.free(model);
+            provider.models.clearRetainingCapacity();
+            std.mem.swap(std.ArrayList([]u8), &provider.models, &self.models_query_ids);
+            found = true;
+            break;
+        }
+        if (found) self.setModelsNote(name, self.models_query_note, self.models_query_failed);
+        self.clearModelsQuery();
+        self.models_done.store(false, .release);
+        self.fetchNextModels();
     }
 
     fn clearLists(self: *Store) void {
@@ -457,7 +642,7 @@ pub const Store = struct {
         var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const env = [_][]const u8{ std.fmt.allocPrint(arena, "HOME={s}", .{self.home}) catch return };
+        const env = [_][]const u8{std.fmt.allocPrint(arena, "HOME={s}", .{self.home}) catch return};
         proc.spawnPipes(
             &self.keychain_process,
             proc.cStrings(arena, &.{ "/usr/bin/security", "find-generic-password", "-s", "FX_AI_GATEWAY_API_KEY" }) catch return,
@@ -519,17 +704,33 @@ pub const Store = struct {
         self.fetchNextModels();
     }
 
-    /// Asks each provider that has an endpoint and no list of its own for
-    /// one, one request at a time.
+    /// Asks each provider without a list of its own for one, one at a time:
+    /// fx itself for its own providers, the provider's endpoint for a
+    /// configured one. Only once something is showing models.
     fn fetchNextModels(self: *Store) void {
-        if (self.models_call.running) return;
+        if (!self.models_wanted) return;
+        if (self.models_call.running or self.models_thread != null) return;
         for (self.providers.items) |*provider| {
             // Only a provider without a list of its own is asked; a saved
             // list (fx's, with its context windows) stays as it is.
-            if (provider.models_tried or provider.base_url.len == 0 or provider.models.items.len > 0) continue;
+            if (provider.models_tried or provider.models.items.len > 0) continue;
+            if (!provider.builtin and provider.base_url.len == 0) continue;
             provider.models_tried = true;
+            // A note is about the attempt that produced it, not the last one.
+            self.clearModelsNote(provider.name);
             return self.fetchModels(provider.*, self.providerToken(provider.*));
         }
+    }
+
+    /// What the picker, the panel and the phone call each frame: fx is asked
+    /// for its providers' model lists once, and again after a sign-in change
+    /// reset them (`Session.checkSignIn`). Tests never ask: this reaches the
+    /// network and the profile's credentials, and only a real window shows
+    /// models.
+    pub fn showModels(self: *Store) void {
+        if (@import("builtin").is_test) return;
+        self.models_wanted = true;
+        self.fetchNextModels();
     }
 
     /// A provider's token, from the variable its definition names.
@@ -558,10 +759,13 @@ pub const Store = struct {
         return false;
     }
 
-    /// Fetches a provider's model list from its own endpoint
-    /// (`GET <base_url>/models`, the OpenAI-compatible shape Ollama and the
-    /// rest speak), and saves it as the provider's models.
+    /// Fetches a provider's model list. fx's own providers (gateway, codex,
+    /// grok) are listed by fx itself, off the UI thread; a configured
+    /// provider is asked at its own endpoint (`GET <base_url>/models`, the
+    /// OpenAI-compatible shape Ollama and the rest speak), and its answer is
+    /// saved as the provider's models.
     pub fn fetchModels(self: *Store, provider: Provider, bearer: ?[]const u8) void {
+        if (provider.builtin) return self.startModelsQuery(provider);
         if (self.models_call.running) return;
         var url: [1024]u8 = undefined;
         const base = std.mem.trimEnd(u8, provider.base_url, "/");
@@ -584,25 +788,35 @@ pub const Store = struct {
         }
         defer if (self.changed) |c| c.func(c.ctx);
         if (code != 0) {
+            self.setModelsNote(name, "Could not reach the provider's /models", true);
             self.note("Could not reach the provider's /models");
-            self.fetchNextModels();
-            return;
+            return self.fetchNextModels();
         }
-        var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, body, .{}) catch return;
+        var parsed = std.json.parseFromSlice(std.json.Value, self.gpa, body, .{}) catch {
+            self.setModelsNote(name, "Its answer could not be read", true);
+            return self.fetchNextModels();
+        };
         defer parsed.deinit();
         const root = parsed.value;
         const list = if (root == .object) (root.object.get("data") orelse root.object.get("models") orelse root) else root;
-        if (list != .array) return;
+        if (list != .array) {
+            self.setModelsNote(name, "Its answer listed no models", true);
+            return self.fetchNextModels();
+        }
         var ids: std.ArrayList([]const u8) = .empty;
-        defer ids.deinit(self.gpa);
+        defer @constCast(&ids).deinit(self.gpa);
         for (list.array.items) |entry| {
             if (entry != .object) continue;
             const id = if (entry.object.get("id")) |v| (if (v == .string) v.string else null) else if (entry.object.get("name")) |v| (if (v == .string) v.string else null) else null;
             if (id == null or id.?.len == 0 or ids.items.len >= 256) continue;
             ids.append(self.gpa, id.?) catch {};
         }
-        if (ids.items.len == 0) return;
+        if (ids.items.len == 0) {
+            self.setModelsNote(name, "Its answer listed no models", true);
+            return self.fetchNextModels();
+        }
         self.writeProviderModels(name, ids.items) catch |err| return self.fail(err);
+        self.setModelsNote(name, "", false);
         self.reload();
         var line: [80]u8 = undefined;
         const said = std.fmt.bufPrint(&line, "{d} models from {s}", .{ ids.items.len, name }) catch return;
@@ -619,7 +833,7 @@ pub const Store = struct {
 
     fn loadProviders(self: *Store) !void {
         const data = std.Io.Dir.cwd().readFileAlloc(self.io, self.settings_path, self.gpa, .limited(1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => return,
+            error.FileNotFound => try self.gpa.dupe(u8, "{}"),
             else => return err,
         };
         defer self.gpa.free(data);
@@ -639,6 +853,22 @@ pub const Store = struct {
         if (root.get("models")) |value| if (value == .object) {
             models = value.object;
         };
+        // fx's own providers first. They are not in the "providers" map (fx
+        // knows them by its own ids), and only their preferred model is in
+        // the profile; the list of what they offer comes from fx.
+        for (builtins) |entry| {
+            const model = if (models) |map| if (map.get(entry.name)) |value| if (value == .string) value.string else "" else "" else "";
+            var provider = Provider{
+                .name = try self.gpa.dupe(u8, entry.name),
+                .base_url = try self.gpa.dupe(u8, ""),
+                .model = try self.gpa.dupe(u8, model),
+                .auth_env = try self.gpa.dupe(u8, ""),
+                .selected = std.mem.eql(u8, self.selected_provider, entry.name),
+                .builtin = true,
+            };
+            errdefer provider.deinit(self.gpa);
+            try self.providers.append(self.gpa, provider);
+        }
         const providers = root.get("providers") orelse return;
         if (providers != .object) return error.InvalidSettingsShape;
         var iterator = providers.object.iterator();
@@ -822,11 +1052,28 @@ pub const Store = struct {
         try std.Io.Dir.renameAbsolute(tmp_path, self.settings_path, self.io);
     }
 
+    /// Chooses `provider` for the built-in Agent, with the model it prefers:
+    /// the one the profile saved, or the first it offers when nothing is
+    /// saved yet (fx has no default for Codex or Grok).
     pub fn selectProvider(self: *Store, provider: Provider) void {
-        const id = engine.model_provider.parse(provider.name) orelse return self.fail(error.InvalidProviderId);
+        const model = if (provider.model.len > 0)
+            provider.model
+        else if (provider.models.items.len > 0)
+            provider.models.items[0]
+        else
+            "";
+        self.chooseProviderModel(provider.name, model);
+    }
+
+    /// Chooses `name` as the provider and `model` as the model it prefers, as
+    /// fx keeps them: fx's own providers have no "providers" entry, only the
+    /// top-level "provider" and "models.<name>".
+    pub fn chooseProviderModel(self: *Store, name: []const u8, model: []const u8) void {
+        const id = engine.model_provider.parse(name) orelse return self.fail(error.InvalidProviderId);
+        if (self.findProvider(name) == null) return self.fail(error.ProviderNotFound);
         var outcome = engine.provider_settings.setUserPreferencesAtHome(self.gpa, self.home, .{
             .provider = id,
-            .model_preference = if (provider.model.len > 0) .{ .provider = id, .model = provider.model } else null,
+            .model_preference = if (model.len > 0) .{ .provider = id, .model = model } else null,
         }) catch |err| return self.fail(err);
         defer outcome.deinit(self.gpa);
         self.note("Provider selected");
@@ -834,22 +1081,20 @@ pub const Store = struct {
     }
 
     pub fn selectProviderByName(self: *Store, name: []const u8) void {
-        if (std.mem.eql(u8, name, "gateway")) {
-            var outcome = engine.provider_settings.setUserPreferencesAtHome(self.gpa, self.home, .{
-                .provider = .gateway,
-            }) catch |err| return self.fail(err);
-            defer outcome.deinit(self.gpa);
-            self.note("Default provider selected");
-            self.reload();
-            return;
+        const provider = self.findProvider(name) orelse return self.fail(error.ProviderNotFound);
+        self.selectProvider(provider.*);
+    }
+
+    fn findProvider(self: *const Store, name: []const u8) ?*const Provider {
+        for (self.providers.items) |*provider| {
+            if (std.mem.eql(u8, provider.name, name)) return provider;
         }
-        for (self.providers.items) |provider| {
-            if (std.mem.eql(u8, provider.name, name)) return self.selectProvider(provider);
-        }
-        self.fail(error.ProviderNotFound);
+        return null;
     }
 
     pub fn removeProvider(self: *Store, name: []const u8) void {
+        // fx's own providers are always there: there is nothing to remove.
+        if (builtin(name) != null) return self.fail(error.ReservedProviderId);
         var outcome = engine.provider_settings.setUserPreferencesAtHome(self.gpa, self.home, .{
             .provider_definition = .{ .remove = name },
         }) catch |err| return self.fail(err);
@@ -955,6 +1200,84 @@ pub const Store = struct {
     }
 };
 
+test "fx's own providers are offered, and choosing one writes fx's preference" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-builtin-providers";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/.fx/settings.json", .data =
+        \\{"provider":"magpie","models":{"codex":"gpt-6.1-sol","magpie":"auto/glm-5.3"},"providers":{"magpie":{"protocol":"openai-chat-completions","base_url":"http://127.0.0.1:3425/v1","auth":{"type":"none"}}}}
+    });
+
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    // fx's own three come first, with the model the profile saved for them.
+    try std.testing.expectEqual(@as(usize, 4), store.providers.items.len);
+    try std.testing.expectEqualStrings("gateway", store.providers.items[0].name);
+    try std.testing.expectEqualStrings("codex", store.providers.items[1].name);
+    try std.testing.expectEqualStrings("grok", store.providers.items[2].name);
+    try std.testing.expectEqualStrings("magpie", store.providers.items[3].name);
+    try std.testing.expect(store.providers.items[0].builtin);
+    try std.testing.expect(store.providers.items[1].builtin);
+    try std.testing.expect(store.providers.items[2].builtin);
+    try std.testing.expect(!store.providers.items[3].builtin);
+    // Only the ones the profile named a model for have one.
+    try std.testing.expectEqualStrings("", store.providers.items[0].model);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", store.providers.items[1].model);
+    // A configured provider shows its endpoint; a built-in one says what fx
+    // says about it.
+    try std.testing.expectEqualStrings("http://127.0.0.1:3425/v1", store.providers.items[3].detail());
+    try std.testing.expectEqualStrings("ChatGPT subscription", store.providers.items[1].detail());
+    try std.testing.expectEqualStrings("magpie", store.selected_provider);
+
+    // Choosing Codex writes fx's own preference: there is no "providers"
+    // entry to write, only the top-level provider and models.codex.
+    store.chooseProviderModel("codex", "gpt-6.1-sol");
+    try std.testing.expect(!store.failed);
+    try std.testing.expectEqualStrings("codex", store.selected_provider);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", store.currentModel());
+    try std.testing.expect(store.providers.items[1].selected);
+    // A model chosen for it replaces the saved one, as the picker's row does.
+    store.chooseProviderModel("codex", "gpt-5.6-luna");
+    try std.testing.expect(!store.failed);
+    try std.testing.expectEqualStrings("gpt-5.6-luna", store.currentModel());
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(64 * 1024));
+        defer gpa.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"codex\":\"gpt-5.6-luna\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "magpie") != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"provider\":\"codex\"") != null);
+    }
+    // fx's own providers cannot be removed, and an unknown name is refused.
+    store.removeProvider("codex");
+    try std.testing.expect(store.failed);
+    try std.testing.expectEqual(@as(usize, 4), store.providers.items.len);
+    store.selectProviderByName("nowhere");
+    try std.testing.expect(store.failed);
+    // Nothing asks fx for a model list until something shows models.
+    try std.testing.expect(store.models_thread == null);
+    try std.testing.expect(!store.models_wanted);
+}
+
+test "fx's own providers are offered even with no profile settings" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-builtin-providers-empty";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    try std.testing.expectEqual(@as(usize, 3), store.providers.items.len);
+    try std.testing.expectEqualStrings("gateway", store.providers.items[0].name);
+    try std.testing.expectEqualStrings("gateway", store.selected_provider);
+    try std.testing.expectEqualStrings("", store.currentModel());
+    try std.testing.expect(store.providers.items[0].selected);
+}
+
 test "sign-in state is read from fx status, under fx's own names" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1012,17 +1335,18 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     store.saveProvider();
     try std.testing.expect(!store.failed);
     try std.testing.expectEqualStrings("local", store.selected_provider);
-    try std.testing.expectEqual(@as(usize, 1), store.providers.items.len);
-    try std.testing.expectEqualStrings("qwen3-coder", store.providers.items[0].model);
+    // fx's own three, then the one just saved.
+    try std.testing.expectEqual(@as(usize, 4), store.providers.items.len);
+    try std.testing.expectEqualStrings("qwen3-coder", store.findProvider("local").?.model);
     // Saving the same id again updates it, rather than adding a duplicate.
     store.provider_name.set("local");
     store.provider_url.set("http://127.0.0.1:11435/v1/");
     store.provider_model.set("qwen3-coder-plus");
     store.saveProvider();
     try std.testing.expect(!store.failed);
-    try std.testing.expectEqual(@as(usize, 1), store.providers.items.len);
-    try std.testing.expectEqualStrings("http://127.0.0.1:11435/v1/", store.providers.items[0].base_url);
-    try std.testing.expectEqualStrings("qwen3-coder-plus", store.providers.items[0].model);
+    try std.testing.expectEqual(@as(usize, 4), store.providers.items.len);
+    try std.testing.expectEqualStrings("http://127.0.0.1:11435/v1/", store.findProvider("local").?.base_url);
+    try std.testing.expectEqualStrings("qwen3-coder-plus", store.findProvider("local").?.model);
     store.selectProviderByName("gateway");
     try std.testing.expectEqualStrings("", store.currentModel());
     store.selectProviderByName("local");
@@ -1034,9 +1358,9 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     store.provider_model.set("qwen3-coder, qwen3-max, llama-x");
     store.saveProvider();
     try std.testing.expect(!store.failed);
-    try std.testing.expectEqual(@as(usize, 3), store.providers.items[0].models.items.len);
-    try std.testing.expectEqualStrings("qwen3-coder", store.providers.items[0].model);
-    try std.testing.expectEqualStrings("qwen3-max", store.providers.items[0].models.items[1]);
+    try std.testing.expectEqual(@as(usize, 3), store.findProvider("local").?.models.items.len);
+    try std.testing.expectEqualStrings("qwen3-coder", store.findProvider("local").?.model);
+    try std.testing.expectEqualStrings("qwen3-max", store.findProvider("local").?.models.items[1]);
     {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(64 * 1024));
         defer gpa.free(bytes);
@@ -1049,7 +1373,7 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     store.provider_model.set(" qwen3-coder-plus ,");
     store.saveProvider();
     try std.testing.expect(!store.failed);
-    try std.testing.expectEqual(@as(usize, 1), store.providers.items[0].models.items.len);
+    try std.testing.expectEqual(@as(usize, 1), store.findProvider("local").?.models.items.len);
     try std.testing.expectEqualStrings("qwen3-coder-plus", store.currentModel());
 
     store.mcp_name.set("local-tools");
@@ -1086,7 +1410,9 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     try std.testing.expect(!store.failed);
     try std.testing.expectEqual(@as(usize, 0), store.mcp_servers.items.len);
     try std.testing.expectEqual(@as(usize, 0), store.skills.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.providers.items.len);
+    // fx's own three are still there; the configured one is gone.
+    try std.testing.expectEqual(@as(usize, 3), store.providers.items.len);
+    try std.testing.expect(store.findProvider("local") == null);
     try std.testing.expectEqualStrings("gateway", store.selected_provider);
     try std.testing.expectEqualStrings("", store.currentModel());
 
@@ -1145,4 +1471,60 @@ test "MCP tool listing starts a server and returns its tools" {
     try std.testing.expectEqual(@as(usize, 2), store.mcp_tools.items.len);
     try std.testing.expectEqualStrings("echo", store.mcp_tools.items[0]);
     try std.testing.expectEqualStrings("stamp", store.mcp_tools.items[1]);
+}
+
+test "a provider that cannot be listed says so, and only about itself" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-provider-notes";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/.fx/settings.json", .data =
+        \\{"provider":"magpie","providers":{"magpie":{"protocol":"openai-chat-completions","base_url":"http://127.0.0.1:3425/v1","auth":{"type":"none"}}}}
+    });
+
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    // Nothing has been asked yet: no provider has anything to say.
+    for (store.providers.items) |provider| try std.testing.expect(store.modelsNote(provider.name) == null);
+
+    // fx answers for the provider it was asked about, and what it says lands
+    // on that provider alone: the one below it is not blamed for it.
+    store.models_query = try gpa.dupe(u8, "codex");
+    store.models_query_note = try gpa.dupe(u8, "not signed in");
+    store.models_query_failed = false;
+    store.models_done.store(true, .release);
+    store.finishModelsQuery();
+    const said = store.modelsNote("codex").?;
+    try std.testing.expectEqualStrings("not signed in", said.text);
+    // Not being signed in is a state to show plainly, not a failure.
+    try std.testing.expect(!said.failed);
+    try std.testing.expect(store.modelsNote("gateway") == null);
+    try std.testing.expect(store.modelsNote("grok") == null);
+    try std.testing.expect(store.modelsNote("magpie") == null);
+
+    // A reload rebuilds the rows, and keeps what was learned about them.
+    store.reload();
+    try std.testing.expectEqualStrings("not signed in", store.modelsNote("codex").?.text);
+    try std.testing.expect(store.modelsNote("magpie") == null);
+
+    // An endpoint that cannot be reached is a failure, and says so where it
+    // happened.
+    store.models_query = try gpa.dupe(u8, "magpie");
+    store.models_query_note = try gpa.dupe(u8, "Could not reach the provider's /models");
+    store.models_query_failed = true;
+    store.models_done.store(true, .release);
+    store.finishModelsQuery();
+    const failed = store.modelsNote("magpie").?;
+    try std.testing.expectEqualStrings("Could not reach the provider's /models", failed.text);
+    try std.testing.expect(failed.failed);
+    try std.testing.expectEqualStrings("not signed in", store.modelsNote("codex").?.text);
+
+    // Listing its models takes the note away again.
+    store.models_query = try gpa.dupe(u8, "magpie");
+    store.models_done.store(true, .release);
+    store.finishModelsQuery();
+    try std.testing.expect(store.modelsNote("magpie") == null);
+    try std.testing.expectEqualStrings("not signed in", store.modelsNote("codex").?.text);
 }

@@ -78,6 +78,12 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         }
         s.observe();
         assist.refresh(s);
+        // A model list fx read off the UI thread lands here, whichever pane
+        // asked for it (the picker and the phone show it as soon as it does).
+        if (w.shared.agent_store) |store| if (store.modelsQueryDone()) {
+            store.finishModelsQuery();
+            w.shared.redraw();
+        };
         actions(c, w, s);
     }
 }
