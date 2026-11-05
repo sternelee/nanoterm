@@ -277,6 +277,51 @@ test "a failed agent's error stays inside the model picker" {
     try t.screenshot("/tmp/nanoterm-picker-error.png");
 }
 
+test "a message starts an agent that is not running" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-restart";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    s.which = .hermes;
+    const dead = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = struct {
+        fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
+            return null;
+        }
+    }.f }, .hermes, home);
+    s.agent = dead;
+    dead.error_text = try gpa.dupe(u8, "the agent stopped");
+
+    // A message is what opens the next agent: the one that never started
+    // is retired, not left to answer with "not running".
+    s.ask("hello");
+    try std.testing.expect(s.agent != null);
+    try std.testing.expect(s.agent.? != dead);
+    try std.testing.expectEqual(@as(usize, 1), s.retired.items.len);
+    try std.testing.expect(s.retired.items[0] == dead);
+
+    // A stopped one is the same: the next message starts a fresh turn.
+    const stopped = s.agent.?;
+    stopped.status = .failed;
+    s.ask("again");
+    try std.testing.expect(s.agent.? != stopped);
+    try std.testing.expectEqual(@as(usize, 2), s.retired.items.len);
+    try std.testing.expect(s.retired.items[1] == stopped);
+}
+
 test "a block's header keeps its height when its hover actions appear" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
