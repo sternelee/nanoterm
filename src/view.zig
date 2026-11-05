@@ -339,7 +339,7 @@ fn statusDot(c: *ui.Context, status: agent_mod.Status, id: u64) void {
         .failed => theme.failure,
     };
     // It breathes while it works, for its first seconds, then rests.
-    const since = motion.flipped(id, @intFromEnum(status), @floatCast(c.time));
+    const since = motion.flipped(id, @backingInt(status), @floatCast(c.time));
     if (motion.pulse(c.time, since)) |a| {
         color = color.alpha(a);
         c.animationFrame();

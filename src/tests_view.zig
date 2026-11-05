@@ -426,7 +426,6 @@ test "typing a slash in the Agent's input keeps the caret after it" {
     t.settle(1);
     t.typeText("/");
     t.frame();
-    std.debug.print("AFTER SLASH text={s} caret={d} menu={} items={d}\n", .{ s.input.text(), s.caret, s.menu.open, s.menu.items.items.len });
     {
         var listed: usize = 0;
         for (s.menu.items.items) |item| {

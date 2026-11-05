@@ -44,7 +44,7 @@ test "the embedded agent scans only fx's own skill roots" {
     }
     try std.testing.expectEqual(@as(usize, 0), policy.global_roots.len);
     const managed = policy.managed_root_source orelse return error.NoManagedRoot;
-    try std.testing.expectEqual(@intFromEnum(managed), @intFromEnum(@TypeOf(managed).global_fx));
+    try std.testing.expectEqual(@backingInt(managed), @backingInt(@TypeOf(managed).global_fx));
 }
 
 test "native agent answers through an OpenAI-compatible provider (opt-in)" {
