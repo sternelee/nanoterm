@@ -10,6 +10,7 @@ const agent_config = @import("agent_config.zig");
 const visual = @import("visual.zig");
 const prompt_mod = @import("agent_prompt.zig");
 const native_agent = @import("agent_native.zig");
+const view_fold = @import("view_fold.zig");
 
 /// Agent is built in; the other agents use ACP (`agents.zig` locates them).
 pub const Which = enum {
@@ -48,6 +49,14 @@ pub const Tool = struct {
     detail: std.ArrayList(u8) = .empty,
     /// The command the tool runs, if it runs one in a terminal.
     block: ?*blocks.Block = null,
+    /// The command a tool that runs one itself ran (the built-in Agent's
+    /// shell), shown as text because no block holds it.
+    command: std.ArrayList(u8) = .empty,
+    /// How the command ended, when it ran one.
+    exit_code: ?i64 = null,
+    duration_ms: ?u64 = null,
+    /// Whether `detail` is the head of more output that was not shown.
+    truncated: bool = false,
 };
 
 pub const PlanEntry = struct { text: []u8, status: []u8 };
@@ -130,6 +139,9 @@ pub const Turn = struct {
     ended: f64 = 0,
     /// Which folded groups of steps are open (view_fold.zig), by order.
     open_groups: u64 = 0,
+    /// Diagnostic bytes not yet a whole line: fx writes a notice in pieces and
+    /// a command's output in chunks, and a piece is not a row.
+    diagnostic: std.ArrayList(u8) = .empty,
 };
 
 /// What the agent needs from the app around it.
@@ -238,6 +250,7 @@ pub const Agent = struct {
     fn freeTurn(gpa: std.mem.Allocator, t: *Turn) void {
         for (t.items.items) |*it| freeItem(gpa, it);
         t.items.deinit(gpa);
+        t.diagnostic.deinit(gpa);
         gpa.free(t.prompt);
         for (t.images) |im| im.free(gpa);
         if (t.images.len > 0) gpa.free(t.images);
@@ -253,6 +266,7 @@ pub const Agent = struct {
                 gpa.free(tl.kind);
                 tl.title.deinit(gpa);
                 tl.detail.deinit(gpa);
+                tl.command.deinit(gpa);
             },
             .plan => |*p| {
                 for (p.items) |e| {
@@ -618,15 +632,23 @@ pub const Agent = struct {
                     a.addItem(t, .{ .text = line });
                 }
             },
-            .diagnostic => |text| if (text.len > 0) a.addItem(t, .{ .note = a.gpa.dupe(u8, text) catch return }),
-            .tool => |call| a.addItem(t, .{ .tool = .{
-                .id = a.gpa.dupe(u8, call.name) catch return,
-                .kind = a.gpa.dupe(u8, call.name) catch return,
-                .title = std.ArrayList(u8).fromOwnedSlice(a.gpa.dupe(u8, call.name) catch return),
-                .detail = std.ArrayList(u8).fromOwnedSlice(a.gpa.dupe(u8, call.output) catch return),
-                .status = if (std.mem.eql(u8, call.status, "completed") or std.mem.eql(u8, call.status, "success")) .completed else .failed,
-            } }),
+            .diagnostic => |text| a.appendDiagnostic(t, text),
+            .tool => |call| {
+                // The built-in Agent reports a call twice, as the ACP path does:
+                // once as it starts and once when it ends. The start makes the
+                // row (so a long command shows while it runs); the end fills in
+                // what it printed and how it ended.
+                const tl = nativeTool(t, call.id) orelse blk: {
+                    a.addItem(t, .{ .tool = .{
+                        .id = a.gpa.dupe(u8, call.id) catch return,
+                        .kind = a.gpa.dupe(u8, call.kind) catch return,
+                    } });
+                    break :blk &t.items.items[t.items.items.len - 1].tool;
+                };
+                a.updateNativeTool(tl, call);
+            },
             .done => |done| {
+                a.flushDiagnostic(t);
                 t.done = true;
                 t.ended = blocks.now();
                 a.native_turn = null;
@@ -640,6 +662,7 @@ pub const Agent = struct {
                 a.startNextNativeTurn();
             },
             .failed => |message| {
+                a.flushDiagnostic(t);
                 a.addItem(t, .{ .note = std.fmt.allocPrint(a.gpa, "agent: {s}", .{message}) catch return });
                 t.done = true;
                 t.ended = blocks.now();
@@ -651,6 +674,25 @@ pub const Agent = struct {
             .idle => {},
         }
         a.app.changed(a.app.ctx);
+    }
+
+    /// fx writes a diagnostic in pieces — a notice as its prefix, its body and
+    /// its newline; a command's output as whatever chunks arrive — so the bytes
+    /// are gathered until a line is whole. One line is one note; a fragment
+    /// would be a warning row of its own.
+    fn appendDiagnostic(a: *Agent, t: *Turn, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        t.diagnostic.appendSlice(a.gpa, bytes) catch return;
+        var notes = takeDiagnosticNotes(a.gpa, &t.diagnostic, false);
+        defer notes.deinit(a.gpa);
+        for (notes.items) |text| a.addItem(t, .{ .note = text });
+    }
+
+    /// The last diagnostic bytes as a note, when the turn ends mid-line.
+    fn flushDiagnostic(a: *Agent, t: *Turn) void {
+        var notes = takeDiagnosticNotes(a.gpa, &t.diagnostic, true);
+        defer notes.deinit(a.gpa);
+        for (notes.items) |text| a.addItem(t, .{ .note = text });
     }
 
     /// Selects a native agent model, or an ACP config option.
@@ -1233,6 +1275,21 @@ pub const Agent = struct {
         a.addItem(t, if (thought) .{ .thought = l } else .{ .text = l });
     }
 
+    /// The row the built-in Agent's call `id` already made, if it has one.
+    fn nativeTool(t: *Turn, id: []const u8) ?*Tool {
+        for (t.items.items) |*it| switch (it.*) {
+            .tool => |*tl| if (std.mem.eql(u8, tl.id, id)) return tl,
+            else => {},
+        };
+        return null;
+    }
+
+    /// Applies one built-in Agent tool event to its row: what the tool is and
+    /// is doing, the command it ran, and what it printed.
+    fn updateNativeTool(a: *Agent, tl: *Tool, call: native_agent.Event.Tool) void {
+        applyNativeToolEvent(a.gpa, tl, call);
+    }
+
     fn tool(t: *Turn, id: []const u8) ?*Tool {
         for (t.items.items) |*it| switch (it.*) {
             .tool => |*tl| if (std.mem.eql(u8, tl.id, id)) return tl,
@@ -1323,3 +1380,211 @@ pub const Agent = struct {
         }
     }
 };
+
+/// Applies one built-in Agent tool event to its row. Free of `Agent` so the
+/// mapping from fx's vocabulary to what the view draws can be tested alone.
+fn applyNativeToolEvent(gpa: std.mem.Allocator, tl: *Tool, call: native_agent.Event.Tool) void {
+    if (call.status.len > 0) tl.status = if (std.mem.eql(u8, call.status, "start"))
+        .in_progress
+    else if (std.mem.eql(u8, call.status, "completed"))
+        .completed
+    else
+        .failed;
+    if (call.kind.len > 0) {
+        gpa.free(tl.kind);
+        tl.kind = gpa.dupe(u8, call.kind) catch &.{};
+    }
+    if (call.label.len > 0) {
+        tl.title.clearRetainingCapacity();
+        tl.title.appendSlice(gpa, call.label) catch {};
+    }
+    if (call.command.len > 0) {
+        tl.command.clearRetainingCapacity();
+        tl.command.appendSlice(gpa, call.command) catch {};
+    }
+    tl.exit_code = call.exit_code;
+    tl.duration_ms = call.duration_ms;
+    tl.truncated = call.truncated;
+    tl.detail.clearRetainingCapacity();
+    tl.detail.appendSlice(gpa, call.output) catch {};
+}
+
+/// A tool event whose strings come from `arena`, so a test can write one with
+/// literals and let the arena free them.
+fn testToolEvent(arena: std.mem.Allocator, id: []const u8, name: []const u8, status: []const u8, kind: []const u8, label: []const u8, command: []const u8, output: []const u8) native_agent.Event.Tool {
+    return .{
+        .id = arena.dupe(u8, id) catch unreachable,
+        .name = arena.dupe(u8, name) catch unreachable,
+        .status = arena.dupe(u8, status) catch unreachable,
+        .kind = arena.dupe(u8, kind) catch unreachable,
+        .label = arena.dupe(u8, label) catch unreachable,
+        .command = arena.dupe(u8, command) catch unreachable,
+        .exit_code = null,
+        .duration_ms = null,
+        .output = arena.dupe(u8, output) catch unreachable,
+        .truncated = false,
+    };
+}
+
+test "a native tool event fills the row the view draws" {
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tl: Tool = .{ .id = try gpa.dupe(u8, "c1"), .kind = try gpa.dupe(u8, "other") };
+    defer {
+        gpa.free(tl.id);
+        gpa.free(tl.kind);
+        tl.title.deinit(gpa);
+        tl.detail.deinit(gpa);
+        tl.command.deinit(gpa);
+    }
+    // The start makes a row that says what it is doing, before anything ran.
+    applyNativeToolEvent(gpa, &tl, testToolEvent(arena, "c1", "read_file", "start", "read", "Reading src/main.zig", "", ""));
+    try std.testing.expectEqual(ToolStatus.in_progress, tl.status);
+    try std.testing.expectEqualStrings("read", tl.kind);
+    try std.testing.expectEqualStrings("Reading src/main.zig", tl.title.items);
+    try std.testing.expectEqual(@as(usize, 0), tl.detail.items.len);
+
+    // The end fills in what it printed and how it ended.
+    var ended = testToolEvent(arena, "c1", "read_file", "completed", "read", "Read src/main.zig", "", "const std = @import(\"std\");");
+    ended.duration_ms = 12;
+    applyNativeToolEvent(gpa, &tl, ended);
+    try std.testing.expectEqual(ToolStatus.completed, tl.status);
+    try std.testing.expectEqualStrings("Read src/main.zig", tl.title.items);
+    try std.testing.expectEqualStrings("const std = @import(\"std\");", tl.detail.items);
+    try std.testing.expectEqual(@as(?u64, 12), tl.duration_ms);
+}
+
+test "a native shell call carries its command, its exit code and its output" {
+    const gpa = std.testing.allocator;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tl: Tool = .{ .id = try gpa.dupe(u8, "c2"), .kind = try gpa.dupe(u8, "other") };
+    defer {
+        gpa.free(tl.id);
+        gpa.free(tl.kind);
+        tl.title.deinit(gpa);
+        tl.detail.deinit(gpa);
+        tl.command.deinit(gpa);
+    }
+    var event = testToolEvent(arena, "c2", "shell", "completed", "execute", "Ran zig build test", "zig build test", "153 passed; 1 skipped; 0 failed.");
+    event.exit_code = 0;
+    event.duration_ms = 4200;
+    event.truncated = true;
+    applyNativeToolEvent(gpa, &tl, event);
+    try std.testing.expectEqualStrings("zig build test", tl.command.items);
+    try std.testing.expectEqual(@as(?i64, 0), tl.exit_code);
+    try std.testing.expectEqual(@as(?u64, 4200), tl.duration_ms);
+    try std.testing.expect(tl.truncated);
+    // The row is a command, so the group's line says "ran a command".
+    try std.testing.expectEqual(view_fold.Bucket.command, view_fold.bucket(tl.kind));
+}
+
+test "fx's own tools land in the same buckets as an ACP agent's" {
+    const eq = std.testing.expectEqual;
+    try eq(view_fold.Bucket.read, view_fold.bucket("read"));
+    try eq(view_fold.Bucket.edit, view_fold.bucket("edit"));
+    try eq(view_fold.Bucket.command, view_fold.bucket("execute"));
+    try eq(view_fold.Bucket.search, view_fold.bucket("search"));
+    try eq(view_fold.Bucket.fetch, view_fold.bucket("fetch"));
+    try eq(view_fold.Bucket.other, view_fold.bucket("other"));
+    // An unknown kind is counted, not dropped.
+    try eq(view_fold.Bucket.other, view_fold.bucket("something_new"));
+}
+
+/// Whole lines ready to become notes, taken from `pending` (which keeps any
+/// trailing fragment for the next chunk). `final` takes the fragment too, for
+/// the end of a turn. Caller owns the returned strings.
+fn takeDiagnosticNotes(gpa: std.mem.Allocator, pending: *std.ArrayList(u8), final: bool) std.ArrayList([]u8) {
+    var notes: std.ArrayList([]u8) = .empty;
+    while (std.mem.indexOfScalar(u8, pending.items, '\n')) |end| {
+        const line = pending.items[0..end];
+        if (noteText(gpa, line)) |text| notes.append(gpa, text) catch gpa.free(text);
+        pending.replaceRange(gpa, 0, end + 1, &.{}) catch break;
+    }
+    if (final and pending.items.len > 0) {
+        if (noteText(gpa, pending.items)) |text| notes.append(gpa, text) catch gpa.free(text);
+        pending.clearRetainingCapacity();
+    }
+    return notes;
+}
+
+/// A diagnostic line as a note, or null when it says nothing a turn should show.
+/// fx's CLI prefixes its own messages, which do not read as the agent's; blank
+/// pieces are dropped rather than drawn as an empty warning row.
+fn noteText(gpa: std.mem.Allocator, line: []const u8) ?[]u8 {
+    const text = std.mem.trim(u8, line, " \t\r");
+    if (text.len == 0) return null;
+    const prefixes = [_][]const u8{ "fx ask: ", "[notice] ", "fx: " };
+    var body = text;
+    for (prefixes) |prefix| if (std.mem.startsWith(u8, body, prefix)) {
+        body = std.mem.trimStart(u8, body[prefix.len..], " \t");
+        break;
+    };
+    if (body.len == 0) return null;
+    return gpa.dupe(u8, body) catch null;
+}
+
+test "a diagnostic written in pieces becomes one note" {
+    // fx writes a notice as its prefix, its body and its newline, in three
+    // calls; each is not a row of its own.
+    const gpa = std.testing.allocator;
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+
+    var first = takeDiagnosticNotes(gpa, &pending, false);
+    try std.testing.expectEqual(@as(usize, 0), first.items.len);
+    first.deinit(gpa);
+    try pending.appendSlice(gpa, "[notice] ");
+    var second = takeDiagnosticNotes(gpa, &pending, false);
+    try std.testing.expectEqual(@as(usize, 0), second.items.len);
+    second.deinit(gpa);
+    try pending.appendSlice(gpa, "the skill root could not be read");
+    var third = takeDiagnosticNotes(gpa, &pending, false);
+    try std.testing.expectEqual(@as(usize, 0), third.items.len);
+    third.deinit(gpa);
+    try pending.appendSlice(gpa, "\n");
+
+    var notes = takeDiagnosticNotes(gpa, &pending, false);
+    defer {
+        for (notes.items) |text| gpa.free(text);
+        notes.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 1), notes.items.len);
+    // The CLI's own prefix is not part of what the agent said.
+    try std.testing.expectEqualStrings("the skill root could not be read", notes.items[0]);
+}
+
+test "a lone newline is not a warning row" {
+    // fx's `pushCommandOutputComplete` writes just a newline; drawn as a note
+    // it would be an empty warning under the turn.
+    const gpa = std.testing.allocator;
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+    try pending.appendSlice(gpa, "\n");
+    var notes = takeDiagnosticNotes(gpa, &pending, false);
+    defer notes.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), notes.items.len);
+}
+
+test "a fragment with no newline waits, and the turn's end takes it" {
+    const gpa = std.testing.allocator;
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(gpa);
+    try pending.appendSlice(gpa, "fx ask: a diagnostic that never ended");
+    var mid = takeDiagnosticNotes(gpa, &pending, false);
+    defer mid.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), mid.items.len);
+    try std.testing.expectEqual(@as(usize, 0), pending.items.len - "fx ask: a diagnostic that never ended".len);
+
+    var final = takeDiagnosticNotes(gpa, &pending, true);
+    defer {
+        for (final.items) |text| gpa.free(text);
+        final.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 1), final.items.len);
+    try std.testing.expectEqualStrings("a diagnostic that never ended", final.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), pending.items.len);
+}

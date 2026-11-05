@@ -160,7 +160,7 @@ index eab73bd6..04989e45 100644
          try std.testing.expect(spec.source != .global_fx);
      }
 diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
-index c30e07e0..7e34e84a 100644
+index c30e07e0..76acfba2 100644
 --- a/src/core/cli/cli_ask.zig
 +++ b/src/core/cli/cli_ask.zig
 @@ -1,5 +1,4 @@
@@ -192,7 +192,15 @@ index c30e07e0..7e34e84a 100644
  const mode_registry = @import("../modes/mode_registry.zig");
  const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
  const prompt_policy = @import("../config/prompt_policy.zig");
-@@ -105,7 +98,7 @@ const url_opener = @import("../hosts/url_opener.zig");
+@@ -90,6 +83,7 @@ const tool_dispatch = @import("../tooling/tool_dispatch.zig");
+ const command_output_content = @import("../tooling/command_output_content.zig");
+ const tool_mcp_runtime = @import("../tooling/tool_mcp_runtime.zig");
+ const tool_presentation = @import("../tooling/tool_presentation.zig");
++const acp_tool_presentation = @import("../../acp/tool_call_presentation.zig");
+ const tool_result_errors = @import("../tooling/tool_result_errors.zig");
+ const tool_runtime = @import("../tooling/tool_runtime.zig");
+ const tool_set_contract = @import("../tooling/tool_set.zig");
+@@ -105,7 +99,7 @@ const url_opener = @import("../hosts/url_opener.zig");
  const Allocator = std.mem.Allocator;
  const ChatMessage = types.ChatMessage;
  const HistoryTurn = types.HistoryTurn;
@@ -201,7 +209,7 @@ index c30e07e0..7e34e84a 100644
  const PermissionGrant = types.PermissionGrant;
  const PermissionMode = types.PermissionMode;
  const SessionRuntime = session_runtime.SessionRuntime;
-@@ -261,6 +254,7 @@ pub const Config = struct {
+@@ -261,6 +255,7 @@ pub const Config = struct {
      max_history_turns: usize,
      mode_registry: mode_registry.Registry,
      load_mcp_host: ?mcp_host.LoadFn = null,
@@ -209,7 +217,7 @@ index c30e07e0..7e34e84a 100644
      context_limit_overrides: []const config_runtime.context_limits.Override = &.{},
      additional_directories: []const []const u8 = &.{},
      saved_directories_suppressed: bool = false,
-@@ -349,14 +343,18 @@ test "prompt result failure writer preserves exact error type and identity" {
+@@ -349,14 +344,18 @@ test "prompt result failure writer preserves exact error type and identity" {
  }
  
  /// Resume selector parsed from fx ask --resume.
@@ -232,7 +240,7 @@ index c30e07e0..7e34e84a 100644
      image_paths: std.ArrayList([]u8) = .empty,
      images: std.ArrayList(ImageAttachment) = .empty,
      system_prompt_override: ?[]u8 = null,
-@@ -364,21 +362,22 @@ const AskOptions = struct {
+@@ -364,21 +363,22 @@ const AskOptions = struct {
      prompt_permissions: bool = false,
      timeout_ms: ?usize = null,
      quiet: bool = false,
@@ -260,11 +268,37 @@ index c30e07e0..7e34e84a 100644
      }
  };
  
-@@ -429,9 +428,10 @@ const PermissionApprovalPromptResult = enum {
+@@ -429,9 +429,36 @@ const PermissionApprovalPromptResult = enum {
  const NotifyAttentionFn = *const fn (?*anyopaque) void;
  const PermissionApprovalPromptFn = *const fn (?*anyopaque, ?*anyopaque, WriteFn, []const u8, ?*anyopaque, NotifyAttentionFn) anyerror!PermissionApprovalPromptResult;
  const IsTtyFn = *const fn (?*anyopaque) bool;
-+const EmbeddedToolFn = *const fn (?*anyopaque, []const u8, []const u8, []const u8) anyerror!void;
++/// One tool call as an in-process host sees it. The host draws a row per call,
++/// so these are what such a row needs rather than fx's internal types: what the
++/// tool is, what it is doing in a human's words, and what it printed.
++pub const EmbeddedToolEvent = struct {
++    /// The call's own id: a start event and its completion share it, so a host
++    /// updates one row rather than drawing two.
++    id: []const u8,
++    name: []const u8,
++    /// "start", "completed" or "failed".
++    status: []const u8,
++    /// read | edit | delete | move | search | execute | think | fetch | other.
++    kind: []const u8,
++    /// A human-readable action, such as "Reading src/main.zig".
++    label: []const u8,
++    /// The command a shell call runs, when it runs one.
++    command: []const u8 = "",
++    /// The call's exit code, when it has one.
++    exit_code: ?i64 = null,
++    /// How long the call took, in milliseconds.
++    duration_ms: ?u64 = null,
++    /// What the tool printed, for the host to show: a command's output rather
++    /// than its JSON result envelope. Empty for a start event.
++    output: []const u8 = "",
++    /// Whether `output` is the head of more output the host did not get.
++    truncated: bool = false,
++};
++const EmbeddedToolFn = *const fn (?*anyopaque, EmbeddedToolEvent) anyerror!void;
  /// The final `?[]const u8` is the run's --model, which stands in for a provider without a saved model.
 -const LoadStartupStateFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, usize, ?model_provider.ProviderId, ?[]const u8, []const config_runtime.SettingOverride) anyerror!app_lifecycle.StartupState;
 -const LoadStartupStateWithAuthModeFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, usize, credentials.AuthMode, ?model_provider.ProviderId, ?[]const u8, []const config_runtime.SettingOverride) anyerror!app_lifecycle.StartupState;
@@ -273,7 +307,7 @@ index c30e07e0..7e34e84a 100644
  const InitializeSessionStoresFn = *const fn (*AskContext) anyerror!void;
  const LoadSkillsFn = *const fn (
      Allocator,
-@@ -453,16 +453,20 @@ const RunDeps = struct {
+@@ -453,16 +480,25 @@ const RunDeps = struct {
      stdout_is_tty: IsTtyFn = realStdoutIsTty,
      stderr_is_tty: IsTtyFn = realStderrIsTty,
      load_startup_state: LoadStartupStateFn = loadStartupStateDefault,
@@ -292,10 +326,15 @@ index c30e07e0..7e34e84a 100644
 +    cancel_flag: ?*std.atomic.Value(bool) = null,
 +    embedded_tool_ctx: ?*anyopaque = null,
 +    embedded_tool: ?EmbeddedToolFn = null,
++    /// The host draws its own rows for tool calls from the events
++    /// `embedded_tool` delivers. The progress lines and command output fx would
++    /// otherwise stream to stderr would then be a second copy of the same call,
++    /// so they are left to the host's rows instead.
++    embedded_tool_rows: bool = false,
  };
  
  const OutputMode = enum {
-@@ -489,10 +493,8 @@ const RunOptions = struct {
+@@ -489,10 +525,8 @@ const RunOptions = struct {
      save_session: bool = true,
      resume_target: ?ResumeTarget = null,
      color_enabled: bool = true,
@@ -307,7 +346,7 @@ index c30e07e0..7e34e84a 100644
      effort_override: ?types.ReasoningEffort = null,
      fast_override: ?bool = null,
      ultrafast_override: ?bool = null,
-@@ -656,10 +658,6 @@ const AskContext = struct {
+@@ -656,10 +690,6 @@ const AskContext = struct {
      image_snapshot_temp_dir: ?[]u8 = null,
      prompt_snapshot_committed: bool = false,
      last_recovery_status: ?types.RouteRecoveryStatus = null,
@@ -318,7 +357,7 @@ index c30e07e0..7e34e84a 100644
  
      fn init(alloc: Allocator, cfg: Config, deps: RunDeps, workspace_root: []const u8) AskContext {
          const lifecycle_runtime = hooks.Runtime.init(alloc);
-@@ -828,6 +826,7 @@ const AskContext = struct {
+@@ -828,6 +858,7 @@ const AskContext = struct {
      }
  
      fn cancelFlag(self: *AskContext) *std.atomic.Value(bool) {
@@ -326,7 +365,7 @@ index c30e07e0..7e34e84a 100644
          if (comptime supports_headless_interrupt) {
              if (self.use_process_interrupt_flag) {
                  return &headless_interrupt.cancel_requested;
-@@ -1181,6 +1180,7 @@ fn askElicitationCapabilities(
+@@ -1181,6 +1212,7 @@ fn askElicitationCapabilities(
  }
  
  fn checkHeadlessCancellation(deps: RunDeps) !void {
@@ -334,7 +373,7 @@ index c30e07e0..7e34e84a 100644
      if (comptime supports_headless_interrupt) {
          if (deps.install_headless_interrupt and
              headless_interrupt.cancel_requested.load(.seq_cst))
-@@ -1212,33 +1212,32 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1212,33 +1244,32 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
      );
      defer interrupt_scope.restoreAndRedeliver();
  
@@ -377,7 +416,7 @@ index c30e07e0..7e34e84a 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
                  return 1;
-@@ -1248,7 +1247,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1248,7 +1279,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
          },
          error.PromptInputReadFailed => {
              if (hasJsonFlag(args)) {
@@ -386,7 +425,7 @@ index c30e07e0..7e34e84a 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
                  return 1;
-@@ -1258,18 +1257,17 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1258,18 +1289,17 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
          },
          error.InvalidAskArgs => {
              if (hasJsonFlag(args)) {
@@ -409,7 +448,7 @@ index c30e07e0..7e34e84a 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
                  return 1;
-@@ -1294,30 +1292,26 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1294,30 +1324,26 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
          effective_cfg.prompt_policy.system_prompt = sp;
      }
  
@@ -449,7 +488,7 @@ index c30e07e0..7e34e84a 100644
          .deps = deps,
      }) catch |err| {
          if (interrupt_scope.requested()) return headless_interrupt.exitCode();
-@@ -1329,25 +1323,6 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1329,25 +1355,6 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
              );
              return 1;
          }
@@ -475,7 +514,7 @@ index c30e07e0..7e34e84a 100644
          if (!options.json_output) {
              const notice = askErrorNotice(err) orelse return err;
              try deps.write_stderr(deps.stderr_ctx, "fx ask: ");
-@@ -1355,7 +1330,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1355,7 +1362,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
              try deps.write_stderr(deps.stderr_ctx, "\n");
              return 1;
          }
@@ -484,7 +523,7 @@ index c30e07e0..7e34e84a 100644
          defer alloc.free(json);
          try deps.write_stdout(deps.stdout_ctx, json);
          return 1;
-@@ -1401,7 +1376,7 @@ fn preflightAskImages(
+@@ -1401,7 +1408,7 @@ fn preflightAskImages(
              if (options.json_output) {
                  const detail = try alloc.print("{s}: {s}", .{ @errorName(err), image_path });
                  defer alloc.free(detail);
@@ -493,7 +532,7 @@ index c30e07e0..7e34e84a 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
              } else {
-@@ -1420,37 +1395,69 @@ fn preflightAskImages(
+@@ -1420,37 +1427,70 @@ fn preflightAskImages(
      return true;
  }
  
@@ -563,6 +602,7 @@ index c30e07e0..7e34e84a 100644
 +            .cancel_flag = cancel_flag,
 +            .embedded_tool_ctx = callbacks.context,
 +            .embedded_tool = callbacks.tool,
++            .embedded_tool_rows = callbacks.tool != null,
 +            .embedded_extra_mcp = extra_mcp,
 +        },
 +    });
@@ -582,7 +622,7 @@ index c30e07e0..7e34e84a 100644
          .deps = .{
              .context_registry = context_registry,
              .tool_set = tool_set,
-@@ -1493,9 +1500,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1493,9 +1533,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
              cfg.default_model,
              cfg.default_agent_step_limit,
              cfg.auth_mode,
@@ -593,7 +633,7 @@ index c30e07e0..7e34e84a 100644
          )
      else
          try options.deps.load_startup_state(
-@@ -1504,11 +1510,14 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1504,11 +1543,14 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
              cfg.secret_store,
              cfg.default_model,
              cfg.default_agent_step_limit,
@@ -610,7 +650,7 @@ index c30e07e0..7e34e84a 100644
      applyAskThemeChoice(startup.theme);
      cfg.provider_set.definitions = startup.configured_providers.definitions;
      // Bind gateway chat traffic to a per-process connection pool and warm one
-@@ -1542,15 +1551,11 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1542,15 +1584,11 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
      for (startup.config_diagnostics) |diagnostic| {
          var notice_writer: std.Io.Writer.Allocating = .init(alloc);
          defer notice_writer.deinit();
@@ -631,7 +671,7 @@ index c30e07e0..7e34e84a 100644
          try notice_writer.writer.writeByte('\n');
          const notice = try notice_writer.toOwnedSlice();
          defer alloc.free(notice);
-@@ -1629,9 +1634,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1629,9 +1667,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
          try ctx.checkCancellation();
          try options.deps.initialize_session_stores(&ctx);
          try ctx.checkCancellation();
@@ -642,7 +682,7 @@ index c30e07e0..7e34e84a 100644
              ctx.provider = startup.provider;
              ctx.model = startup.selected_model;
          }
-@@ -1774,7 +1777,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1774,7 +1810,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
      }
  
      try ctx.checkCancellation();
@@ -654,7 +694,7 @@ index c30e07e0..7e34e84a 100644
          ctx.mcp_host = try load_host(alloc, startup.workspace_root, ctx.toolRegistry(), .{ .questions = ctx.mcp_elicitation_capabilities });
          if (ctx.mcp_host) |h| try reportUnapprovedMcpServers(&ctx, h);
      }
-@@ -1816,7 +1822,6 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1816,7 +1855,6 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
          // process_queued_prompt is synchronous here; AskContext keeps the
          // immutable snapshot allocations alive for the whole call.
          .context_snapshot = ctx.context_snapshot,
@@ -662,7 +702,7 @@ index c30e07e0..7e34e84a 100644
      };
  
      const deps = agentRuntimeDeps(&ctx);
-@@ -2029,7 +2034,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2029,7 +2067,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .append_static_context = appendStaticContext,
          .validate_tool_call = validateToolCall,
          .snapshot_mcp_definition = snapshotMcpDefinition,
@@ -670,7 +710,7 @@ index c30e07e0..7e34e84a 100644
          .prepare_skill_call = prepareSkillCall,
          .check_tool_availability = checkToolAvailability,
          .request_tool_permission = requestToolPermissionOutcomeWithRequest,
-@@ -2044,7 +2048,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2044,7 +2081,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .propagate_history_turn = propagateHistoryTurn,
          .commit_context_compaction = .{ .commit = commitContextCompaction },
          .append_turn_piece = if (ctx.v2 != null) appendTurnPiece else null,
@@ -678,7 +718,7 @@ index c30e07e0..7e34e84a 100644
          .save_prompt_images = if (ctx.v2 != null) savePromptImages else null,
          .propagate_grant = propagateGrant,
          .push_event = pushEvent,
-@@ -2054,7 +2057,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2054,7 +2090,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .push_system_notice = pushSystemNotice,
          .push_context_notice = pushContextNotice,
          .push_route_recovery_status = pushRouteRecoveryStatus,
@@ -686,7 +726,7 @@ index c30e07e0..7e34e84a 100644
          .push_command_output_complete = pushCommandOutputComplete,
          .push_http_error = pushHttpError,
          .refresh_gateway_credential = refreshGatewayCredential,
-@@ -2234,11 +2236,6 @@ fn snapshotMcpDefinition(raw_ctx: *anyopaque, arena: Allocator, name: []const u8
+@@ -2234,11 +2269,6 @@ fn snapshotMcpDefinition(raw_ctx: *anyopaque, arena: Allocator, name: []const u8
      return tool_runtime.snapshotMcpDefinition(ctx.toolContext(), arena, name, known);
  }
  
@@ -698,19 +738,130 @@ index c30e07e0..7e34e84a 100644
  fn validateToolCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      if (try ctx.cfg.mode_registry.toolPolicyDeniedJson(arena, ctx.deps.tool_set, ctx.mode_id, call.name)) |reason| {
-@@ -2606,11 +2603,23 @@ fn executeToolCallAuthorized(
+@@ -2588,6 +2618,7 @@ fn executeToolCallAuthorized(
+     request: agent_runtime.ToolExecutionRequest,
+ ) !ToolExecutionResult {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    notifyEmbeddedToolStart(ctx, request.call);
+     var tool_ctx = ctx.toolContext();
+     tool_ctx.root_user_intent_context = request.root_user_intent_context;
+     tool_ctx.root_user_messages = request.root_user_messages;
+@@ -2606,11 +2637,126 @@ fn executeToolCallAuthorized(
      return result;
  }
  
++/// The ACP-facing kind for `name`, as fx maps it for its own ACP clients, so an
++/// in-process host draws the same icon and groups a step the same way.
++fn embeddedToolKind(name: []const u8) []const u8 {
++    return acp_tool_presentation.mapToolKind(name).jsonString();
++}
++
++/// What an in-process host calls this call, in fx's own words: the same action
++/// line fx shows its ACP clients and its TUI. Never fails the turn it describes:
++/// a call whose arguments cannot be read still gets a row.
++fn embeddedToolLabel(ctx: *AskContext, arena: Allocator, call: ToolCall, display_target: ?[]const u8) []const u8 {
++    return tool_presentation.formatPlainAction(arena, .{
++        .tool_registry = ctx.toolRegistry(),
++        .call = call,
++        .workspace_root = ctx.workspace_root,
++        .display_target = display_target,
++    }) catch call.name;
++}
++
++/// The command a `shell` call runs, read from its arguments: a row for one says
++/// what it ran, not just "Ran a command". Empty for every other tool.
++fn embeddedToolCommand(arena: Allocator, call: ToolCall) []const u8 {
++    if (!std.mem.eql(u8, call.name, "shell")) return "";
++    const args = tool_args.parseToolArgsObject(arena, call.arguments_json) catch return "";
++    const value = args.get("command") orelse return "";
++    return if (value == .string) value.string else "";
++}
++
++fn embeddedToolEvent(ctx: *AskContext, arena: Allocator, call: ToolCall, status: []const u8, result: ?ToolExecutionResult) EmbeddedToolEvent {
++    const command = embeddedToolCommand(arena, call);
++    var event: EmbeddedToolEvent = .{
++        .id = call.id,
++        .name = call.name,
++        .status = status,
++        .kind = embeddedToolKind(call.name),
++        .label = embeddedToolLabel(ctx, arena, call, if (command.len > 0) command else null),
++        .command = command,
++    };
++    if (result) |execution| {
++        const shown = embeddedToolOutput(arena, call.name, execution);
++        event.output = shown.text;
++        event.truncated = shown.truncated;
++        if (execution.command_result_json) |json| {
++            const command_result = std.json.parseFromSlice(EmbeddedCommandResult, arena, json, .{ .ignore_unknown_fields = true }) catch null;
++            if (command_result) |parsed| {
++                event.exit_code = parsed.value.exit_code;
++                event.duration_ms = parsed.value.duration_ms;
++            }
++        }
++    }
++    return event;
++}
++
++/// The fields of fx's command result JSON (`CommandResult.toJson`) a row shows
++/// as the command's ending rather than as its output.
++const EmbeddedCommandResult = struct {
++    exit_code: ?i64 = null,
++    duration_ms: ?u64 = null,
++};
++
++const EmbeddedToolOutput = struct { text: []const u8 = "", truncated: bool = false };
++
++/// What a finished call printed, for a host to show: the command's own output
++/// for `shell` (its result is a JSON envelope the model reads, not a person),
++/// and the tool's text for everything else. Cut to the same preview a host's
++/// row can show; `truncated` says more was dropped.
++fn embeddedToolOutput(arena: Allocator, name: []const u8, execution: ToolExecutionResult) EmbeddedToolOutput {
++    if (std.mem.eql(u8, name, "shell")) {
++        const view = std.json.parseFromSlice(EmbeddedShellResult, arena, execution.model_output, .{ .ignore_unknown_fields = true }) catch
++            return .{ .text = previewToolOutput(execution.model_output) };
++        const preview = previewToolOutput(view.value.output_delta);
++        const notice = view.value.notice orelse "";
++        const text = if (notice.len > 0)
++            std.mem.concat(arena, u8, &.{ notice, "\n", preview }) catch preview
++        else
++            preview;
++        return .{ .text = text, .truncated = view.value.output_truncated or preview.len < view.value.output_delta.len };
++    }
++    return .{ .text = previewToolOutput(execution.model_output) };
++}
++
++/// The fields of a `shell` result (`formatSnapshotRaw`) a row shows.
++const EmbeddedShellResult = struct {
++    output_delta: []const u8 = "",
++    output_truncated: bool = false,
++    notice: ?[]const u8 = null,
++};
++
++/// The host draws tool text as plain text, so unsafe bytes are replaced rather
++/// than escaped into the row, and a row is cut where a person stops reading.
++fn previewToolOutput(output: []const u8) []const u8 {
++    if (!text_utils.isModelSafeText(output)) return "binary or non-utf8 tool output omitted";
++    return text_utils.utf8PrefixByBytes(output, embedded_tool_output_bytes);
++}
++
++const embedded_tool_output_bytes = 8 * 1024;
++
 +fn notifyEmbeddedTool(ctx: *AskContext, call: ToolCall, status: []const u8, result: ?ToolExecutionResult) void {
 +    const callback = ctx.deps.embedded_tool orelse return;
-+    const output = if (result) |execution|
-+        execution.command_result_json orelse execution.model_output
-+    else
-+        "";
-+    callback(ctx.deps.embedded_tool_ctx, call.name, status, output) catch |err| {
++    // The label and the shell envelope are parsed per event, so an arena keeps
++    // one call's strings together and frees them before the next.
++    var arena_state = std.heap.ArenaAllocator.init(ctx.alloc);
++    defer arena_state.deinit();
++    const event = embeddedToolEvent(ctx, arena_state.allocator(), call, status, result);
++    callback(ctx.deps.embedded_tool_ctx, event) catch |err| {
 +        debug_trace.logf("cli_ask", "embedded tool event dropped name={s} err={s}", .{ call.name, @errorName(err) });
 +    };
++}
++
++/// A call as it starts, before it runs: its row appears while it works rather
++/// than only once it ends.
++fn notifyEmbeddedToolStart(ctx: *AskContext, call: ToolCall) void {
++    notifyEmbeddedTool(ctx, call, "start", null);
 +}
 +
  fn captureToolExecutionError(
@@ -718,35 +869,35 @@ index c30e07e0..7e34e84a 100644
      request: agent_runtime.ToolExecutionRequest,
      err: anyerror,
  ) void {
-+    notifyEmbeddedTool(ctx, request.call, "error", null);
++    notifyEmbeddedTool(ctx, request.call, "failed", null);
      if (ctx.output_mode.capturesJson()) {
          appendToolCallRecordBestEffort(
              ctx,
-@@ -2628,6 +2637,7 @@ fn captureToolExecutionResult(
+@@ -2628,6 +2774,7 @@ fn captureToolExecutionResult(
      request: agent_runtime.ToolExecutionRequest,
      result: ToolExecutionResult,
  ) void {
-+    notifyEmbeddedTool(ctx, request.call, if (result.status == .failure) "error" else "success", result);
++    notifyEmbeddedTool(ctx, request.call, if (result.status == .failure) "failed" else "completed", result);
      if (ctx.output_mode.capturesJson()) {
          appendToolCallRecordBestEffort(
              ctx,
-@@ -2662,6 +2672,7 @@ fn recordToolCallRejected(
+@@ -2662,6 +2809,7 @@ fn recordToolCallRejected(
      command_result_json: ?[]const u8,
  ) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-+    notifyEmbeddedTool(ctx, call, "error", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
++    notifyEmbeddedTool(ctx, call, "failed", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
      if (!ctx.output_mode.capturesJson()) return;
      appendToolCallRecordBestEffort(
          ctx,
-@@ -2685,6 +2696,7 @@ fn recordToolCallFailed(
+@@ -2685,6 +2833,7 @@ fn recordToolCallFailed(
      command_result_json: ?[]const u8,
  ) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
-+    notifyEmbeddedTool(ctx, call, "error", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
++    notifyEmbeddedTool(ctx, call, "failed", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
      if (!ctx.output_mode.capturesJson()) return;
      appendToolCallRecordBestEffort(
          ctx,
-@@ -2983,16 +2995,6 @@ fn appendTurnPiece(raw_ctx: *anyopaque, progress: agent_runtime.TurnProgress) !v
+@@ -2983,16 +3132,6 @@ fn appendTurnPiece(raw_ctx: *anyopaque, progress: agent_runtime.TurnProgress) !v
      ctx.prompt_snapshot_committed = true;
  }
  
@@ -763,7 +914,7 @@ index c30e07e0..7e34e84a 100644
  /// The prompt's images become the session's blobs before its first request
  /// (D89). A failure leaves the rest inline, with no path, as the adapter
  /// does for one image the store refuses.
-@@ -3012,10 +3014,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
+@@ -3012,10 +3151,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      defer worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
      switch (event) {
@@ -775,7 +926,20 @@ index c30e07e0..7e34e84a 100644
          .provider_resolved => |slug| {
              if (ctx.resolved_provider) |old| ctx.alloc.free(old);
              ctx.resolved_provider = try ctx.alloc.dupe(u8, slug);
-@@ -3291,34 +3290,25 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
+@@ -3177,6 +3313,12 @@ fn publishPendingToolProgress(ctx: *AskContext, call_id: []const u8, text: []con
+         pending.visible = true;
+         return;
+     }
++    // A host that draws rows says this itself; a plain stderr reader has only
++    // this line to go on.
++    if (ctx.deps.embedded_tool_rows) {
++        pending.visible = true;
++        return;
++    }
+     try ctx.writeStderr(text);
+     try ctx.writeStderr("\n");
+     pending.visible = true;
+@@ -3291,34 +3433,25 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
      try pushSystemNotice(raw_ctx, text);
  }
  
@@ -822,7 +986,16 @@ index c30e07e0..7e34e84a 100644
      var label_buf: [types.RouteRecoveryStatus.label_max_bytes]u8 = undefined;
      try pushSystemNotice(raw_ctx, status.label(&label_buf));
  }
-@@ -3619,111 +3609,117 @@ fn resolveAskSubagentAuthority(
+@@ -3363,6 +3496,8 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const
+ fn onCommandOutputChunk(raw_ctx: *anyopaque, _: ?types.ToolLifecycleId, _: command_output_content.Stream, chunk: []const u8) !void {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
+     if (ctx.output_mode.isTerminal()) return;
++    // A host that draws rows already has this output in the call's event.
++    if (ctx.deps.embedded_tool_rows) return;
+     try ctx.writeStderr(chunk);
+     if (chunk.len > 0) ctx.command_output_line_open = chunk[chunk.len - 1] != '\n';
+ }
+@@ -3619,111 +3754,117 @@ fn resolveAskSubagentAuthority(
      );
  }
  
@@ -1037,7 +1210,7 @@ index c30e07e0..7e34e84a 100644
          }
      }
  
-@@ -3738,35 +3734,6 @@ fn parseAskOptions(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSou
+@@ -3738,35 +3879,6 @@ fn parseAskOptions(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSou
      return opts;
  }
  
@@ -1073,7 +1246,7 @@ index c30e07e0..7e34e84a 100644
  fn emitHeadlessYoloWarning(alloc: Allocator, options: RunOptions) !void {
      if (options.color_enabled and options.deps.stderr_is_tty(options.deps.stderr_ctx)) {
          try options.deps.write_stderr(
-@@ -3947,15 +3914,11 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
+@@ -3947,15 +4059,11 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
          }
          try out.writer.writeAll("}");
      }
@@ -1094,7 +1267,7 @@ index c30e07e0..7e34e84a 100644
      if (result.error_code) |error_code| {
          try out.writer.writeAll(",\"error\":");
          try std.json.Stringify.value(error_code, .{}, &out.writer);
-@@ -3965,19 +3928,34 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
+@@ -3965,19 +4073,34 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
          try failure.writeJson(&out.writer);
      }
      if (result.recovery) |recovery| {
@@ -1136,7 +1309,7 @@ index c30e07e0..7e34e84a 100644
          .assistant_output = &.{},
          .error_code = err_name,
      });
-@@ -4026,18 +4004,17 @@ fn loadStartupStateDefault(
+@@ -4026,18 +4149,17 @@ fn loadStartupStateDefault(
      default_agent_step_limit: usize,
      provider_override: ?model_provider.ProviderId,
      model_override: ?[]const u8,
@@ -1158,7 +1331,7 @@ index c30e07e0..7e34e84a 100644
      );
  }
  
-@@ -4206,7 +4183,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
+@@ -4206,7 +4328,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
  
  fn testConfig() Config {
      return .{
@@ -1167,7 +1340,7 @@ index c30e07e0..7e34e84a 100644
          .default_model = "model",
          .default_agent_step_limit = 4,
          .gateway_retry_count = 1,
-@@ -4232,7 +4209,7 @@ fn testConfig() Config {
+@@ -4232,7 +4354,7 @@ fn testConfig() Config {
      };
  }
  
@@ -1176,7 +1349,7 @@ index c30e07e0..7e34e84a 100644
      var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
      errdefer state.deinit(alloc);
      state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
-@@ -4241,7 +4218,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
+@@ -4241,7 +4363,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
      return state;
  }
  
@@ -1185,7 +1358,7 @@ index c30e07e0..7e34e84a 100644
      var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
      errdefer state.deinit(alloc);
      state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
-@@ -4254,14 +4231,14 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
+@@ -4254,14 +4376,14 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
      return state;
  }
  
@@ -1204,7 +1377,7 @@ index c30e07e0..7e34e84a 100644
      errdefer state.deinit(alloc);
      state.config_diagnostics = try alloc.alloc(config_runtime.ConfigDiagnostic, 1);
      state.config_diagnostics[0] = .{
-@@ -4271,8 +4248,8 @@ fn testMissingKeyDiagnosticStartup(alloc: Allocator, transport: oauth_transport.
+@@ -4271,8 +4393,8 @@ fn testMissingKeyDiagnosticStartup(alloc: Allocator, transport: oauth_transport.
      return state;
  }
  
@@ -1215,7 +1388,7 @@ index c30e07e0..7e34e84a 100644
      errdefer state.deinit(alloc);
      state.configured_model = try alloc.dupe(u8, default_model);
      return state;
-@@ -4293,41 +4270,29 @@ fn testProcessQueuedPrompt(_: *agent_runtime.Agent, deps: *const agent_runtime.A
+@@ -4293,41 +4415,29 @@ fn testProcessQueuedPrompt(_: *agent_runtime.Agent, deps: *const agent_runtime.A
  fn testProcessQueuedPromptRecoveryLifecycle(_: *agent_runtime.Agent, deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, _: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
      try std.testing.expect(semantic_presentation == null);
      try std.testing.expectEqual(hooks.ScopeKind.ask, lifecycle.scope.kind);
@@ -1270,7 +1443,7 @@ index c30e07e0..7e34e84a 100644
          .diagnostic = types.ModelFailureDiagnostic.init("TestProviderSerializationFailed"),
      });
      return error.TestProviderSerializationFailed;
-@@ -4397,13 +4362,12 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(_: *agent_runtime.Agent, deps:
+@@ -4397,13 +4507,12 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(_: *agent_runtime.Agent, deps:
      for (advertised_shell.input_schema.properties) |property| {
          try std.testing.expect(!std.mem.eql(u8, property.name, "tty"));
      }
@@ -1286,7 +1459,7 @@ index c30e07e0..7e34e84a 100644
      try testPushAssistantText(deps, "assistant text");
  }
  
-@@ -4414,8 +4378,7 @@ fn testProcessQueuedPromptChecksFullTerminal(_: *agent_runtime.Agent, deps: *con
+@@ -4414,8 +4523,7 @@ fn testProcessQueuedPromptChecksFullTerminal(_: *agent_runtime.Agent, deps: *con
      const advertised_shell = for (cfg.advertised_functions) |function| {
          if (std.mem.eql(u8, function.name, "shell")) break function;
      } else return error.TestExpectedEqual;
@@ -1296,7 +1469,7 @@ index c30e07e0..7e34e84a 100644
      try testPushAssistantText(deps, "assistant text");
  }
  
-@@ -4465,9 +4428,9 @@ var test_initialize_session_store_calls: usize = 0;
+@@ -4465,9 +4573,9 @@ var test_initialize_session_store_calls: usize = 0;
  var test_image_preflight_startup_calls: usize = 0;
  var test_image_preflight_process_calls: usize = 0;
  
@@ -1308,7 +1481,7 @@ index c30e07e0..7e34e84a 100644
  }
  
  fn testCountImagePreflightProcess(agent: *agent_runtime.Agent, deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, job: worker_runtime.QueuedPrompt) !void {
-@@ -4571,8 +4534,8 @@ fn testLoadTruncatedSkillsWithDiagnostic(
+@@ -4571,8 +4679,8 @@ fn testLoadTruncatedSkillsWithDiagnostic(
      };
  }
  
@@ -1319,7 +1492,7 @@ index c30e07e0..7e34e84a 100644
      state.context_limits.skill_catalog_bytes = .{
          .value = .{ .bytes = 0 },
          .source = .command_line,
-@@ -4715,7 +4678,7 @@ const TestContextRegistryFixture = struct {
+@@ -4715,7 +4823,7 @@ const TestContextRegistryFixture = struct {
          defer messages.deinit(arena);
  
          const append_static = deps.append_static_context orelse return error.TestExpectedEqual;
@@ -1328,7 +1501,7 @@ index c30e07e0..7e34e84a 100644
          try deps.append_runtime_context(deps.ctx, arena, &messages);
          try std.testing.expectEqual(
              ctx.permission_mode,
-@@ -4745,8 +4708,8 @@ const test_cli_context_registry = context_contract.Registry{ .default_provider =
+@@ -4745,8 +4853,8 @@ const test_cli_context_registry = context_contract.Registry{ .default_provider =
      .append_transient_fn = TestContextRegistryFixture.appendTransient,
  } };
  
@@ -1339,7 +1512,7 @@ index c30e07e0..7e34e84a 100644
      state.context_enabled = false;
      return state;
  }
-@@ -4891,7 +4854,7 @@ test "CLI prompt projection configures web search then blocks native execution"
+@@ -4891,7 +4999,7 @@ test "CLI prompt projection configures web search then blocks native execution"
      defer messages.deinit(arena);
      const deps = agentRuntimeDeps(&ctx);
      const append_static = deps.append_static_context orelse return error.TestExpectedEqual;
@@ -1348,7 +1521,7 @@ index c30e07e0..7e34e84a 100644
      try deps.append_runtime_context(deps.ctx, arena, &messages);
  
      try std.testing.expectEqualStrings("stale-key", ctx.web_search_runtime.api_key);
-@@ -5051,6 +5014,7 @@ test "parse options preserves active ask flags and operands" {
+@@ -5051,6 +5159,7 @@ test "parse options preserves active ask flags and operands" {
          "--json",
          "--prompt-permissions",
          "--quiet",
@@ -1356,7 +1529,7 @@ index c30e07e0..7e34e84a 100644
          "--no-save",
          "--no-color",
          "--timeout",
-@@ -5060,10 +5024,11 @@ test "parse options preserves active ask flags and operands" {
+@@ -5060,10 +5169,11 @@ test "parse options preserves active ask flags and operands" {
      }, .tty);
      defer options.deinit(std.testing.allocator);
  
@@ -1369,7 +1542,7 @@ index c30e07e0..7e34e84a 100644
      try std.testing.expect(options.no_save);
      try std.testing.expect(options.no_color);
      try std.testing.expectEqual(@as(?usize, 123 * std.time.ms_per_s), options.timeout_ms);
-@@ -5074,36 +5039,32 @@ test "parse options preserves active ask flags and operands" {
+@@ -5074,36 +5184,32 @@ test "parse options preserves active ask flags and operands" {
      try std.testing.expectEqualStrings("hello world", options.prompt);
  }
  
@@ -1417,7 +1590,7 @@ index c30e07e0..7e34e84a 100644
      try std.testing.expectEqualStrings("--full-access --yolo --auto", literal.prompt);
  
      const cases = [_]struct {
-@@ -5117,7 +5078,7 @@ test "parse options preserves full access aliases after the delimiter as prompt
+@@ -5117,7 +5223,7 @@ test "parse options preserves full access aliases after the delimiter as prompt
      for (cases) |case| {
          var options = try parseOptionsWithStdin(alloc, &.{ case.flag, "--", "--full-access", "--yolo", "--auto" }, .tty);
          defer options.deinit(alloc);
@@ -1426,7 +1599,7 @@ index c30e07e0..7e34e84a 100644
          try std.testing.expectEqualStrings("--full-access --yolo --auto", options.prompt);
      }
  }
-@@ -5134,45 +5095,24 @@ test "parse options preserves model effort and fast overrides" {
+@@ -5134,45 +5240,24 @@ test "parse options preserves model effort and fast overrides" {
      }, .tty);
      defer options.deinit(alloc);
  
@@ -1480,7 +1653,7 @@ index c30e07e0..7e34e84a 100644
  }
  
  test "parse options accepts provider routing flags and rejects malformed values" {
-@@ -5180,51 +5120,41 @@ test "parse options accepts provider routing flags and rejects malformed values"
+@@ -5180,51 +5265,41 @@ test "parse options accepts provider routing flags and rejects malformed values"
  
      var options = try parseOptionsWithStdin(alloc, &.{ "--provider-order", "azure,anthropic", "--provider-strict", "hello" }, .tty);
      defer options.deinit(alloc);
@@ -1544,21 +1717,21 @@ index c30e07e0..7e34e84a 100644
      try std.testing.expectEqualStrings("--model --fast", literal.prompt);
  }
  
-@@ -5528,33 +5458,27 @@ test "preflightAskImages resolves image paths from the workspace" {
+@@ -5528,33 +5603,27 @@ test "preflightAskImages resolves image paths from the workspace" {
      try std.testing.expectEqualStrings(expected_path, options.images.items[0].path);
  }
  
 -test "parse options rejects unknown flags and bad timeouts and accepts dash prompts after sentinel" {
 -    var problem: AskUsageProblem = .none;
-+test "parse options rejects unknown flags and accepts dash prompts after sentinel" {
-     try std.testing.expectError(
-         error.InvalidAskArgs,
+-    try std.testing.expectError(
+-        error.InvalidAskArgs,
 -        parseAskOptions(std.testing.allocator, &.{ "--timeout", "5", "--not-a-flag", "prompt" }, .tty, &problem),
 -    );
 -    try std.testing.expectEqualStrings("--not-a-flag", problem.flag.unknown.flag);
 -
--    try std.testing.expectError(
--        error.InvalidAskArgs,
++test "parse options rejects unknown flags and accepts dash prompts after sentinel" {
+     try std.testing.expectError(
+         error.InvalidAskArgs,
 -        parseAskOptions(std.testing.allocator, &.{ "--timeout", "nope", "prompt" }, .tty, &problem),
 +        parseOptionsWithStdin(
 +            std.testing.allocator,
@@ -1590,7 +1763,7 @@ index c30e07e0..7e34e84a 100644
      try std.testing.expectError(error.MissingPrompt, parseOptionsWithStdin(std.testing.allocator, &.{}, .tty));
  }
  
-@@ -5595,14 +5519,14 @@ test "stdin prompt reader propagates allocation failure" {
+@@ -5595,14 +5664,14 @@ test "stdin prompt reader propagates allocation failure" {
  
  test "stdin prompt errors keep exact structured names" {
      const alloc = std.testing.allocator;
@@ -1607,7 +1780,7 @@ index c30e07e0..7e34e84a 100644
      defer alloc.free(read_failure);
      try std.testing.expectEqualStrings(
          "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"PromptInputReadFailed\"}\n",
-@@ -5619,7 +5543,7 @@ test "image preparation failure has stable text and JSON contracts" {
+@@ -5619,7 +5688,7 @@ test "image preparation failure has stable text and JSON contracts" {
      try std.testing.expect(askErrorNotice(error.Cancelled) == null);
      try std.testing.expect(askErrorNotice(error.TimedOut) == null);
  
@@ -1616,7 +1789,7 @@ index c30e07e0..7e34e84a 100644
      defer alloc.free(json);
      try std.testing.expectEqualStrings(
          "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"ImagePreparationFailed\"}\n",
-@@ -5637,7 +5561,6 @@ test "unresolved image capability has actionable text and stable JSON code" {
+@@ -5637,7 +5706,6 @@ test "unresolved image capability has actionable text and stable JSON code" {
      const json = try renderErrorJsonResult(
          alloc,
          @errorName(error.ModelImageCapabilityUnavailable),
@@ -1624,7 +1797,7 @@ index c30e07e0..7e34e84a 100644
      );
      defer alloc.free(json);
      try std.testing.expectEqualStrings(
-@@ -5882,9 +5805,7 @@ fn testLoadStartupStateWithCancellation(
+@@ -5882,9 +5950,7 @@ fn testLoadStartupStateWithCancellation(
      secret_store: host.SecretStore,
      default_model: []const u8,
      default_agent_step_limit: usize,
@@ -1634,7 +1807,7 @@ index c30e07e0..7e34e84a 100644
  ) !app_lifecycle.StartupState {
      const state = try testPresentKeyStartup(
          alloc,
-@@ -5893,8 +5814,6 @@ fn testLoadStartupStateWithCancellation(
+@@ -5893,8 +5959,6 @@ fn testLoadStartupStateWithCancellation(
          default_model,
          default_agent_step_limit,
          null,
@@ -1643,7 +1816,7 @@ index c30e07e0..7e34e84a 100644
      );
      if (test_startup_cancellation_stage == .after_startup_state) {
          requestTestHeadlessInterrupt();
-@@ -7107,11 +7026,11 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
+@@ -7107,11 +7171,11 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
          json: bool,
      }{
          .{
@@ -1657,7 +1830,7 @@ index c30e07e0..7e34e84a 100644
              .json = true,
          },
      };
-@@ -7395,23 +7314,30 @@ test "parse options rejects model-unsafe prompt text from arguments and stdin" {
+@@ -7395,23 +7459,30 @@ test "parse options rejects model-unsafe prompt text from arguments and stdin" {
      );
  }
  
@@ -1700,7 +1873,7 @@ index c30e07e0..7e34e84a 100644
      try std.testing.expectError(
          error.NoSaveResumeConflict,
          parseOptionsWithStdin(
-@@ -7424,7 +7350,7 @@ test "parse options keeps the last resume target and rejects no-save resume" {
+@@ -7424,7 +7495,7 @@ test "parse options keeps the last resume target and rejects no-save resume" {
          error.NoSaveResumeConflict,
          parseOptionsWithStdin(
              std.testing.allocator,
@@ -1709,7 +1882,7 @@ index c30e07e0..7e34e84a 100644
              .tty,
          ),
      );
-@@ -7531,29 +7457,9 @@ test "render final JSON reports the successful recovery attempt" {
+@@ -7531,29 +7602,9 @@ test "render final JSON reports the successful recovery attempt" {
          .exit_code = 0,
          .assistant_output = try alloc.dupe(u8, "recovered"),
          .recovery = .{
@@ -1742,7 +1915,7 @@ index c30e07e0..7e34e84a 100644
          },
      };
      defer result.deinit(alloc);
-@@ -7563,10 +7469,13 @@ test "render final JSON names what a needs-you status needs" {
+@@ -7563,10 +7614,13 @@ test "render final JSON names what a needs-you status needs" {
      var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
      defer parsed.deinit();
      const recovery = parsed.value.object.get("recovery").?.object;
@@ -1760,7 +1933,7 @@ index c30e07e0..7e34e84a 100644
  }
  
  test "render final JSON includes the latest terminal recovery diagnostic" {
-@@ -7576,7 +7485,8 @@ test "render final JSON includes the latest terminal recovery diagnostic" {
+@@ -7576,7 +7630,8 @@ test "render final JSON includes the latest terminal recovery diagnostic" {
          .assistant_output = try alloc.dupe(u8, ""),
          .recovery = .{
              .kind = .terminal_provider_error,
@@ -1770,7 +1943,7 @@ index c30e07e0..7e34e84a 100644
              .cause = .provider_unavailable,
              .diagnostic = types.ModelFailureDiagnostic.init(
                  "HTTP 503 · no_available_providers: No providers are currently available",
-@@ -8206,7 +8116,7 @@ test "json run with session setup failure still emits final object" {
+@@ -8206,7 +8261,7 @@ test "json run with session setup failure still emits final object" {
  
      const exit_code = try runWithDeps(
          alloc,
@@ -1779,7 +1952,7 @@ index c30e07e0..7e34e84a 100644
          testConfig(),
          deps,
      );
-@@ -8422,38 +8332,13 @@ test "fx ask JSON recovery keeps stdout structured and reports progress on stder
+@@ -8422,38 +8477,13 @@ test "fx ask JSON recovery keeps stdout structured and reports progress on stder
      var parsed = try std.json.parseFromSlice(std.json.Value, alloc, stdout_capture.bytes.items, .{});
      defer parsed.deinit();
      try std.testing.expectEqualStrings("assistant text", parsed.value.object.get("output").?.string);
@@ -1820,7 +1993,7 @@ index c30e07e0..7e34e84a 100644
  test "fx ask JSON reports the consumed attempt after retry admission failure" {
      const alloc = std.testing.allocator;
      var stdout_capture: TestCapture = .{};
-@@ -8473,12 +8358,12 @@ test "fx ask JSON reports the consumed attempt after retry admission failure" {
+@@ -8473,12 +8503,12 @@ test "fx ask JSON reports the consumed attempt after retry admission failure" {
      const recovery = parsed.value.object.get("recovery").?.object;
      try std.testing.expectEqualStrings("failed", recovery.get("state").?.string);
      try std.testing.expectEqual(@as(i64, 1), recovery.get("attempt").?.integer);
@@ -1864,7 +2037,7 @@ index 72568d03..b7422983 100644
      defer store.deinit(alloc);
      return store.applyUserPatch(alloc, patch);
 diff --git a/src/core/config/settings_store.zig b/src/core/config/settings_store.zig
-index b6c1cc17..e1597be6 100644
+index b6c1cc17..36159d5f 100644
 --- a/src/core/config/settings_store.zig
 +++ b/src/core/config/settings_store.zig
 @@ -9,6 +9,7 @@ const compactor = @import("../compactor/compactor.zig");
@@ -1918,7 +2091,7 @@ index b6c1cc17..e1597be6 100644
      if (patch.theme) |theme| {
          if (theme_mod.classifyValue(theme)) |choice| switch (choice) {
              .pin_light, .pin_dark => {},
-@@ -1241,6 +1261,29 @@ fn applyUserPatchToRoot(
+@@ -1241,6 +1261,38 @@ fn applyUserPatchToRoot(
          application.changed = try putModelPreference(arena, &root.object, preference) or application.changed;
      }
      if (patch.provider) |value| application.changed = try putString(arena, &root.object, "provider", value.label()) or application.changed;
@@ -1933,10 +2106,19 @@ index b6c1cc17..e1597be6 100644
 +        switch (definition) {
 +            .upsert => |value| {
 +                var entry: std.json.ObjectMap = .empty;
++                // The schema `configured_provider.parse_definition` reads:
++                // without `protocol` and `auth` the whole providers map fails
++                // to parse, taking every other provider down with it.
++                try entry.put(arena, "protocol", .{ .string = "openai-chat-completions" });
 +                try entry.put(arena, "base_url", .{ .string = try arena.dupe(u8, value.base_url) });
++                var auth: std.json.ObjectMap = .empty;
 +                if (value.bearer_env) |env| {
-+                    try entry.put(arena, "bearer_env", .{ .string = try arena.dupe(u8, env) });
++                    try auth.put(arena, "type", .{ .string = "bearer" });
++                    try auth.put(arena, "env", .{ .string = try arena.dupe(u8, env) });
++                } else {
++                    try auth.put(arena, "type", .{ .string = "none" });
 +                }
++                try entry.put(arena, "auth", .{ .object = auth });
 +                try providers_ptr.put(arena, try arena.dupe(u8, value.id), .{ .object = entry });
 +                application.changed = true;
 +            },
@@ -1994,10 +2176,10 @@ index ea1ed115..f73496c7 100644
          if (std.mem.eql(u8, event, "shell-ready"))
 diff --git a/src/embedded.zig b/src/embedded.zig
 new file mode 100644
-index 00000000..908acf76
+index 00000000..ddbbfb6a
 --- /dev/null
 +++ b/src/embedded.zig
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,278 @@
 +//! nanoterm's in-process fx entry point.
 +//!
 +//! This is the native Zig agent runtime: provider streaming, tools, MCP,
@@ -2026,6 +2208,7 @@ index 00000000..908acf76
 +
 +pub const Result = cli_ask.PromptRunResult;
 +pub const Callbacks = cli_ask.EmbeddedCallbacks;
++pub const ToolEvent = cli_ask.EmbeddedToolEvent;
 +pub const Config = cli_ask.Config;
 +pub const ImageAttachment = cli_ask.ImageAttachment;
 +pub const mcp_config = @import("core/mcp_host/config_file.zig");

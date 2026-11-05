@@ -24,11 +24,11 @@ const Capture = struct {
         try self.diagnostic.appendSlice(self.gpa, bytes);
     }
 
-    fn tool(raw: ?*anyopaque, _: []const u8, _: []const u8, output: []const u8) anyerror!void {
+    fn tool(raw: ?*anyopaque, event: engine.ToolEvent) anyerror!void {
         const self: *Capture = @ptrCast(@alignCast(raw.?));
         self.tool_count += 1;
         self.tool_output.clearRetainingCapacity();
-        try self.tool_output.appendSlice(self.gpa, output);
+        try self.tool_output.appendSlice(self.gpa, event.output);
     }
 };
 
