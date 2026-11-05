@@ -537,6 +537,7 @@ pub const Session = struct {
 
     /// A prompt whose turn shows `title` (a short line) instead of `text`.
     pub fn askAs(a: *Session, heading: ?[]const u8, text: []const u8) void {
+        a.retireStopped();
         const ag = a.ensureAgent() orelse return;
         // On an SSH host: the agent works there, and is told so.
         a.syncRemote(ag);
@@ -615,6 +616,15 @@ pub const Session = struct {
                 a.input.set(h.back(p - 1).?);
             }
         }
+    }
+
+    /// A prompt is a reason to start again: one that stopped or never began
+    /// cannot answer, so it is retired and the prompt opens a fresh one.
+    fn retireStopped(a: *Session) void {
+        const ag = a.agent orelse return;
+        if (ag.status != .failed and ag.status != .off) return;
+        a.retired.append(a.gpa, ag) catch ag.destroy();
+        a.agent = null;
     }
 
     pub fn ensureAgent(a: *Session) ?*agent_mod.Agent {
