@@ -1,7 +1,8 @@
 //! Completions, as Warp's menu offers them: Tab completes the word being
 //! typed — commands, files and folders, git's subcommands and branches —
-//! and in agent mode "/" lists the agent's slash commands. One candidate
-//! is taken at once; several open a menu (↑↓ to choose, Tab or ↩ to take).
+//! and in agent mode "/" lists the agent's slash commands while "@" names
+//! files and folders for the prompt. One candidate is taken at once;
+//! several open a menu (↑↓ to choose, Tab or ↩ to take).
 const std = @import("std");
 const Commands = @import("commands.zig");
 const agent_config = @import("agent_config.zig");
@@ -74,6 +75,81 @@ pub const Menu = struct {
 
 const max_items = 200;
 
+/// How many files and folders a mention's index holds. fx's own scans a
+/// hundred thousand in a worker thread; the menu here walks in place, so
+/// it takes fewer (the menu shows `max_items` of them anyway).
+const max_files = 20_000;
+
+/// The folder names a mention never enters, as fx's indexer skips
+/// everywhere: the build's own output and the tree-sized dependencies.
+/// (fx also reads git's ignore rules inside a repository; that parsing
+/// stays fx's — this list is the menu's approximation.)
+const skipped_names = [_][]const u8{ ".git", ".zig-cache", "zig-out", "node_modules", ".next", "dist", "build", "coverage" };
+
+/// A mention's file index, as fx's own "@" builds one: every file and
+/// folder under the working folder, walked once and kept while the pane is
+/// in it — the whole tree, not one level, so "@main" finds src/ui/main.zig.
+pub const Files = struct {
+    gpa: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    /// Paths relative to the working folder, folders with a trailing "/".
+    items: std.ArrayList([]const u8) = .empty,
+    /// The folder the list is of; a cd walks it again.
+    root: std.ArrayList(u8) = .empty,
+    scanned: bool = false,
+
+    pub fn init(gpa: std.mem.Allocator) Files {
+        return .{ .gpa = gpa, .arena = .init(gpa) };
+    }
+
+    pub fn deinit(f: *Files) void {
+        f.items.deinit(f.gpa);
+        f.root.deinit(f.gpa);
+        f.arena.deinit();
+    }
+
+    /// The list for `cwd`, walked again when the folder changed or `fresh`
+    /// asks (a new "@" opened: a file made since the last one is there).
+    pub fn ensure(f: *Files, io: std.Io, cwd: []const u8, fresh: bool) void {
+        if (!fresh and f.scanned and std.mem.eql(u8, f.root.items, cwd)) return;
+        f.items.clearRetainingCapacity();
+        _ = f.arena.reset(.retain_capacity);
+        f.root.clearRetainingCapacity();
+        f.root.appendSlice(f.gpa, cwd) catch return;
+        var dir = std.Io.Dir.cwd().openDir(io, cwd, .{ .iterate = true }) catch return;
+        defer dir.close(io);
+        f.walk(io, dir, "");
+        f.scanned = true;
+        std.mem.sort([]const u8, f.items.items, {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lt);
+    }
+
+    fn walk(f: *Files, io: std.Io, dir: std.Io.Dir, prefix: []const u8) void {
+        var entries = dir.iterate();
+        while (entries.next(io) catch null) |e| {
+            if (f.items.items.len >= max_files) return;
+            if (e.name[0] == '.') continue;
+            const folder = e.kind == .directory;
+            if (folder and skipped(e.name)) continue;
+            const path = std.mem.concat(f.arena.allocator(), u8, &.{ prefix, e.name, if (folder) "/" else "" }) catch continue;
+            f.items.append(f.gpa, path) catch continue;
+            if (folder) {
+                var sub = dir.openDir(io, e.name, .{ .iterate = true }) catch continue;
+                defer sub.close(io);
+                f.walk(io, sub, path);
+            }
+        }
+    }
+
+    fn skipped(name: []const u8) bool {
+        for (skipped_names) |s| if (std.mem.eql(u8, s, name)) return true;
+        return false;
+    }
+};
+
 pub const Context = struct {
     io: std.Io,
     cwd: []const u8,
@@ -83,6 +159,10 @@ pub const Context = struct {
     slash: ?[]const agent_config.Command = null,
     /// The built-in Agent's arguments for its slash commands (agent_fx).
     fx_args: bool = false,
+    /// A prompt being written: "@" names files and folders in it.
+    mention: bool = false,
+    /// The mention's index of the working folder's files.
+    files: *Files,
 };
 
 /// Fills `m` with the completions of the word ending at `caret` in `text`.
@@ -122,8 +202,16 @@ pub fn compute(m: *Menu, text: []const u8, caret: usize, ctx: Context) void {
         };
         return;
     };
+    // A mention in a prompt: every file and folder of the working folder
+    // that fuzzy-matches the word, its own "@" kept before each — as fx's
+    // own picker ranks them, so "@main" finds src/ui/main.zig deep down.
+    if (ctx.mention and word.len > 0 and word[0] == '@') {
+        ctx.files.ensure(ctx.io, ctx.cwd, false);
+        mentions(m, word[1..], ctx.files);
+        return;
+    }
     if (n == 0) {
-        if (word.len == 0 or std.mem.indexOfScalar(u8, word, '/') != null) return paths(m, word, ctx);
+        if (word.len == 0 or std.mem.indexOfScalar(u8, word, '/') != null) return paths(m, word, ctx, "");
         for (ctx.commands.withPrefix(word)) |c| m.add(c, "", .command);
         return;
     }
@@ -145,12 +233,13 @@ pub fn compute(m: *Menu, text: []const u8, caret: usize, ctx: Context) void {
             if (m.items.items.len > 0) return;
         }
     }
-    paths(m, word, ctx);
+    paths(m, word, ctx, "");
 }
 
 /// Files and folders: `word` is a path, absolute, from ~, or from the cwd.
-fn paths(m: *Menu, word: []const u8, ctx: Context) void {
-    const slash = std.mem.lastIndexOfScalar(u8, word, '/');
+/// `prefix` stands before each candidate — "" for a path being typed, "@"
+/// for a mention.
+fn paths(m: *Menu, word: []const u8, ctx: Context, prefix: []const u8) void {    const slash = std.mem.lastIndexOfScalar(u8, word, '/');
     const dir_part = if (slash) |i| word[0 .. i + 1] else "";
     const base = if (slash) |i| word[i + 1 ..] else word;
     var buf: [2048]u8 = undefined;
@@ -168,7 +257,7 @@ fn paths(m: *Menu, word: []const u8, ctx: Context) void {
         if (e.name[0] == '.' and (base.len == 0 or base[0] != '.')) continue;
         var wbuf: [2048]u8 = undefined;
         const folder = e.kind == .directory;
-        const full = std.fmt.bufPrint(&wbuf, "{s}{s}{s}", .{ dir_part, e.name, if (folder) "/" else "" }) catch continue;
+        const full = std.fmt.bufPrint(&wbuf, "{s}{s}{s}{s}", .{ prefix, dir_part, e.name, if (folder) "/" else "" }) catch continue;
         m.add(full, "", if (folder) .folder else .file);
     }
     std.mem.sort(Item, m.items.items, {}, struct {
@@ -178,6 +267,36 @@ fn paths(m: *Menu, word: []const u8, ctx: Context) void {
             return std.mem.order(u8, a.word, b.word) == .lt;
         }
     }.lt);
+}
+
+/// A mention's candidates: every path in `files` that fuzzy-matches
+/// `query` (the word's "@" taken off), best first — the palette's own
+/// scoring, whose word starts are a path's "/" boundaries. A folder keeps
+/// its trailing "/", so taking one leaves a word that narrows inside it.
+fn mentions(m: *Menu, query: []const u8, files: *Files) void {
+    if (files.items.items.len == 0) return;
+    const Scored = struct { path: []const u8, s: i32 };
+    var list: std.ArrayList(Scored) = .empty;
+    defer list.deinit(m.gpa);
+    for (files.items.items) |p| {
+        // A word that already names a folder: taking it left this list, so
+        // what follows is what is inside it, not the folder again.
+        if (query.len > 0 and std.mem.eql(u8, p, query)) continue;
+        const s = @import("palette.zig").score(p, query) orelse continue;
+        list.append(m.gpa, .{ .path = p, .s = s }) catch return;
+    }
+    std.mem.sort(Scored, list.items, {}, struct {
+        fn gt(_: void, a: Scored, b: Scored) bool {
+            if (a.s != b.s) return a.s > b.s;
+            return std.mem.order(u8, a.path, b.path) == .lt;
+        }
+    }.gt);
+    for (list.items) |it| {
+        const folder = it.path.len > 0 and it.path[it.path.len - 1] == '/';
+        var buf: [2048]u8 = undefined;
+        const w = std.fmt.bufPrint(&buf, "@{s}", .{it.path}) catch break;
+        m.add(w, "", if (folder) .folder else .file);
+    }
 }
 
 /// Local branches, from the repository's refs (no git process).
@@ -219,10 +338,15 @@ test "completing commands, git, files" {
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     try std.Io.Dir.cwd().createDirPath(io, dir ++ "/src/ui");
     try std.Io.Dir.cwd().createDirPath(io, dir ++ "/.git/refs/heads/feature");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/src/ui/panel.zig", .data = "" });
+    try std.Io.Dir.cwd().createDirPath(io, dir ++ "/node_modules");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/node_modules/skip.js", .data = "" });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/stack.zig", .data = "" });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/.git/refs/heads/main", .data = "" });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/.git/refs/heads/feature/menu", .data = "" });
-    const ctx: Context = .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds };
+    var files: Files = .init(gpa);
+    defer files.deinit();
+    const ctx: Context = .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds, .files = &files };
 
     var m: Menu = .init(gpa);
     defer m.deinit();
@@ -242,13 +366,33 @@ test "completing commands, git, files" {
     try std.testing.expectEqualStrings("feature/menu", m.items.items[0].word);
     try std.testing.expectEqual(Kind.branch, m.items.items[0].kind);
     // A built-in Agent command's arguments: "/effort " offers its levels.
-    compute(&m, "/effort m", 9, .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds, .fx_args = true });
+    compute(&m, "/effort m", 9, .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds, .files = &files, .fx_args = true });
     try std.testing.expectEqual(@as(usize, 2), m.items.items.len); // minimal, medium
     try std.testing.expectEqualStrings("minimal", m.items.items[0].word);
     try std.testing.expectEqual(Kind.slash, m.items.items[0].kind);
     // Without fx args (an external agent), the path completion stands.
-    compute(&m, "/effort m", 9, .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds });
+    compute(&m, "/effort m", 9, .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds, .files = &files });
     try std.testing.expect(m.items.items.len == 0 or m.items.items[0].kind != .slash);
+
+    // A mention in a prompt: every file of the working folder, however
+    // deep, fuzzy-matched (fx's own picker), each keeping the word's "@".
+    const mctx: Context = .{ .io = io, .cwd = dir, .home = dir, .commands = &cmds, .files = &files, .mention = true };
+    compute(&m, "read @pan", 9, mctx);
+    try std.testing.expectEqualStrings("@src/ui/panel.zig", m.items.items[0].word);
+    try std.testing.expectEqual(Kind.file, m.items.items[0].kind);
+    try std.testing.expectEqual(@as(usize, 5), m.start);
+    // The word already names a folder: what follows is what is inside it.
+    compute(&m, "read @src/", 10, mctx);
+    try std.testing.expectEqualStrings("@src/ui/", m.items.items[0].word);
+    try std.testing.expectEqual(Kind.folder, m.items.items[0].kind);
+    // The folders fx skips (node_modules, .git) are not in the list.
+    compute(&m, "read @skip", 10, mctx);
+    try std.testing.expectEqual(@as(usize, 0), m.items.items.len);
+    compute(&m, "read @refs", 10, mctx);
+    try std.testing.expectEqual(@as(usize, 0), m.items.items.len);
+    // Outside a prompt, "@" is nothing special: no "@" candidates appear.
+    compute(&m, "read @s", 7, ctx);
+    try std.testing.expectEqual(@as(usize, 0), m.items.items.len);
 
     var cmd_name = "review".*;
     var desc = "review code".*;

@@ -116,6 +116,8 @@ fn context(s: *Session) complete.Context {
         .commands = &s.shared.commands,
         .slash = if (s.mode() == .agent) if (s.agent) |ag| ag.config.commands.items else &.{} else null,
         .fx_args = s.mode() == .agent and s.which == .agent,
+        .mention = s.mode() == .agent,
+        .files = &s.files,
     };
 }
 
@@ -180,13 +182,17 @@ pub fn tab(s: *Session, caret: usize) void {
     s.menu.open = true;
 }
 
-/// Opens the slash commands as "/" is typed in agent mode, and keeps an
-/// open menu up to date as the word changes.
+/// Opens the slash commands as "/" is typed in agent mode, the working
+/// folder as "@" is, and keeps an open menu up to date as the word changes.
 pub fn typed(s: *Session, caret: usize) void {
     s.menu.dismissed = false;
     const text = s.input.text();
     const slash = slashing(s);
-    if (!s.menu.open and !slash) return;
+    const mention = mentioning(s, caret);
+    if (!s.menu.open and !slash and !mention) return;
+    // A new "@" opens the menu: the working folder is walked again, so a
+    // file made since the last mention is in the list.
+    if (mention and !s.menu.open) s.files.ensure(s.io, s.cwd(), true);
     if (text.len == 0 or (text[text.len - 1] == ' ' and !slash)) return s.menu.close();
     const selected = s.menu.selected;
     complete.compute(&s.menu, text, caret, context(s));
@@ -197,6 +203,17 @@ pub fn typed(s: *Session, caret: usize) void {
 fn slashing(s: *Session) bool {
     const text = s.input.text();
     return s.mode() == .agent and text.len > 0 and text[0] == '/' and std.mem.indexOfScalar(u8, text, ' ') == null;
+}
+
+/// The word at the caret is a mention: "@" followed by a path being written,
+/// anywhere in a prompt (fx reads "@src/main.zig" itself; the others read
+/// the path in the text).
+fn mentioning(s: *Session, caret: usize) bool {
+    if (s.mode() != .agent) return false;
+    const text = s.input.text();
+    const upto = text[0..@min(caret, text.len)];
+    const start = if (std.mem.lastIndexOfScalar(u8, upto, ' ')) |i| i + 1 else 0;
+    return upto.len > start and upto[start] == '@';
 }
 
 /// Each frame: opens the slash commands once the agent has told them,
@@ -213,10 +230,11 @@ pub fn accept(s: *Session) void {
     const items = s.menu.items.items;
     if (items.len == 0) return s.menu.close();
     const it = items[@min(s.menu.selected, items.len - 1)];
-    // A folder keeps completing; anything else is a whole word. A slash
-    // command stands unspaced so the menu turns straight to its arguments.
+    // A folder keeps completing — a mention's menu follows straight into it —
+    // and a slash command stands unspaced so the menu turns straight to its
+    // arguments.
     const command = it.kind == .slash and it.word.len > 0 and it.word[0] == '/';
-    if (command) {
+    if (command or it.kind == .folder) {
         replaceWord(s, it.word, false);
         typed(s, s.menu.end);
         return;
