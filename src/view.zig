@@ -26,6 +26,11 @@ const Tree = ws_mod.Tree;
 const title_height = 40;
 
 pub fn view(w: *Workspace, c: *ui.Context) void {
+    // nanoui 0.12.0 keeps the composer's press block after the press, so
+    // output could never take a selection once the input had been clicked.
+    // A later nanoui clears it at the start of every frame; until this app
+    // moves to one, clear it here so it lasts only the press's frame.
+    c.selection.blocked = false;
     // What the relay held back at its last change goes out in this frame.
     if (w.shared.relay) |h| h.tick();
     if (w.tabs.items.len == 0) return;
