@@ -215,6 +215,8 @@ pub const Session = struct {
     history_pos: ?usize = null,
     /// The completion menu of the input.
     menu: complete.Menu,
+    /// The mention's index of the working folder's files (complete.zig).
+    files: complete.Files,
     /// agent's model for its next start (`--model`).
     model_choice: ?[]u8 = null,
     /// A /compact asked for a handoff; the next finished turn carries it
@@ -273,6 +275,7 @@ pub const Session = struct {
             .home = shared.home,
             .shell = .init(gpa, .{ .ctx = a, .changed = changed, .exited = shellExited, .command_finished = commandFinished }),
             .menu = .init(gpa),
+            .files = .init(gpa),
             .attachments = .{ .gpa = gpa, .uploads = std.fs.path.join(shared.arena, &.{ shared.home, "Library", "Application Support", "nanoterm", "uploads" }) catch "" },
             .which = shared.prefs.agent,
             .model_choice = if (shared.prefs.model.len > 0) gpa.dupe(u8, shared.prefs.model) catch null else null,
@@ -315,6 +318,7 @@ pub const Session = struct {
         a.all_blocks.deinit(a.gpa);
         a.timeline.deinit(a.gpa);
         a.menu.deinit();
+        a.files.deinit();
         a.attachments.deinit();
         if (a.model_choice) |m| a.gpa.free(m);
         a.branch_for.deinit(a.gpa);

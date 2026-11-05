@@ -487,3 +487,118 @@ test "typing a slash in the Agent's input keeps the caret after it" {
         ag.destroy();
     }
 }
+
+test "an @ in the prompt names files and folders" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-mention";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/src/ui");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/src/main.zig", .data = "// the app\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/src/ui/panel.zig", .data = "// a panel\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/README.md", .data = "# readme\n" });
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+
+    // A prompt, and "@" anywhere in it: the working folder's files and
+    // folders, as the agent's own menu offers them.
+    s.lock = .agent;
+    t.frame();
+    t.typeText("read @s");
+    t.settle(1);
+    try std.testing.expect(s.menu.open);
+    try std.testing.expect(t.hasText("@src/"));
+    try t.screenshot("/tmp/nanoterm-view-mention.png");
+    // A folder is taken and the menu follows straight into it.
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/", s.input.text());
+    try std.testing.expect(s.menu.open);
+    // Typing narrows it; a file is taken as a whole word, spaced off.
+    t.typeText("m");
+    t.settle(1);
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/main.zig ", s.input.text());
+    try std.testing.expect(!s.menu.open);
+    // However deep it sits: "@pan" names src/ui/panel.zig straight away,
+    // as fx's own picker does.
+    s.input.clear();
+    t.frame();
+    t.typeText("read @pan");
+    t.settle(1);
+    try std.testing.expect(s.menu.open);
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/ui/panel.zig ", s.input.text());
+}
+
+test "the caret stays at the typing point when the menu opens" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-caret";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/src");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/src/main.zig", .data = "// the app\n" });
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+
+    // The menu opens over the composer as "@" is typed; the input's own
+    // place in the tree must not move with it, or its caret and selection
+    // are lost and the next key lands where they were.
+    s.lock = .agent;
+    t.frame();
+    t.typeText("read ");
+    t.settle(1);
+    t.typeText("@"); // the menu opens on this frame
+    t.settle(1);
+    t.typeText("x");
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @x", s.input.text());
+    try std.testing.expectEqual(@as(usize, 7), s.caret);
+    // The word still completes from where the caret is: the stray x goes,
+    // and "@s" completes the folder, the menu following into it.
+    t.key(.backspace);
+    t.settle(1);
+    t.typeText("s");
+    t.settle(1);
+    try std.testing.expect(s.menu.open);
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/", s.input.text());
+    try std.testing.expect(s.menu.open);
+}

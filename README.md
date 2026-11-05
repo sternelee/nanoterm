@@ -129,6 +129,10 @@ stays on this machine and does not use a model or an account.
   is drawn faintly after the caret; → or Tab takes it.
 - **Completion**: Tab completes commands, files and folders, git
   subcommands and branches; several candidates open a menu (↑↓, Tab or ↩).
+- **@ mentions**: in a prompt, `@` fuzzy-completes every file and folder
+  under the working folder, however deep (↑↓, ↩), as fx's own picker does —
+  the built-in Agent reads `@src/main.zig` itself, and the path stands in
+  the text for every agent.
 - **Slash commands**: for an external ACP agent, `/` lists its commands
   (`available_commands_update`) with what each does.
 - **Agent and model**: the chip at the right of the input (or ⌘⇧M) picks

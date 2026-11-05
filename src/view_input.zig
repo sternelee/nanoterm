@@ -31,7 +31,10 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         if (focused and s.menu.open) menu(c, s);
         // Harness's composer: a rounded pill, the pictures, the text, and
         // a row of controls with the send button at its end, of Liquid
-        // Glass that what scrolls under it shows through.
+        // Glass that what scrolls under it shows through. Its key holds its
+        // id still while the menu above it comes and goes, so the input's
+        // caret, selection and undo are not lost to the tree moving.
+        ui.key(c, "composer");
         const pill_id = c.peekId(null);
         const pill = ui.div(c).column().wFull().gap(10).px(16).pt(14).pb(10).rounded(26).glass(.{}).border(theme.border.alpha(0.6));
         defer pill.end();
