@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/agent-light.png" alt="nanoterm in CodeGraff Light: Agent's turn folded into a summary, with a native visual" width="760">
+  <img src="docs/images/agent-light.png" alt="nanoterm in Light: Agent's turn folded into a summary, with a native visual" width="760">
 </p>
 
 <h1 align="center">nanoterm</h1>
@@ -84,8 +84,8 @@ zig build run --fork=../..
 ```
 
 <p align="center">
-  <img src="docs/images/palette-dark.png" width="760" alt="The ⌘P launcher in CodeGraff Dark: sessions, history, actions and commands">
-  <br><sub>The ⌘P launcher in CodeGraff Dark. Synthetic example sessions.</sub>
+  <img src="docs/images/palette-dark.png" width="760" alt="The ⌘P launcher in Dark: sessions, history, actions and commands">
+  <br><sub>The ⌘P launcher in Dark. Synthetic example sessions.</sub>
 </p>
 
 ## Blocks
@@ -161,8 +161,8 @@ stop square while something runs); where you are and the keys sit
 quietly under it. Agents' answers show the local pictures they link
 (`![alt](/path/shot.png)`) inline, captioned; a click opens one.
 
-The colors are Harness's: CodeGraff Dark and CodeGraff Light, warm
-neutrals with an amber accent, following the system's appearance until
+The colors are the house pair, Dark and Light — warm
+neutrals with an amber accent, after Harness's own — following the system's appearance until
 you choose one in the palette (⌘P, "light mode", "dark mode"); the choice
 is kept for the next launch.
 
@@ -360,8 +360,8 @@ it, Markdown drawn as Markdown. Files opened with nanoterm from the Finder
 
 nanoterm's own code is licensed under the [MIT License](LICENSE). The vendored
 fx source keeps its **Apache-2.0** license. The palettes and UI parts derived
-from CodeGraff/Harness keep their original **modified AGPLv3**, kept verbatim
-in [`third_party/licenses`](third_party/licenses/CodeGraff-LICENSE.txt); see
+from Harness keep their original **modified AGPLv3**, kept verbatim
+in [`third_party/licenses`](third_party/licenses/Harness-LICENSE.txt); see
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Credits
@@ -377,8 +377,8 @@ in [`third_party/licenses`](third_party/licenses/CodeGraff-LICENSE.txt); see
 - **[Ghostty](https://ghostty.org):** splits, tabs and their keys.
 - **[fx](https://fx.sh/):** the built-in Zig Agent runtime, native tools,
   providers, MCP and Skills, from Vercel Labs (Apache-2.0).
-- **[Harness](https://github.com/justrach/harness):** the CodeGraff colors, the
-  composer, turns folded into a summary, and native visuals from Luau
+- **[Harness](https://github.com/justrach/harness):** the warm dark and light
+  colors, the composer, turns folded into a summary, and native visuals from Luau
   (`show_visual`). External agents use ACP the way Harness does.
 
 <p align="center"><sub>Built in Zig 0.17 on <a href="https://github.com/justrach/nanoui">nanoui</a> · <a href="LICENSE">MIT</a> · <a href="THIRD_PARTY_NOTICES.md">third-party notices</a></sub></p>

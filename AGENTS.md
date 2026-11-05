@@ -53,7 +53,7 @@ Do not casually change the dependency URL, commit, or hash in `build.zig.zon`; o
 ## Generated and licensed files
 
 - Do not edit build output in `.zig-cache/`, `zig-out/`, `bench/.cache/`, or generated `bench/results/*/screen-*` files. Packaging scripts also generate archives, checksums, app bundles, and `zig-out/package/manifest.json`.
-- Preserve `third_party/licenses/CodeGraff-LICENSE.txt` and `src/marks/LICENSE.lobehub` verbatim. Not all derived material is covered by the repository's MIT license; read `THIRD_PARTY_NOTICES.md` before changing or reusing the Codegraff palettes, Harness-derived UI/visual material, or bundled marks.
+- Preserve `third_party/licenses/Harness-LICENSE.txt` and `src/marks/LICENSE.lobehub` verbatim. Not all derived material is covered by the repository's MIT license; read `THIRD_PARTY_NOTICES.md` before changing or reusing the Harness-derived palettes, UI/visual material, or bundled marks.
 
 ## Safety and data handling
 

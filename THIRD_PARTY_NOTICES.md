@@ -21,28 +21,25 @@ with nanoterm's embedding and configuration APIs added by
 original license is preserved at [`vendor/fx/LICENSE`](vendor/fx/LICENSE).
 nanoterm does not launch or require a separately installed fx executable.
 
-## CodeGraff and Harness (external license)
+## Harness (external license)
 
-nanoterm uses these from [CodeGraff](https://github.com/justrach/codegraff) and
-[Harness](https://github.com/justrach/harness):
+nanoterm uses these from [Harness](https://github.com/justrach/harness):
 
-- **The Codegraff Dark and Light palettes** (`src/theme.zig`), the composer,
-  turns folded into a summary, and the look of native visuals, after
-  [Harness](https://github.com/justrach/harness).
+- **The warm dark and light palettes** (`src/theme.zig`, named Dark and Light), the composer,
+  turns folded into a summary, and the look of native visuals.
 - **`show_visual`**: nanoterm answers the same tool, with the same Luau nodes,
   so a visual written for Harness shows in nanoterm.
 
-These parts are derived from CodeGraff and come under the license CodeGraff
-ships with: CodeGraff's **modified GNU AGPLv3**, Copyright (C) 2026 Rach
+These parts are derived from Harness and come under the license Harness
+ships with: a **modified GNU AGPLv3**, Copyright (C) 2026 Rach
 Pradhan and Yu Xi Lim. That license, not MIT, stays their license. It is kept
 here as the original, verbatim, in
-[`third_party/licenses/CodeGraff-LICENSE.txt`](third_party/licenses/CodeGraff-LICENSE.txt)
-(from CodeGraff
-[`389b261`](https://github.com/justrach/codegraff/blob/389b26182fef0b8070d9a976505286d693876b6c/LICENSE)).
-Harness is distributed under the same modified AGPLv3 terms.
+[`third_party/licenses/Harness-LICENSE.txt`](third_party/licenses/Harness-LICENSE.txt)
+(as Harness ships it, from its
+[repository](https://github.com/justrach/harness/blob/main/LICENSE)).
 
-nanoterm's MIT license covers nanoterm's own code. It does not extend to fx,
-CodeGraff or Harness.
+nanoterm's MIT license covers nanoterm's own code. It does not extend to fx
+or Harness.
 
 ## Luau
 
