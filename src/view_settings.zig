@@ -11,8 +11,9 @@ const agent_mod = @import("agent.zig");
 const Workspace = @import("workspace.zig").Workspace;
 const settings = @import("settings.zig");
 const relay = @import("relay.zig");
+const threads_mod = @import("threads.zig");
 
-const Page = enum(u8) { agents = 0, appearance = 1, motion = 2, privacy = 3, updates = 4, relay = 5 };
+pub const Page = enum(u8) { agents = 0, appearance = 1, motion = 2, privacy = 3, updates = 4, relay = 5, threads = 6 };
 
 pub fn card(c: *ui.Context, w: *Workspace) void {
     const panel = ui.div(c).column().w(@min(720, c.size.w - 40)).bg(theme.panel).rounded(14).border(theme.border).shadowLg().clip();
@@ -47,6 +48,7 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
         sideItem(c, w, .privacy, "hand.raised", "Privacy");
         sideItem(c, w, .updates, "arrow.down.circle", "Updates");
         sideItem(c, w, .relay, "globe", "Relay");
+        sideItem(c, w, .threads, "tray.full", "Threads");
     }
     _ = c.leaf(.{ .width = .{ .px = 1 }, .background = theme.border }, .none, null);
     {
@@ -62,6 +64,7 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
             @backingInt(Page.privacy) => privacy(c, w),
             @backingInt(Page.updates) => updates(c, w),
             @backingInt(Page.relay) => relayPage(c, w),
+            @backingInt(Page.threads) => threadsPage(c, w),
             else => {},
         }
     }
@@ -439,6 +442,26 @@ pub fn agentList(c: *ui.Context, w: *Workspace) void {
             w.focused().choose(info.which);
         }
     }
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = theme.border }, .none, null);
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        const t = ui.div(c).column().grow().gap(2);
+        {
+            defer t.end();
+            ui.text(c, "Default model", .{ .size = 13 });
+            ui.text(c, "New tabs and Thread tasks ask for it. Empty leaves each agent's own choice; the agent's own settings are not changed.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
+        const result = ui.textField(c, &w.model_buffer, .{ .placeholder = "The agent's own model", .width = .{ .px = 240 } });
+        if (result.changed or result.submitted) prefs.setModel(w.model_buffer.text());
+        if (result.submitted) {
+            // As "Make default" does for the agent: the pane that follows
+            // the default starts on its model too.
+            const model = std.mem.trim(u8, w.model_buffer.text(), " \t\r\n");
+            const pane = w.focused();
+            if (model.len > 0 and pane.which == prefs.agent) @import("assist.zig").chooseModel(pane, model);
+        }
+    }
     ui.text(c, "New tabs start with the default agent; ⌘⇧M switches the one a pane uses.", .{ .size = 11.5, .color = theme.faint });
     b.end();
 }
@@ -679,6 +702,171 @@ fn relayPage(c: *ui.Context, w: *Workspace) void {
             ui.text(c, "The relay is off.", .{ .size = 12, .color = theme.muted });
         }
     }
+}
+
+fn threadsPage(c: *ui.Context, w: *Workspace) void {
+    const th = &w.shared.threads;
+    const kit = nanoui.kit;
+    const now = @import("blocks.zig").now();
+    const s = section(c, "Github threads");
+    defer s.end();
+    {
+        const b = box(c);
+        defer b.end();
+        ui.text(c, "Issues, pull requests, mentions, review decisions, failing checks and notifications: whatever you switch on below is what the poll reads. An agent reads each thread in its own tab and proposes a plan; nothing changes until you press Run.", .{ .size = 12, .color = theme.muted, .wrap = true });
+        {
+            const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+            defer r.end();
+            const t = ui.div(c).column().grow().gap(2);
+            {
+                defer t.end();
+                ui.text(c, "Watch Github threads", .{ .size = 13 });
+                ui.text(c, "Polls with the Github CLI (gh) in the background.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+            }
+            var on = th.enabled();
+            if (ui.toggle(c, "", &on)) th.setEnabled(on);
+        }
+        {
+            // noop's routines run on their own or wait for approval; a
+            // thread here is listed first and read when asked.
+            const r = ui.div(c).row().wFull().gap(10).itemsCenter().pt(6);
+            defer r.end();
+            const t = ui.div(c).column().grow().gap(2);
+            {
+                defer t.end();
+                ui.text(c, "Read new threads as they arrive", .{ .size = 13 });
+                ui.text(c, "Off, each waits for Read in the sidebar.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+            }
+            var auto = th.autoStart();
+            if (ui.toggle(c, "", &auto)) th.setAutoStart(auto);
+        }
+    }
+    watchSources(c, th);
+    {
+        const b = box(c);
+        defer b.end();
+        ui.text(c, "Projects", .{ .size = 14, .weight = .semibold });
+        ui.text(c, "The repository checkouts gh reads. A folder's tasks start an agent in that folder, and only once gh confirms the repository it holds.", .{ .size = 12, .color = theme.muted, .wrap = true });
+        const listed = th.projects();
+        if (listed.len == 0) ui.text(c, "No folder is watched yet: add a checkout below.", .{ .size = 12, .color = theme.muted, .wrap = true });
+        var remove_at: ?usize = null;
+        var switch_at: ?usize = null;
+        for (listed, 0..) |p, i| {
+            const r = ui.div(c).row().wFull().gap(10).itemsCenter().py(2);
+            {
+                defer r.end();
+                const t = ui.div(c).column().grow().gap(2);
+                {
+                    defer t.end();
+                    if (p.repo.len > 0) {
+                        ui.text(c, p.repo, .{ .size = 12.5, .weight = .semibold });
+                    } else {
+                        ui.text(c, "Checking this folder's repository…", .{ .size = 12.5, .color = theme.muted });
+                    }
+                    ui.text(c, p.cwd, .{ .size = 11.5, .mono = true, .color = theme.muted, .truncate = .ellipsis });
+                    if (!p.verified and p.repo.len > 0 and p.found.len == 0) ui.text(c, "Waiting for gh to confirm this folder.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                    if (p.found.len > 0) {
+                        const h = ui.div(c).row().wFull().gap(8).itemsCenter();
+                        defer h.end();
+                        ui.text(c, c.print("This folder holds {s}, not {s}.", .{ p.found, p.repo }), .{ .size = 11.5, .color = theme.warning, .wrap = true });
+                        if (ui.button(c, c.print("Watch {s}", .{p.found}), .{ .variant = .ghost, .size = 11.5 }).clicked) switch_at = i;
+                    }
+                }
+                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) remove_at = i;
+            }
+        }
+        if (switch_at) |i| if (th.watchFound(i)) th.pollNow();
+        if (remove_at) |i| _ = th.removeProject(i);
+        {
+            const add = ui.div(c).row().wFull().gap(8).itemsCenter();
+            defer add.end();
+            _ = ui.textField(c, &w.repo_buffer, .{ .placeholder = "/path/to/checkout", .width = .fill });
+            if (ui.button(c, "Add folder", .{ .variant = .primary, .size = 12 }).clicked) {
+                if (th.addProject(w.repo_buffer.text())) {
+                    w.repo_buffer.clear();
+                    th.setEnabled(true);
+                    th.pollNow();
+                }
+            }
+            if (ui.button(c, "Use focused pane", .{ .variant = .ghost, .size = 12 }).clicked) {
+                if (th.watchCurrent()) w.repo_buffer.clear();
+            }
+            // A poll out at gh says so, and cannot be asked twice.
+            const busy = th.checking();
+            if (busy) kit.spinner(c, .{ .size = 12 });
+            if (ui.button(c, if (busy) "Checking…" else "Check now", .{ .variant = .ghost, .size = 12, .disabled = busy }).clicked) th.pollNow();
+        }
+        ui.text(c, "Only issues and pull requests from these folders' repositories start an agent. Until gh confirms a folder holds its repository, none do.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        if (th.errorText().len > 0) ui.text(c, th.errorText(), .{ .size = 11.5, .color = theme.failure, .wrap = true });
+    }
+    {
+        const b = box(c);
+        defer b.end();
+        ui.text(c, "How often", .{ .size = 14, .weight = .semibold });
+        const labels = [_][]const u8{ "1 min", "5 min", "15 min", "30 min", "1 h" };
+        const values = [_]u32{ 60, 300, 900, 1800, 3600 };
+        var picked: usize = 1;
+        for (values, 0..) |v, i| if (th.every() == v) {
+            picked = i;
+        };
+        if (ui.segmented(c, &labels, &picked)) th.setEvery(values[picked]);
+        {
+            var buf: [16]u8 = undefined;
+            const last = th.lastOk();
+            const when: []const u8 = if (th.checking())
+                "Checking now"
+            else if (last <= 0)
+                "Not checked yet"
+            else if (last > now)
+                "Checked just now"
+            else
+                c.print("Last check {s} ago", .{@import("view_sidebar.zig").ago(&buf, now, last)});
+            ui.text(c, c.print("{s}. Reads only what gh reports; Run is the only step that writes.", .{when}), .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
+    }
+}
+
+/// What to watch: one switch per `gh` query the poll can run.
+fn watchSources(c: *ui.Context, th: *threads_mod.Watcher) void {
+    const b = box(c);
+    defer b.end();
+    const head = ui.div(c).row().wFull().itemsCenter().gap(8);
+    {
+        defer head.end();
+        ui.text(c, "What to watch", .{ .size = 14, .weight = .semibold });
+        ui.spacer(c);
+        ui.text(c, c.print("{d} of {d} on", .{ th.watchedCount(), threads_mod.Source.all.len }), .{ .size = 11.5, .color = theme.muted });
+    }
+    sourceRow(c, th, .issues, "Issues assigned to me", "Issues on these repositories that gh says are assigned to you.");
+    sourceRow(c, th, .reviews, "Pull requests asking for my review", "Review requests that are still waiting on you.");
+    sourceRow(c, th, .assigned_prs, "Pull requests assigned to me", "Pull requests where you are the assignee.");
+    sourceRow(c, th, .mentions, "Comments that mention me", "Issues and pull requests where someone mentions you.");
+    sourceRow(c, th, .my_reviews, "Review decisions on my pull requests", "Changes requested, or an approval, on the pull requests you opened.");
+    sourceRow(c, th, .ci, "Failing checks on my pull requests", "A failing check on a pull request you opened, once per failing run.");
+    sourceRow(c, th, .notifications, "Github notifications", "Whatever else gh's unread notification list shows for these repositories.");
+}
+
+/// One switch and what it listens for: the switch sits at the row's right
+/// edge, the label and hint read from the left, and the whole row toggles.
+fn sourceRow(c: *ui.Context, th: *threads_mod.Watcher, source: threads_mod.Source, label: []const u8, hint: []const u8) void {
+    var on = th.source(source);
+    var toggled = false;
+    const row = ui.div(c).row().wFull().gap(12).itemsCenter().py(4).rounded(8).hover(theme.block_hover);
+    {
+        defer row.end();
+        if (row.clicked()) toggled = true;
+        const col = ui.div(c).column().grow().gap(2);
+        {
+            defer col.end();
+            ui.text(c, label, .{ .size = 13 });
+            ui.text(c, hint, .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
+        if (ui.toggle(c, "", &on)) toggled = true;
+    }
+    // The switch flips `on` itself; a click elsewhere on the row flips what
+    // is saved, and never both.
+    if (toggled and on == th.source(source)) on = !on;
+    if (on != th.source(source)) th.setSource(source, on);
 }
 
 fn updates(c: *ui.Context, w: *Workspace) void {

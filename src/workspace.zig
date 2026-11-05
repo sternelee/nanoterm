@@ -31,6 +31,8 @@ pub const Tab = struct {
     group_name_len: usize = 0,
     /// What its sidebar row shows, set by tests instead of a real agent.
     pretend: ?@import("view_sidebar.zig").Facts = null,
+    /// The thread this tab works on (threads.zig), 0 for a person's tab.
+    thread_id: u64 = 0,
 
     pub fn session(t: *const Tab) *Session {
         return t.focused.kind.leaf;
@@ -68,6 +70,10 @@ pub const Workspace = struct {
     pick: usize = 0,
     /// Every text's size times this (⌘= ⌘- ⌘0).
     zoom: f32 = 1,
+    /// Settings' edits: the model new tabs start with, and the folder
+    /// linked to the watched Github repository.
+    model_buffer: nanoui.ui.TextBuffer = .{},
+    repo_buffer: nanoui.ui.TextBuffer = .{},
     /// Find (⌘F): what is searched for, and the match shown.
     find: nanoui.ui.TextBuffer = .{},
     finding: bool = false,
@@ -81,6 +87,8 @@ pub const Workspace = struct {
         w.placed.deinit(w.shared.gpa);
         w.query.deinit();
         w.find.deinit();
+        w.model_buffer.deinit();
+        w.repo_buffer.deinit();
     }
 
     pub fn zoomBy(w: *Workspace, by: f32) void {
@@ -121,6 +129,8 @@ pub const Workspace = struct {
         if (w.overlay == .settings) {
             w.shared.prefs.refresh(w.shared.env);
             w.shared.fonts.ensure(w.shared.gpa, w.shared.io, w.shared.prefs.terminal_font);
+            w.model_buffer.set(w.shared.prefs.model);
+            w.repo_buffer.clear();
         }
     }
 
@@ -162,6 +172,77 @@ pub const Workspace = struct {
         return s;
     }
 
+    /// A new tab in `cwd` for a watched thread, behind the active one: it
+    /// works without taking the person away from what they were doing.
+    pub fn newThreadTab(w: *Workspace, cwd: []const u8, thread_id: u64) ?*Session {
+        const s = Session.create(w.shared, cwd) catch return null;
+        const t = w.shared.gpa.create(Tab) catch {
+            s.destroy();
+            return null;
+        };
+        const tree = Tree.init(w.shared.gpa, s) catch {
+            w.shared.gpa.destroy(t);
+            s.destroy();
+            return null;
+        };
+        t.* = .{ .tree = tree, .focused = undefined, .thread_id = thread_id };
+        t.focused = t.tree.root;
+        w.tabs.append(w.shared.gpa, t) catch {
+            w.freeTab(t);
+            return null;
+        };
+        return s;
+    }
+
+    /// What threads.zig (the Github watcher) calls back into.
+    pub fn threadsHost(w: *Workspace) @import("threads.zig").Host {
+        return .{
+            .ctx = w,
+            .start = threadStart,
+            .ask = threadAsk,
+            .focus = threadFocus,
+            .alive = threadAlive,
+            .cwd = threadCwd,
+            .redraw = threadRedraw,
+        };
+    }
+
+    fn threadStart(ctx: *anyopaque, cwd: []const u8, thread: u64, heading: []const u8, prompt: []const u8) ?u64 {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        const s = w.newThreadTab(cwd, thread) orelse return null;
+        s.askAs(heading, prompt);
+        return s.id;
+    }
+
+    fn threadAsk(ctx: *anyopaque, session: u64, heading: []const u8, prompt: []const u8) bool {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        const s = w.findSession(session) orelse return false;
+        s.askAs(heading, prompt);
+        return true;
+    }
+
+    fn threadFocus(ctx: *anyopaque, session: u64) bool {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        const s = w.findSession(session) orelse return false;
+        return w.focusSession(s);
+    }
+
+    fn threadAlive(ctx: *anyopaque, session: u64) bool {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        return w.findSession(session) != null;
+    }
+
+    fn threadCwd(ctx: *anyopaque) []const u8 {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        if (w.tabs.items.len == 0) return "";
+        return w.focused().cwd();
+    }
+
+    fn threadRedraw(ctx: *anyopaque) void {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        w.shared.redraw();
+    }
+
     /// Splits the focused pane; the new session starts where it is, as
     /// Ghostty's new splits inherit the working directory.
     pub fn splitFocused(w: *Workspace, axis: split.Axis) void {
@@ -193,11 +274,13 @@ pub const Workspace = struct {
             s.destroy();
             t.focused = next;
             t.zoomed = false;
+            w.shared.threads.reap();
             return;
         }
         // The tab's only pane.
         _ = w.tabs.orderedRemove(w.active);
         w.freeTab(t);
+        w.shared.threads.reap();
         if (w.tabs.items.len == 0) {
             if (w.shared.window) |win| {
                 w.shared.window = null;

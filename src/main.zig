@@ -129,6 +129,7 @@ pub fn main(init: std.process.Init) !void {
     try first.queue.appendSlice(init.gpa, runs.items);
     // Files the system opens with nanoterm: a tab each (open_files.zig).
     app.onOpenFiles(&w, @import("open_files.zig").open);
+    shared.threads.bind(w.threadsHost(), app);
     first.queued_ask = ask;
     for (splits.items) |dir| w.splitFocused(if (std.mem.eql(u8, dir, "down")) .vertical else .horizontal);
     w.updater = try nanoui.Updater.start(init, .{

@@ -80,8 +80,19 @@ pub fn finished(ctx: *anyopaque, t: *agent_mod.Turn) void {
         .session = a.id,
         .turn = t,
     });
+    a.shared.threads.turnFinished(a.id, t, turnFailed(a, t));
     // A /compact asked for this handoff: continue it in a fresh session.
     if (a.compact_pending) if (t.title) |title| {
         if (std.mem.eql(u8, title, "/compact")) @import("agent_fx.zig").carry(a, reply.items);
     };
+}
+
+/// Whether the ended turn failed: its agent stopped, or the error it kept
+/// is the turn's last word.
+fn turnFailed(a: *Session, t: *agent_mod.Turn) bool {
+    if (a.agent) |ag| if (ag.status == .failed) return true;
+    for (t.items.items) |it| if (it == .note) {
+        if (std.mem.startsWith(u8, it.note, "error:") or std.mem.eql(u8, it.note, "cancelled")) return true;
+    };
+    return false;
 }

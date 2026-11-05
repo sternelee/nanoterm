@@ -185,7 +185,12 @@ panels; every configured MCP server can list the tools it actually exposes.
 Everything lives in Agent's own configuration files in `~/.fx`.
 
 Settings also offers **Pi**, alongside those; the agent picker (⌘⇧M)
-switches the pane to any installed agent.
+switches the pane to any installed agent. Its Agents page sets the default
+model too: new tabs and Thread tasks start with it. The model is passed to
+the agent for nanoterm's own calls (the built-in Agent's turns, Pi's
+`--model` flags, or an ACP model option) and is never written to the
+agent's own settings, so sessions outside nanoterm keep the model they
+chose there. Empty leaves each agent's own default.
 
 Pi speaks its own RPC mode, not ACP: nanoterm runs `pi --mode rpc
 --no-session` and reads the same JSON lines Pi's SDK does (`src/pi.zig`).
@@ -213,6 +218,54 @@ itself, so those show in its turn too, but it has no ACP permission
 prompts and runs no commands in nanoterm's terminal. Its visuals
 (`show_visual`) would need an MCP server entry in Pi's own configuration,
 which nanoterm does not write.
+
+## Github threads
+
+With project folders watched, nanoterm polls Github through the `gh` CLI for
+whatever you switch on in Settings → Threads: issues assigned to you, pull
+requests asking for your review, pull requests assigned to you, comments that
+mention you, review decisions on your own pull requests, failing checks on
+them, and unread notifications. Each is its own `gh` query, so a switch turned
+off costs nothing. Turn watching on from the Agent menu (Watch Github Threads)
+or Settings → Threads.
+
+The sidebar is two sections: **Threads** on top, one row per thread the poll
+found (what needs you first, then what is being read or worked on, then the
+rest), and **Projects** below, your own tabs grouped by repository. Each
+section counts its rows and how many need you.
+
+Settings → Threads lists the checkouts gh reads; add as many as you like with
+**Add folder** or **Use focused pane**. Each poll runs `gh repo view` in a
+folder to learn the repository it holds (the repository is never guessed from
+the path), queries that repository, and filters notifications to the
+confirmed ones. A folder's tasks start their agent in that folder, and only
+once gh has confirmed its repository. If a folder later holds another
+repository, the chosen one is kept and that row offers **Watch `<repo>`** as
+an explicit switch; until then its tasks do not trigger. **Remove** stops
+watching a folder; the ledger keeps its threads but hides them until that
+repository is added again.
+
+Each thread first gets a read-only turn in a background tab: the agent reads
+the issue or pull request, looks at the code it touches, and writes a
+proposal (what it would change, how it would verify it, the branch it would
+use). Nothing is written until you press Run on the row. Run starts the
+agent on `nanoterm/<kind>-<number>` in the checkout with the same rules: it
+must stop on a dirty working tree, and it may commit but never push, merge,
+comment, or close anything. Dismiss puts a thread away until Github moves it
+again.
+
+**Check now** in Settings → Threads asks gh straight away, and the button reads
+**Checking…** until it answers. **Read new threads as they arrive**, under the
+watch switch, decides whether a thread the poll finds is read at once (the
+default) or waits in the sidebar with **Read** until you ask for its plan, as
+noop's routines may wait for approval. Either way one turn runs at a time.
+
+Polls are deduplicated by thread and by what changed (a CI failure is keyed
+by its head and failing checks, so a rerun of the same failure does not read
+as new). One reading or working turn runs at a time, whichever folder it
+works in. The ledger, the folders and what to watch are kept in
+`~/Library/Application Support/nanoterm/threads.json`; a single-folder file
+from an earlier version is read as the first project.
 
 ## Visuals
 

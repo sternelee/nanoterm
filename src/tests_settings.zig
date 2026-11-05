@@ -79,6 +79,189 @@ test "the Settings page: built-in Agent, agents, appearance, updates" {
     try t.screenshot("/tmp/nanoterm-settings.png");
 }
 
+test "Settings sets the model new tabs and Thread tasks start with" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-settings-model";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const first = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 2400, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    w.openSettings();
+    t.settle(1);
+    try std.testing.expect(t.hasText("Default model"));
+    try std.testing.expect(t.hasText("The agent's own model"));
+    // Type a model into the field and submit it.
+    const field = t.findText("The agent's own model") orelse return error.FieldNotFound;
+    t.click(field.x + 10, field.y + field.h / 2);
+    t.typeText("anthropic/claude-sonnet");
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet", shared.prefs.model);
+    // The pane that follows the default agent takes it, and so do new tabs.
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet", first.model_choice.?);
+    const second = try w.newTab(home);
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet", second.model_choice.?);
+    try t.screenshot("/tmp/nanoterm-settings-default-model.png");
+    // Kept for the next launch, for the calls nanoterm makes itself.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/Library/Application Support/nanoterm/settings.json", gpa, .limited(65536));
+    defer gpa.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model\": \"anthropic/claude-sonnet\"") != null);
+}
+
+test "Settings' Threads page links several folders to their repositories" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-settings-threads";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/work");
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/work-two");
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    _ = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 2400, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Threads");
+    t.settle(1);
+    // The page is taller than the card: the Projects box is below the fold.
+    t.scroll(600, 500, -300);
+    t.settle(1);
+    try std.testing.expect(t.hasText("Projects"));
+    try std.testing.expect(t.hasText("Add folder"));
+    try std.testing.expect(t.hasText("Use focused pane"));
+    // A path with no root is refused before gh is ever asked.
+    const field = t.findText("/path/to/checkout") orelse return error.FieldNotFound;
+    t.click(field.x + 10, field.y + field.h / 2);
+    t.typeText("relative/folder");
+    try t.clickText("Add folder");
+    t.settle(1);
+    try std.testing.expect(shared.threads.errorText().len > 0);
+    try std.testing.expectEqual(@as(usize, 0), shared.threads.projects().len);
+    // Two folders, each with the repository a poll would learn.
+    try std.testing.expect(shared.threads.addProject(home ++ "/work"));
+    try std.testing.expect(shared.threads.addProject(home ++ "/work-two"));
+    shared.threads.projectAt(0).?.repo = try gpa.dupe(u8, "owner/repo");
+    shared.threads.projectAt(0).?.verified = true;
+    shared.threads.projectAt(1).?.repo = try gpa.dupe(u8, "acme/widget");
+    // The second folder holds something else: the page says so, per row,
+    // and offers the explicit switch.
+    shared.threads.projectAt(1).?.found = try gpa.dupe(u8, "someone/else");
+    if (shared.threads.last_error.len > 0) gpa.free(shared.threads.last_error);
+    shared.threads.last_error = try gpa.dupe(u8, "this folder holds someone/else, not acme/widget; no agent is called until they match");
+    w.closeOverlay();
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Threads");
+    t.settle(1);
+    t.scroll(600, 500, -300);
+    t.settle(1);
+    try std.testing.expect(t.hasText(home ++ "/work"));
+    try std.testing.expect(t.hasText(home ++ "/work-two"));
+    try std.testing.expect(t.hasText("owner/repo"));
+    try std.testing.expect(t.hasText("acme/widget"));
+    try std.testing.expect(t.hasText("This folder holds someone/else, not acme/widget."));
+    try std.testing.expect(t.hasText("Watch someone/else"));
+    try t.screenshot("/tmp/nanoterm-settings-threads.png");
+    // Removing a row stops watching that folder; the other stays.
+    try t.clickText("Remove");
+    t.settle(1);
+    try std.testing.expectEqual(@as(usize, 1), shared.threads.projects().len);
+    try std.testing.expectEqualStrings(home ++ "/work-two", shared.threads.projects()[0].cwd);
+}
+
+test "Settings' Threads page switches what the poll watches" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-settings-sources";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    _ = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 2400, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Threads");
+    t.settle(1);
+    const labels = [_][]const u8{
+        "Issues assigned to me",
+        "Pull requests asking for my review",
+        "Pull requests assigned to me",
+        "Comments that mention me",
+        "Review decisions on my pull requests",
+        "Failing checks on my pull requests",
+        "Github notifications",
+    };
+    for (labels) |s| {
+        if (!t.hasText(s)) {
+            std.debug.print("missing: {s}\n", .{s});
+            return error.TextMissing;
+        }
+    }
+    const th = &shared.threads;
+    try std.testing.expectEqual(@as(usize, 7), th.watchedCount());
+    try std.testing.expect(t.hasText("7 of 7 on"));
+    // They read in the order they are listed, one row each, each hint under
+    // its own switch and clear of the next one.
+    for (labels[1..], labels[0 .. labels.len - 1]) |lower, upper| {
+        const up = t.findText(upper) orelse return error.TextMissing;
+        const lo = t.findText(lower) orelse return error.TextMissing;
+        try std.testing.expect(up.y + up.h < lo.y);
+    }
+    const first_hint = t.findText("Issues on these repositories that gh says are assigned to you.") orelse return error.TextMissing;
+    const first = t.findText(labels[0]).?;
+    const second = t.findText(labels[1]).?;
+    try std.testing.expect(first_hint.y > first.y + first.h / 2);
+    try std.testing.expect(first_hint.y + first_hint.h < second.y);
+    // Each switch is on its own: turning mentions off leaves the rest alone.
+    try t.clickText("Comments that mention me");
+    t.settle(1);
+    try std.testing.expect(!th.source(.mentions));
+    try std.testing.expect(th.source(.issues) and th.source(.reviews) and th.source(.assigned_prs));
+    try std.testing.expect(th.source(.my_reviews) and th.source(.ci) and th.source(.notifications));
+    try std.testing.expect(t.hasText("6 of 7 on"));
+    try t.screenshot("/tmp/nanoterm-settings-sources.png");
+}
+
 fn printed(_: *ui.Tester, s: *session_mod.Session) bool {
     if (s.shell.busy() or s.timeline.items.len == 0) return false;
     return switch (s.timeline.items[s.timeline.items.len - 1]) {

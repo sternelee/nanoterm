@@ -128,6 +128,21 @@ pub const Actions = struct {
         a.w.openSettings();
         a.done();
     }
+    fn watchThreads(a: *Actions, _: *Item) void {
+        _ = a.w.shared.threads.watchCurrent();
+        a.w.sidebar = .shown;
+        a.done();
+    }
+    fn checkThreads(a: *Actions, _: *Item) void {
+        a.w.shared.threads.pollNow();
+        a.w.sidebar = .shown;
+        a.done();
+    }
+    fn threadsSettings(a: *Actions, _: *Item) void {
+        a.w.openSettings();
+        a.w.settings_page = @backingInt(@import("view_settings.zig").Page.threads);
+        a.done();
+    }
     fn sidebar(a: *Actions, _: *Item) void {
         a.w.sidebar = if (@import("view_sidebar.zig").shown(a.w)) .hidden else .shown;
         a.done();
@@ -179,6 +194,10 @@ pub fn install(app: *nanoui.App, acts: *Actions) !void {
             .separator,
             .{ .label = "Agent", .click = of(acts, A.nativeAgent) },
             .{ .label = "Claude Code", .click = of(acts, A.claude) },
+            .separator,
+            .{ .label = "Watch Github Threads", .click = of(acts, A.watchThreads) },
+            .{ .label = "Check Threads Now", .click = of(acts, A.checkThreads) },
+            .{ .label = "Thread Settings…", .click = of(acts, A.threadsSettings) },
         } },
         .{ .label = "View", .submenu = &.{
             .{ .label = "Bigger Text", .accelerator = binds.accel("Cmd+="), .click = of(acts, A.zoomIn) },

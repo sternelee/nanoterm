@@ -16,6 +16,7 @@ const ws_mod = @import("workspace.zig");
 const Workspace = ws_mod.Workspace;
 const Tab = ws_mod.Tab;
 const Session = @import("session.zig").Session;
+const threads_mod = @import("threads.zig");
 
 pub const width: f32 = 248;
 
@@ -82,7 +83,7 @@ pub fn shown(w: *const Workspace) bool {
     return switch (w.sidebar) {
         .shown => true,
         .hidden => false,
-        .auto => anyAgent(w),
+        .auto => anyAgent(w) or w.shared.threads.visible() > 0,
     };
 }
 
@@ -146,10 +147,13 @@ pub fn draw(w: *Workspace, c: *ui.Context, title_height: f32) void {
     }
     const list = ui.div(c).column().wFull().grow().px(8).pt(6).gap(1).scrollY();
     defer list.end();
+    const now = @import("blocks.zig").now();
+    threadsSection(w, c, now);
     // Groups in the order their first tab has.
     var seen: [32][]const u8 = undefined;
     var n_groups: usize = 0;
     for (w.tabs.items) |t| {
+        if (t.thread_id != 0) continue;
         const g = group(w, t);
         const known = for (seen[0..n_groups]) |s| {
             if (std.mem.eql(u8, s, g)) break true;
@@ -159,17 +163,39 @@ pub fn draw(w: *Workspace, c: *ui.Context, title_height: f32) void {
             n_groups += 1;
         }
     }
-    const now = @import("blocks.zig").now();
+    var own: usize = 0;
+    var own_needs: usize = 0;
+    for (w.tabs.items) |t| {
+        if (t.thread_id != 0) continue;
+        own += 1;
+        if (state(facts(t)) == .needs_you) own_needs += 1;
+    }
+    // Two sections, as noop's sidebar: what Github asked for on top, the
+    // tabs you opened below.
+    if (w.shared.threads.visible() > 0) {
+        const rule = ui.div(c).wFull().px(8).pt(8).pb(2);
+        defer rule.end();
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = theme.border }, .none, null);
+    }
+    ui.key(c, "section-projects");
+    sectionTitle(c, "Projects", own, own_needs, if (w.shared.threads.visible() > 0) 12 else 4);
+    if (n_groups == 0) {
+        const none = ui.div(c).row().wFull().px(10).pb(4);
+        defer none.end();
+        ui.text(c, "No tabs of your own yet", .{ .size = 12, .color = theme.faint });
+    }
     var select: ?usize = null;
     for (seen[0..n_groups], 0..) |g, gi| {
         var count: usize = 0;
         var needs: usize = 0;
-        for (w.tabs.items) |t| if (std.mem.eql(u8, group(w, t), g)) {
+        for (w.tabs.items) |t| {
+            if (t.thread_id != 0) continue;
+            if (!std.mem.eql(u8, group(w, t), g)) continue;
             count += 1;
             if (state(facts(t)) == .needs_you) needs += 1;
-        };
+        }
         ui.key(c, c.print("group-{s}", .{g}));
-        const head = ui.div(c).row().wFull().itemsCenter().gap(6).px(10).pt(if (gi == 0) 4 else 14).pb(4);
+        const head = ui.div(c).row().wFull().itemsCenter().gap(6).px(10).pt(if (gi == 0) 4 else 12).pb(4);
         {
             defer head.end();
             ui.text(c, g, .{ .size = 12, .weight = .semibold, .color = theme.muted });
@@ -178,11 +204,96 @@ pub fn draw(w: *Workspace, c: *ui.Context, title_height: f32) void {
             if (needs > 0) ui.text(c, c.print("{d} needs you", .{needs}), .{ .size = 12, .color = theme.warning });
         }
         for (w.tabs.items, 0..) |t, i| {
+            if (t.thread_id != 0) continue;
             if (!std.mem.eql(u8, group(w, t), g)) continue;
             if (row(w, c, t, i, now)) select = i;
         }
     }
     if (select) |i| w.selectTab(i);
+}
+
+/// The Threads section: what the poll found, what each thread proposes, and
+/// what it is working on. Each row leads to its tab; a proposal has Run and
+/// Dismiss on the row itself.
+fn threadsSection(w: *Workspace, c: *ui.Context, now: f64) void {
+    const th = &w.shared.threads;
+    if (th.visible() == 0 and !th.watching()) return;
+    ui.key(c, "section-threads");
+    sectionTitle(c, "Threads", th.visible(), th.needsYou(), 4);
+    if (th.errorText().len > 0) {
+        const err = ui.div(c).row().wFull().px(10).pb(4);
+        defer err.end();
+        ui.text(c, th.errorText(), .{ .size = 11, .color = theme.failure, .truncate = .ellipsis });
+    }
+    if (th.visible() == 0) {
+        const none = ui.div(c).row().wFull().px(10).pb(4);
+        defer none.end();
+        ui.text(c, if (th.checking()) "Checking Github…" else if (th.watching()) "Watching Github…" else "No threads yet", .{ .size = 12, .color = theme.faint });
+        return;
+    }
+    // What asks for you first, then what is working, then the rest.
+    for ([_]threads_mod.State{ .proposed, .analyzing, .running, .queued, .failed, .done }) |want| {
+        for (th.threads.items) |*t| {
+            if (t.state == .dismissed or !th.belongs(t)) continue;
+            if (t.state != want) continue;
+            threadRow(w, c, t, now);
+        }
+    }
+}
+
+/// A sidebar section's title, the count beside it, and who needs you.
+fn sectionTitle(c: *ui.Context, title: []const u8, count: usize, needs: usize, top: f32) void {
+    const head = ui.div(c).row().wFull().itemsCenter().gap(6).px(10).pt(top).pb(4);
+    defer head.end();
+    ui.text(c, title, .{ .size = 12, .weight = .semibold });
+    ui.text(c, c.print("{d}", .{count}), .{ .size = 12, .color = theme.faint });
+    ui.spacer(c);
+    if (needs > 0) ui.text(c, c.print("{d} needs you", .{needs}), .{ .size = 12, .color = theme.warning });
+}
+
+fn threadState(st: threads_mod.State) State {
+    return switch (st) {
+        .queued => .idle,
+        .analyzing, .running => .working,
+        .proposed => .needs_you,
+        .done => .done,
+        .failed => .failed,
+        .dismissed => .idle,
+    };
+}
+
+fn threadRow(w: *Workspace, c: *ui.Context, t: *threads_mod.Thread, now: f64) void {
+    const th = &w.shared.threads;
+    const st = threadState(t.state);
+    const active = t.session != 0 and w.tabs.items.len > 0 and w.tab().session().id == t.session;
+    ui.key(c, c.print("thread-row-{d}", .{t.id}));
+    var r = ui.div(c).row().wFull().h(32).px(10).gap(6).itemsCenter().rounded(8);
+    r = if (active) r.bg(theme.panel).border(theme.border).shadow(.{ .color = theme.shadow.alpha(0.06), .blur = 6, .y = 1 }) else r.hover(theme.block_hover);
+    defer r.end();
+    const clicked = r.clicked();
+    {
+        const label = ui.div(c).row().grow().clip().gap(6);
+        defer label.end();
+        var num: [16]u8 = undefined;
+        ui.text(c, t.numberLabel(&num), .{ .size = 11, .color = theme.faint });
+        ui.text(c, t.title, .{ .size = 13, .color = theme.text, .truncate = .ellipsis });
+    }
+    if (t.state == .proposed) {
+        if (ui.button(c, "Run", .{ .variant = .primary, .size = 10.5, .disabled = th.active_run != 0 or !th.canTrigger(t) }).clicked) _ = th.run(t.id);
+        if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "xmark" }).clicked) th.dismiss(t.id);
+    } else if (t.state == .queued and !th.autoStart()) {
+        // Agents start on their own only when Settings says so: this is the
+        // ask for one that waited.
+        if (ui.button(c, "Read", .{ .variant = .primary, .size = 10.5 }).clicked) _ = th.analyze(t.id);
+        if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "xmark" }).clicked) th.dismiss(t.id);
+    } else {
+        if (st != .idle) {
+            var buf: [16]u8 = undefined;
+            ui.text(c, c.print("{s}", .{ago(&buf, now, t.changed)}), .{ .size = 12, .color = theme.muted });
+        }
+        mark(c, st, st == .done and !t.seen, now);
+    }
+    if (clicked) _ = th.open(t.id);
 }
 
 /// A tab's row; true when clicked.

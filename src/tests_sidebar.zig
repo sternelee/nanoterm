@@ -85,6 +85,161 @@ test "the sidebar: projects, states, needs you, unread until seen, a click" {
     try std.testing.expect(!t.hasText("1 needs you"));
 }
 
+test "the sidebar: watched Github threads, their proposal and Run" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-sidebar-threads";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    _ = try w.newTab(home);
+    const th = &shared.threads;
+    try th.cfg.projects.append(gpa, .{
+        .cwd = try gpa.dupe(u8, home),
+        .repo = try gpa.dupe(u8, "owner/repo"),
+        .verified = true,
+    });
+    const now = @import("blocks.zig").now();
+    const Row = struct { key: []const u8, kind: @import("threads.zig").Kind, number: u32, title: []const u8, state: @import("threads.zig").State };
+    const rows = [_]Row{
+        .{ .key = "issue:owner/repo#7", .kind = .issue, .number = 7, .title = "Fix the flaky test", .state = .proposed },
+        .{ .key = "ci:owner/repo#8", .kind = .ci, .number = 8, .title = "Checks failed", .state = .analyzing },
+    };
+    for (rows, 1..) |r, i| try th.threads.append(gpa, .{
+        .id = i,
+        .key = try gpa.dupe(u8, r.key),
+        .kind = r.kind,
+        .number = r.number,
+        .title = try gpa.dupe(u8, r.title),
+        .url = try gpa.dupe(u8, "https://github.com/owner/repo"),
+        .state = r.state,
+        .proposal = if (r.state == .proposed) try gpa.dupe(u8, "the plan") else &.{},
+        .created = now,
+        .changed = now,
+    });
+    w.sidebar = .shown;
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1100, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(0.5);
+    for ([_][]const u8{ "Threads", "1 needs you", "Fix the flaky test", "Checks failed", "Run" }) |s| {
+        if (!t.hasText(s)) {
+            std.debug.print("missing: {s}\n", .{s});
+            return error.TextMissing;
+        }
+    }
+    // The proposal is the group that needs you, above the tab's project.
+    try std.testing.expect(t.findText("Threads").?.y < t.findText("Fix the flaky test").?.y);
+    // Two sections: what Github asked for on top, your own tabs below.
+    const projects = t.findText("Projects") orelse return error.TextMissing;
+    try std.testing.expect(projects.y > t.findText("Checks failed").?.y);
+    // The tab's own group sits under that heading (its folder is the home).
+    try std.testing.expect(projects.y < t.findText("~").?.y);
+}
+
+test "the sidebar: a thread waits for Read when agents start by hand" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-sidebar-thread-read";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    _ = try w.newTab(home);
+    const th = &shared.threads;
+    try th.cfg.projects.append(gpa, .{
+        .cwd = try gpa.dupe(u8, home),
+        .repo = try gpa.dupe(u8, "owner/repo"),
+        .verified = true,
+    });
+    th.cfg.auto_start = false;
+    const now = @import("blocks.zig").now();
+    try th.threads.append(gpa, .{
+        .id = 1,
+        .key = try gpa.dupe(u8, "issue:owner/repo#7"),
+        .kind = .issue,
+        .number = 7,
+        .title = try gpa.dupe(u8, "Fix the flaky test"),
+        .url = try gpa.dupe(u8, "https://github.com/owner/repo/issues/7"),
+        .state = .queued,
+        .created = now,
+        .changed = now,
+    });
+    w.sidebar = .shown;
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1100, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(0.5);
+    // Nothing is reading it: the row offers Read, and pressing it asks.
+    try std.testing.expect(t.hasText("Fix the flaky test"));
+    try t.clickText("Read");
+    try std.testing.expect(th.threads.items[0].asked);
+}
+
+test "the sidebar: a thread that needs you comes before one that is reading" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-sidebar-thread-order";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    _ = try w.newTab(home);
+    const th = &shared.threads;
+    try th.cfg.projects.append(gpa, .{ .cwd = try gpa.dupe(u8, home), .repo = try gpa.dupe(u8, "owner/repo"), .verified = true });
+    const now = @import("blocks.zig").now();
+    // Added reading first, waiting second: the sidebar still puts the one
+    // that needs you on top.
+    for ([_]struct { title: []const u8, state: @import("threads.zig").State }{
+        .{ .title = "Still reading", .state = .analyzing },
+        .{ .title = "Waiting on you", .state = .proposed },
+    }, 1..) |r, i| try th.threads.append(gpa, .{
+        .id = i,
+        .key = try gpa.dupe(u8, if (i == 1) "pr:owner/repo#1" else "pr:owner/repo#2"),
+        .kind = .pr,
+        .number = @intCast(i),
+        .title = try gpa.dupe(u8, r.title),
+        .url = try gpa.dupe(u8, "https://github.com/owner/repo"),
+        .state = r.state,
+        .created = now,
+        .changed = now,
+    });
+    w.sidebar = .shown;
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1100, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(0.5);
+    try std.testing.expect(t.findText("Waiting on you").?.y < t.findText("Still reading").?.y);
+}
+
 test "a file opened with nanoterm: a tab in its folder, showing it; the fresh first tab gives way" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

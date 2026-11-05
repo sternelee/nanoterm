@@ -73,6 +73,8 @@ pub const Shared = struct {
     /// The font families Settings offers for the terminal, loaded when it
     /// opens; the system's and the installed terminal and Nerd families.
     fonts: @import("fonts.zig").Registry = .{},
+    /// Github threads nanoterm watches, and the tabs it works on them in.
+    threads: @import("threads.zig").Watcher,
 
     /// Call `wire` once the value is at its final address.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, env: *std.process.Environ.Map) !Shared {
@@ -94,6 +96,7 @@ pub const Shared = struct {
             .log = .{ .gpa = gpa },
             .pictures = .{ .gpa = gpa, .io = io, .home = home, .fetch = true },
             .prefs = .init(gpa, io, arena, home, env),
+            .threads = .init(gpa, io, home),
         };
         s.log.load(io, try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "sessions.jsonl" }));
         s.appearance_path = try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "appearance" });
@@ -125,6 +128,7 @@ pub const Shared = struct {
 
     pub fn deinit(s: *Shared) void {
         if (s.relay) |h| h.destroy();
+        s.threads.deinit();
         s.sessions.deinit(s.gpa);
         if (s.visuals) |h| h.destroy();
         s.log.deinit();
