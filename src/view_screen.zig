@@ -83,7 +83,7 @@ pub fn draw(c: *ui.Context, s: *Screen, focused: bool) void {
         defer r.end();
         ui.richText(c, text, spans(c, s, y, starts), style());
     }
-    if (s.cursor_visible) {
+    if (s.cursor_visible and (!focused or cursorShown(c))) {
         const color = if (focused) theme.accent.alpha(0.75) else theme.muted.alpha(0.5);
         // It springs between cells, stretching toward where it goes —
         // squash and stretch, as a caret that means to be somewhere.
@@ -113,6 +113,16 @@ pub fn draw(c: *ui.Context, s: *Screen, focused: bool) void {
 
 /// The caret's spring between cells: quick, a slight overshoot.
 const cursor_spring = ui.Spring{ .response = 0.06, .damping = 0.85 };
+
+/// A terminal's cursor blink: half a second on, half a second off, and
+/// ask for the frame that turns it so an idle screen still blinks.
+fn cursorShown(c: *ui.Context) bool {
+    const period: f64 = 1.0;
+    const phase = @mod(c.time, period);
+    const rem: f32 = @floatCast(if (phase < period / 2) period / 2 - phase else period - phase);
+    c.frameIn(@max(0.01, rem));
+    return phase < period / 2;
+}
 
 /// At most this many of a program's scrolled-off lines show above it.
 const scrollback = 2000;

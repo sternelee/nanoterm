@@ -10,6 +10,8 @@ const session_mod = @import("session.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
 const binds = @import("binds.zig");
+const screen_mod = @import("screen.zig");
+const view_screen = @import("view_screen.zig");
 
 test "the smart input, through the real view" {
     const gpa = std.testing.allocator;
@@ -602,4 +604,35 @@ test "the caret stays at the typing point when the menu opens" {
     t.settle(1);
     try std.testing.expectEqualStrings("read @src/", s.input.text());
     try std.testing.expect(s.menu.open);
+}
+
+const CursorView = struct {
+    s: *screen_mod.Screen,
+    fn view(k: *@This(), c: *ui.Context) void {
+        view_screen.draw(c, k.s, true);
+    }
+};
+
+/// The block cursor: the only wide, tall quad a screen of blank cells draws.
+fn cursorQuads(t: *ui.Tester) usize {
+    var n: usize = 0;
+    for (t.instances.items) |inst| {
+        if (inst.kind == 0 and inst.rect[2] > 1 and inst.rect[2] < 30 and inst.rect[3] > 5 and inst.rect[3] < 30) n += 1;
+    }
+    return n;
+}
+
+test "a full-screen program's cursor blinks while its pane has focus" {
+    const gpa = std.testing.allocator;
+    const s = try screen_mod.Screen.create(gpa, 10, 3);
+    defer s.destroy();
+    var k: CursorView = .{ .s = s };
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&k, CursorView.view), .{ .width = 300, .height = 200 });
+    defer t.deinit();
+    try std.testing.expectEqual(@as(usize, 1), cursorQuads(&t));
+    t.advance(0.6);
+    try std.testing.expectEqual(@as(usize, 0), cursorQuads(&t));
+    t.advance(0.5);
+    try std.testing.expectEqual(@as(usize, 1), cursorQuads(&t));
 }
