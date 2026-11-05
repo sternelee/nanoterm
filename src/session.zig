@@ -275,6 +275,7 @@ pub const Session = struct {
             .menu = .init(gpa),
             .attachments = .{ .gpa = gpa, .uploads = std.fs.path.join(shared.arena, &.{ shared.home, "Library", "Application Support", "nanoterm", "uploads" }) catch "" },
             .which = shared.prefs.agent,
+            .model_choice = if (shared.prefs.model.len > 0) gpa.dupe(u8, shared.prefs.model) catch null else null,
         };
         shared.next_session += 1;
         shared.sessions.append(gpa, a) catch {};
@@ -619,6 +620,9 @@ pub const Session = struct {
         ag.env = a.shared.env_list;
         a.agent = ag;
         a.offerVisuals(ag);
+        if (a.model_choice) |m| {
+            if (a.which != .agent and a.which != .pi) ag.setPendingModel(m);
+        }
         if (a.which == .agent) {
             ag.startNative(a.cwd(), a.model_choice) catch |err| {
                 ag.status = .failed;

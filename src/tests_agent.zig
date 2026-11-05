@@ -5,6 +5,7 @@ const std = @import("std");
 const agent_mod = @import("agent.zig");
 const blocks = @import("blocks.zig");
 const proc = @import("proc.zig");
+const session_mod = @import("session.zig");
 
 fn pumpUntil(ctx: anytype, comptime done: fn (@TypeOf(ctx)) bool) !void {
     var waited: f64 = 0;
@@ -152,6 +153,75 @@ test "an agent's models, modes and slash commands" {
         }
     }.f);
     try std.testing.expectEqualStrings("smartest", a.config.find("model").?.choices[1].description);
+}
+
+test "a new session starts with the default model" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-default-model";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    shared.prefs.setModel("anthropic/claude-sonnet");
+    const s = try session_mod.Session.create(&shared, home);
+    defer s.destroy();
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet", s.model_choice.?);
+}
+
+/// An ACP agent whose model option is marked when the model chosen before
+/// its session opened arrives.
+const pending_fake =
+    \\import json, sys
+    \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+    \\model = {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sonnet",
+    \\         "options": [{"value": "sonnet", "name": "Sonnet"}, {"value": "opus", "name": "Opus"}]}
+    \\for line in sys.stdin:
+    \\    m = json.loads(line)
+    \\    method = m.get("method")
+    \\    if method == "initialize":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1}})
+    \\    elif method == "session/new":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1", "configOptions": [model]}})
+    \\    elif method == "session/set_config_option":
+    \\        p = m["params"]
+    \\        if p["configId"] == "model":
+    \\            model["currentValue"] = p["value"]
+    \\            if p["value"] == "opus": model["options"][1]["description"] = "applied at open"
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"configOptions": [model]}})
+    \\
+;
+
+test "a model chosen before an ACP session opens reaches it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir = "/tmp/nanoterm-test-pending-model";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/agent.py", .data = pending_fake });
+    var host: u8 = 0;
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .claude, dir);
+    defer a.destroy();
+    a.setPendingModel("opus");
+    try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", dir ++ "/agent.py" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            const model = x.config.find("model") orelse return false;
+            return x.status == .ready and std.mem.eql(u8, model.current, "opus") and model.choices[1].description.len > 0;
+        }
+    }.f);
+    try std.testing.expectEqualStrings("applied at open", a.config.find("model").?.choices[1].description);
 }
 
 /// Covers an ACP agent whose last line sits unflushed: the first answer arrives after the

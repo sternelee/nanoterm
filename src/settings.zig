@@ -24,6 +24,10 @@ pub const Prefs = struct {
     io: std.Io,
     path: []const u8 = "",
     agent: Which = .agent,
+    /// The model new sessions start with, only for the agent calls nanoterm
+    /// makes itself; empty leaves each agent's own choice. It is never
+    /// written to the agent's own settings.
+    model: []const u8 = "",
     zoom: f32 = 1,
     keys: @import("nanoui").ui.Keymap = .system,
     /// Coding agents at all: off, nanoterm is a terminal and nothing else
@@ -58,11 +62,12 @@ pub const Prefs = struct {
         p.path = std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "settings.json" }) catch "";
         const data = std.Io.Dir.cwd().readFileAlloc(io, p.path, gpa, .limited(64 * 1024)) catch return p;
         defer gpa.free(data);
-        const S = struct { agent: []const u8 = "agent", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1, relay: []const u8 = "off", relay_port: u16 = relay.default_port };
+        const S = struct { agent: []const u8 = "agent", model: []const u8 = "", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1, relay: []const u8 = "off", relay_port: u16 = relay.default_port };
         const parsed = std.json.parseFromSlice(S, gpa, data, .{ .ignore_unknown_fields = true }) catch return p;
         defer parsed.deinit();
         const v = parsed.value;
         p.agent = std.meta.stringToEnum(Which, v.agent) orelse .agent;
+        p.model = gpa.dupe(u8, v.model) catch "";
         p.zoom = std.math.clamp(v.zoom, 0.6, 2.4);
         p.keys = std.meta.stringToEnum(@TypeOf(p.keys), v.keys) orelse .system;
         p.agents = v.agents;
@@ -81,6 +86,7 @@ pub const Prefs = struct {
 
     pub fn deinit(p: *Prefs) void {
         p.telemetry.deinit();
+        if (p.model.len > 0) p.gpa.free(p.model);
         if (p.terminal_font.len > 0) p.gpa.free(p.terminal_font);
         if (p.theme.len > 0) p.gpa.free(p.theme);
     }
@@ -94,7 +100,7 @@ pub const Prefs = struct {
         if (p.path.len == 0) return;
         if (std.fs.path.dirname(p.path)) |dir| std.Io.Dir.cwd().createDirPath(p.io, dir) catch {};
         var buf: [512]u8 = undefined;
-        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"relay\": \"{s}\",\n  \"relay_port\": {d}\n}}\n", .{ @tagName(p.agent), p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.relay), p.relay_port }) catch return;
+        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"model\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"relay\": \"{s}\",\n  \"relay_port\": {d}\n}}\n", .{ @tagName(p.agent), p.model, p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.relay), p.relay_port }) catch return;
         std.Io.Dir.cwd().writeFile(p.io, .{ .sub_path = p.path, .data = json }) catch {};
     }
 
@@ -102,6 +108,17 @@ pub const Prefs = struct {
     pub fn setAgent(p: *Prefs, w: Which) void {
         if (p.agent == w) return;
         p.agent = w;
+        p.save();
+    }
+
+    /// The model new tabs and Thread tasks start with, for the calls
+    /// nanoterm itself makes; empty leaves each agent's own choice.
+    pub fn setModel(p: *Prefs, model: []const u8) void {
+        const trimmed = std.mem.trim(u8, model, " \t\r\n");
+        if (std.mem.eql(u8, p.model, trimmed)) return;
+        const kept = if (trimmed.len > 0) p.gpa.dupe(u8, trimmed) catch return else "";
+        if (p.model.len > 0) p.gpa.free(p.model);
+        p.model = kept;
         p.save();
     }
 
@@ -207,6 +224,7 @@ test "settings are kept across launches" {
         defer p.deinit();
         try std.testing.expectEqual(Which.agent, p.agent);
         p.setAgent(.codex);
+        p.setModel("openai/gpt-5");
         p.setZoom(1.2);
         p.setKeys(.vim);
         p.setAgents(false);
@@ -220,6 +238,7 @@ test "settings are kept across launches" {
     var p: Prefs = .init(gpa, io, arena.allocator(), home, &env);
     defer p.deinit();
     try std.testing.expectEqual(Which.codex, p.agent);
+    try std.testing.expectEqualStrings("openai/gpt-5", p.model);
     try std.testing.expectApproxEqAbs(@as(f32, 1.2), p.zoom, 0.001);
     try std.testing.expectEqual(@import("nanoui").ui.Keymap.vim, p.keys);
     try std.testing.expect(!p.agents);

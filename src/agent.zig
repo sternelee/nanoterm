@@ -180,6 +180,8 @@ pub const Agent = struct {
     env: []const []const u8 = &.{},
     /// What the agent lets the user choose: model, mode, slash commands.
     config: agent_config.Config,
+    /// A model chosen before an ACP session opened, applied once it has.
+    pending_model: ?[]u8 = null,
     /// The SSH host its pane is on, if it is: its commands and files
     /// are the host's (agent_remote.zig).
     remote: ?@import("agent_remote.zig").Remote = null,
@@ -214,6 +216,7 @@ pub const Agent = struct {
         a.client.deinit();
         a.pi_client.deinit();
         if (a.pi_wanted) |w| a.gpa.free(w);
+        if (a.pending_model) |m| a.gpa.free(m);
         freePiModel(a.gpa, a.pi_model);
         for (a.pi_models.items) |m| {
             a.gpa.free(m.value);
@@ -396,6 +399,9 @@ pub const Agent = struct {
         const id = acp.str(result orelse .null, "sessionId") orelse return a.fail("no session id", .{});
         a.session = a.gpa.dupe(u8, id) catch return;
         if (acp.obj(result.?, "configOptions")) |opts| a.config.setOptions(opts);
+        // A model chosen before the session opened goes first, so the
+        // turn already queued behind it runs on that model.
+        a.applyPendingModel();
         a.status = .ready;
         if (a.queued) |q| {
             a.queued = null;
@@ -661,10 +667,35 @@ pub const Agent = struct {
             a.app.changed(a.app.ctx);
             return;
         }
+        if (std.mem.eql(u8, id, "model")) a.setPendingModel(value);
         const s = a.session orelse return;
         a.config.setCurrent(id, value);
         a.client.request("session/set_config_option", .{ .sessionId = s, .configId = id, .value = value }, a, onOptionSet) catch {};
         a.app.changed(a.app.ctx);
+    }
+
+    /// A model chosen before an ACP session opened: kept until the session
+    /// is there, and ignored by an agent with no model option of its own.
+    pub fn setPendingModel(a: *Agent, value: []const u8) void {
+        const copy = a.gpa.dupe(u8, value) catch return;
+        if (a.pending_model) |old| a.gpa.free(old);
+        a.pending_model = copy;
+    }
+
+    fn applyPendingModel(a: *Agent) void {
+        const wanted = a.pending_model orelse return;
+        const o = a.config.find("model") orelse return;
+        // The default may name the model either way the picker shows it.
+        var value = wanted;
+        for (o.choices) |ch| {
+            if (!std.mem.eql(u8, ch.name, wanted)) continue;
+            value = ch.value;
+            break;
+        }
+        if (std.mem.eql(u8, o.current, value)) return;
+        const s = a.session orelse return;
+        a.config.setCurrent(o.id, value);
+        a.client.request("session/set_config_option", .{ .sessionId = s, .configId = o.id, .value = value }, a, onOptionSet) catch {};
     }
 
     /// Pi's own commands: `set_model` names a provider and an id,
