@@ -1,5 +1,5 @@
 //! nanoterm's look: palettes in the shape of Harness's defaults,
-//! CodeGraff Dark and CodeGraff Light (warm neutrals, an amber accent),
+//! a warm dark and its light (warm neutrals, an amber accent),
 //! with their roles derived as Harness derives them (hover and borders
 //! from white or black, the selection from the accent). Around them, a
 //! shelf of named themes in the manner of Metalterm's — soot and orange,
@@ -12,7 +12,7 @@ const Color = nanoui.ui.Color;
 
 pub const Appearance = enum { dark, light };
 
-/// A palette's seeds, as Harness's `codegraff_dark`/`codegraff_light`.
+/// A palette's seeds, as Harness's default pair has them.
 const Seeds = struct {
     dark: bool,
     background: u24,
@@ -39,12 +39,12 @@ pub const Entry = struct {
     seeds: Seeds,
 };
 
-/// The shelf. CodeGraff first — they are the house pair — then the
+/// The shelf. The house pair first — Dark and Light — then the
 /// rest, each of which stands on its own in light of its seeds' own
 /// `dark` flag, whatever the system is doing.
 pub const list = [_]Entry{
-    .{ .id = "codegraff-dark", .name = "CodeGraff Dark", .note = "warm neutrals, amber accent", .seeds = codegraff_dark },
-    .{ .id = "codegraff-light", .name = "CodeGraff Light", .note = "paper, warm white", .seeds = codegraff_light },
+    .{ .id = "dark", .name = "Dark", .note = "warm neutrals, amber accent", .seeds = house_dark },
+    .{ .id = "light", .name = "Light", .note = "paper, warm white", .seeds = house_light },
     .{ .id = "soot", .name = "Soot", .note = "soot, orange accent", .seeds = soot },
     .{ .id = "soft-oled", .name = "Soft OLED", .note = "a black dome, panels off", .seeds = soft_oled },
     .{ .id = "nocturne", .name = "Nocturne", .note = "velvet indigo, lavender", .seeds = nocturne },
@@ -58,7 +58,7 @@ pub const list = [_]Entry{
 pub var chosen: []const u8 = "";
 
 pub fn select(id: []const u8) void {
-    chosen = if (find(id) == null) "" else id;
+    chosen = if (find(id)) |e| e.id else "";
 }
 
 /// The entry `id` names, if it is on the shelf.
@@ -66,10 +66,14 @@ pub fn find(id: []const u8) ?*const Entry {
     for (&list) |*e| {
         if (std.mem.eql(u8, e.id, id)) return e;
     }
+    // The house pair's ids before it was named for itself: a theme saved
+    // by an earlier nanoterm still names the palette it chose.
+    if (std.mem.eql(u8, id, "codegraff-dark")) return find("dark");
+    if (std.mem.eql(u8, id, "codegraff-light")) return find("light");
     return null;
 }
 
-const codegraff_dark: Seeds = .{
+const house_dark: Seeds = .{
     .dark = true,
     .background = 0x16140f,
     .shell = 0x1f1c16,
@@ -85,7 +89,7 @@ const codegraff_dark: Seeds = .{
     .syntax = .{ 0x5c564b, 0xe8a33d, 0x7fa86b, 0xd9a441, 0xedeae2, 0xe8a33d },
 };
 
-const codegraff_light: Seeds = .{
+const house_light: Seeds = .{
     .dark = false,
     .background = 0xfaf8f3,
     .shell = 0xf0ece3,
@@ -282,7 +286,7 @@ const Palette = struct {
     ansi: [16]Color,
 };
 
-const default = palette(codegraff_dark);
+const default = palette(house_dark);
 
 /// Puts the chosen theme's — or, with none chosen, appearance `a`'s —
 /// palette in place.
@@ -329,7 +333,7 @@ pub fn apply(a: Appearance) void {
 /// appearance asks for.
 fn seeds(a: Appearance) Seeds {
     if (find(chosen)) |e| return e.seeds;
-    return if (a == .dark) codegraff_dark else codegraff_light;
+    return if (a == .dark) house_dark else house_light;
 }
 
 /// A palette, from its seeds.
@@ -407,4 +411,14 @@ pub fn ui() nanoui.ui.Theme {
     t.font = font;
     t.mono_font = mono_font;
     return t;
+}
+
+test "the house pair's old ids still name their themes" {
+    const t = std.testing;
+    try t.expect(find("codegraff-dark") == &list[0]);
+    try t.expect(find("codegraff-light") == &list[1]);
+    // A theme saved under an old id is chosen under its current name.
+    select("codegraff-dark");
+    try t.expectEqualStrings("dark", chosen);
+    select("");
 }
