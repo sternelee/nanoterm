@@ -209,14 +209,15 @@ pub const Shell = struct {
         s.sendLine(block.command);
     }
 
-    /// Sends a command line and Return. One of several lines goes as a
-    /// paste (bracketed, as zsh asks at its prompt): zsh takes it whole, one
-    /// command and one block, not a line at a time.
+    /// Sends a command line and Return. Several lines, or one longer than
+    /// the terminal's input queue, go as a paste (bracketed, as zsh asks at
+    /// its prompt): zsh takes it whole, one command and one block, rather
+    /// than a line at a time or up to its line editor's limit.
     fn sendLine(s: *Shell, text: []const u8) void {
-        const lines = std.mem.indexOfScalar(u8, text, '\n') != null;
-        if (lines) s.process.send("\x1b[200~");
+        const paste = std.mem.indexOfScalar(u8, text, '\n') != null or text.len > 1024;
+        if (paste) s.process.send("\x1b[200~");
         s.process.send(text);
-        if (lines) s.process.send("\x1b[201~");
+        if (paste) s.process.send("\x1b[201~");
         s.process.send(enter);
     }
 
