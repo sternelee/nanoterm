@@ -58,7 +58,7 @@ fn stickyHeader(c: *ui.Context, s: *Session, id: u64) void {
         c.changed = true;
     };
     ui.text(c, "❯", .{ .size = 12, .weight = .bold, .mono = true, .color = theme.accent });
-    ui.text(c, b.command, .{ .size = 12.5, .weight = .semibold, .mono = true });
+    ui.text(c, b.label orelse b.command, .{ .size = 12.5, .weight = .semibold, .mono = true });
     ui.spacer(c);
     if (b.state == .running) {
         ui.text(c, view_block.spin(c), .{ .size = 12, .mono = true, .color = theme.accent });

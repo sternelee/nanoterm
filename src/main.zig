@@ -104,7 +104,8 @@ pub fn main(init: std.process.Init) !void {
     const settings = @import("settings.zig");
     const mode: settings.Relay = if (relay_port != null)
         (if (shared.prefs.relay == .off) .lan else shared.prefs.relay)
-    else shared.prefs.relay;
+    else
+        shared.prefs.relay;
     const port: ?u16 = relay_port orelse (if (shared.prefs.relay != .off) shared.prefs.relay_port else null);
     if (port) |p| {
         shared.setRelay(mode, p) catch |err| {
@@ -126,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
     });
     const first = try w.newTab(start_dir);
     if (which) |a| first.which = a;
-    try first.queue.appendSlice(init.gpa, runs.items);
+    for (runs.items) |cmd| first.enqueue(cmd, null);
     // Files the system opens with nanoterm: a tab each (open_files.zig).
     app.onOpenFiles(&w, @import("open_files.zig").open);
     shared.threads.bind(w.threadsHost(), app);

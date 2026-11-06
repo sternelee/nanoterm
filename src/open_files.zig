@@ -22,7 +22,7 @@ pub fn open(ctx: *anyopaque, paths: []const []const u8) void {
         const s = w.newTab(dir) catch continue;
         if (!is_dir) {
             const cmd = catCommand(arena, std.fs.path.basename(p)) catch continue;
-            s.queue.append(w.shared.gpa, cmd) catch {};
+            s.enqueue(cmd, null);
         }
         opened += 1;
     }

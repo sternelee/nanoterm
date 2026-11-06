@@ -155,16 +155,30 @@ test "the sidebar: watched Github threads, their proposal and Run" {
     try std.testing.expectEqual(th.threads.items[0].session, w.tab().session().id);
     const s = w.tab().session();
     var direct = false;
-    for (s.queue.items) |q| {
-        if (std.mem.startsWith(u8, q, "login=\"$(gh api user") and std.mem.indexOf(u8, q, "gh api graphql") != null and std.mem.indexOf(u8, q, "nanoterm-fold") != null) direct = true;
+    var labeled = false;
+    for (s.queue.items, s.queue_labels.items) |q, maybe_label| {
+        if (std.mem.startsWith(u8, q, "login=\"$(gh api user") and std.mem.indexOf(u8, q, "gh api graphql") != null and std.mem.indexOf(u8, q, "nanoterm-fold") != null) {
+            direct = true;
+            if (maybe_label) |label| {
+                try std.testing.expectEqualStrings("gh owner/repo#7", label);
+                labeled = true;
+            }
+        }
     }
     for (s.timeline.items) |entry| switch (entry) {
         .block => |b| {
-            if (std.mem.startsWith(u8, b.command, "login=\"$(gh api user") and std.mem.indexOf(u8, b.command, "gh api graphql") != null and std.mem.indexOf(u8, b.command, "nanoterm-fold") != null) direct = true;
+            if (std.mem.startsWith(u8, b.command, "login=\"$(gh api user") and std.mem.indexOf(u8, b.command, "gh api graphql") != null and std.mem.indexOf(u8, b.command, "nanoterm-fold") != null) {
+                direct = true;
+                if (b.label) |label| {
+                    try std.testing.expectEqualStrings("gh owner/repo#7", label);
+                    labeled = true;
+                }
+            }
         },
         .turn => {},
     };
     try std.testing.expect(direct);
+    try std.testing.expect(labeled);
 }
 
 test "the sidebar: a thread waits for Read when agents start by hand" {

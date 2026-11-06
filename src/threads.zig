@@ -254,7 +254,7 @@ pub const Config = struct {
 /// agent may read; a working one edits this checkout, and only this one.
 pub const Mode = enum { read, work };
 
-fn noDetail(_: *anyopaque, _: []const u8, _: u64, _: []const u8) ?u64 {
+fn noDetail(_: *anyopaque, _: []const u8, _: u64, _: []const u8, _: []const u8) ?u64 {
     return null;
 }
 
@@ -264,8 +264,9 @@ pub const Host = struct {
     start: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, mode: Mode, heading: []const u8, prompt: []const u8) ?u64,
     /// Ask the tab's agent a follow-up; false when the tab is gone.
     ask: *const fn (ctx: *anyopaque, session: u64, mode: Mode, heading: []const u8, prompt: []const u8) bool,
-    /// A tab showing the thread's Github detail; its session id, or null.
-    detail: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, command: []const u8) ?u64 = noDetail,
+    /// A tab showing the thread's Github detail; `label` is the short line
+    /// its block shows in place of `command`. Its session id, or null.
+    detail: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, label: []const u8, command: []const u8) ?u64 = noDetail,
     /// Focus the thread's tab.
     focus: *const fn (ctx: *anyopaque, session: u64) bool,
     /// Close the thread's tab without asking, as a finished thread has no
@@ -845,10 +846,13 @@ pub const Watcher = struct {
             if (h.alive(h.ctx, t.session)) return false;
             t.session = 0;
         }
-        const p = self.projectFor(threadRepo(t)) orelse return false;
+        const repo = threadRepo(t);
+        const p = self.projectFor(repo) orelse return false;
         const command = self.detailCommand(t, p) orelse return false;
         defer self.gpa.free(command);
-        t.session = h.detail(h.ctx, p.cwd, t.id, command) orelse return false;
+        const label = std.fmt.allocPrint(self.gpa, "gh {s}#{d}", .{ repo, t.number }) catch return false;
+        defer self.gpa.free(label);
+        t.session = h.detail(h.ctx, p.cwd, t.id, label, command) orelse return false;
         return true;
     }
 
@@ -1999,6 +2003,8 @@ const TestHost = struct {
     var detail_cwd_len: usize = 0;
     var detail_command_buf: [8192]u8 = undefined;
     var detail_command_len: usize = 0;
+    var detail_label_buf: [256]u8 = undefined;
+    var detail_label_len: usize = 0;
     var starts: usize = 0;
     var details: usize = 0;
     var closes: usize = 0;
@@ -2009,6 +2015,7 @@ const TestHost = struct {
         cwd_len = 0;
         detail_cwd_len = 0;
         detail_command_len = 0;
+        detail_label_len = 0;
         starts = 0;
         details = 0;
         closes = 0;
@@ -2027,6 +2034,10 @@ const TestHost = struct {
         return detail_command_buf[0..detail_command_len];
     }
 
+    fn lastDetailLabel() []const u8 {
+        return detail_label_buf[0..detail_label_len];
+    }
+
     fn start(_: *anyopaque, cwd: []const u8, _: u64, _: Mode, _: []const u8, _: []const u8) ?u64 {
         starts += 1;
         cwd_len = @min(cwd.len, cwd_buf.len);
@@ -2034,10 +2045,12 @@ const TestHost = struct {
         return 7 + starts;
     }
 
-    fn detail(_: *anyopaque, cwd: []const u8, _: u64, command: []const u8) ?u64 {
+    fn detail(_: *anyopaque, cwd: []const u8, _: u64, label: []const u8, command: []const u8) ?u64 {
         details += 1;
         detail_cwd_len = @min(cwd.len, detail_cwd_buf.len);
         @memcpy(detail_cwd_buf[0..detail_cwd_len], cwd[0..detail_cwd_len]);
+        detail_label_len = @min(label.len, detail_label_buf.len);
+        @memcpy(detail_label_buf[0..detail_label_len], label[0..detail_label_len]);
         detail_command_len = @min(command.len, detail_command_buf.len);
         @memcpy(detail_command_buf[0..detail_command_len], command[0..detail_command_len]);
         return 90 + details;
@@ -2344,6 +2357,7 @@ test "threads: clicking a thread without a tab opens its Github detail" {
     try std.testing.expectEqual(@as(u64, 91), t.session);
     try std.testing.expectEqual(@as(usize, 1), TestHost.details);
     try std.testing.expectEqualStrings(home ++ "/repo", TestHost.lastDetailCwd());
+    try std.testing.expectEqualStrings("gh owner/repo#7", TestHost.lastDetailLabel());
     const command = TestHost.lastDetailCommand();
     try std.testing.expect(std.mem.startsWith(u8, command, "login=\"$(gh api user"));
     try std.testing.expect(std.mem.indexOf(u8, command, "gh api graphql") != null);
@@ -2375,6 +2389,7 @@ test "threads: a pull request's detail folds other comments and drops resolved o
     w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .detail = TestHost.detail, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
     w.absorb(.{ .key = "pr:owner/repo#9", .kind = .pr, .number = 9, .title = "Review", .url = "", .fingerprint = "1" }, 10);
     try std.testing.expect(w.openDetail(w.threads.items[0].id));
+    try std.testing.expectEqualStrings("gh owner/repo#9", TestHost.lastDetailLabel());
     const command = TestHost.lastDetailCommand();
     try std.testing.expect(std.mem.startsWith(u8, command, "login=\"$(gh api user"));
     try std.testing.expect(std.mem.indexOf(u8, command, "pullRequest(number:$number)") != null);

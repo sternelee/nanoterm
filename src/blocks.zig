@@ -25,6 +25,10 @@ pub const fold_end = "~~~ nanoterm-fold-end ~~~";
 pub const Block = struct {
     id: u64,
     source: Source,
+    /// What the header shows instead of `command` when a command is too
+    /// long to read (a thread detail's gh query): the command itself is
+    /// still what runs, copies, and repeats.
+    label: ?[]u8 = null,
     command: []u8,
     cwd: []u8,
     git_branch: []u8,
@@ -71,6 +75,7 @@ pub const Block = struct {
     }
 
     pub fn destroy(b: *Block, gpa: std.mem.Allocator) void {
+        if (b.label) |l| gpa.free(l);
         gpa.free(b.command);
         gpa.free(b.cwd);
         gpa.free(b.git_branch);

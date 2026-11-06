@@ -105,7 +105,11 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
         const r = ui.div(c).row().gap(8).itemsCenter();
         defer r.end();
         ui.text(c, if (b.source == .agent) "⚡" else "❯", .{ .size = 13, .weight = .bold, .color = if (b.source == .agent) theme.agent else theme.accent, .mono = true });
-        ui.richText(c, b.command, find.spansFor(c.alloc(), f, &.{}, b.id, find.command), .{ .size = 13, .weight = .semibold, .mono = true, .wrap = true });
+        if (b.label) |label| {
+            ui.text(c, label, .{ .size = 13, .weight = .semibold, .mono = true, .wrap = true });
+        } else {
+            ui.richText(c, b.command, find.spansFor(c.alloc(), f, &.{}, b.id, find.command), .{ .size = 13, .weight = .semibold, .mono = true, .wrap = true });
+        }
     }
     output(c, app, b, f);
     if (!nested) @import("view_remote.zig").bar(c, app, b);

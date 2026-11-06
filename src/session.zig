@@ -242,6 +242,9 @@ pub const Session = struct {
     /// then the prompt given with --ask.
     queue: std.ArrayList([]const u8) = .empty,
     queued_ask: ?[]const u8 = null,
+    /// The header label beside each queued command above, when the command
+    /// is too long to show; `null` for every ordinary one.
+    queue_labels: std.ArrayList(?[]const u8) = .empty,
     /// Agents switched away from: their turns stay in the timeline.
     retired: std.ArrayList(*agent_mod.Agent) = .empty,
     /// A turn to bring into view (the palette jumped to it).
@@ -329,6 +332,7 @@ pub const Session = struct {
         a.attachments.deinit();
         if (a.model_choice) |m| a.gpa.free(m);
         a.branch_for.deinit(a.gpa);
+        a.queue_labels.deinit(a.gpa);
         a.queue.deinit(a.gpa);
     }
 
@@ -340,7 +344,7 @@ pub const Session = struct {
 
     /// What the tab shows: the command running, else the directory's name.
     pub fn title(a: *Session) []const u8 {
-        if (a.shell.current) |b| return b.command;
+        if (a.shell.current) |b| return b.label orelse b.command;
         const dir = a.cwd();
         if (std.mem.eql(u8, dir, a.home)) return "~";
         return std.fs.path.basename(dir);
@@ -362,12 +366,23 @@ pub const Session = struct {
         a.shared.redraw();
     }
 
+    /// A command to run once the shell is ready; `label`, when set, is what
+    /// its block's header shows instead of the command. Both must live in
+    /// the session's arena.
+    pub fn enqueue(a: *Session, command: []const u8, label: ?[]const u8) void {
+        a.queue_labels.append(a.gpa, label) catch return;
+        a.queue.append(a.gpa, command) catch {
+            _ = a.queue_labels.orderedRemove(a.queue_labels.items.len - 1);
+        };
+    }
+
     /// Runs the next queued command once the shell waits at its prompt.
     fn pump(a: *Session) void {
         if (a.shell.phase != .ready or a.shell.busy()) return;
         if (a.queue.items.len > 0) {
             const cmd = a.queue.orderedRemove(0);
-            a.run(cmd);
+            const label = a.queue_labels.orderedRemove(0);
+            a.runLabeled(label, cmd);
         } else if (a.queued_ask) |q| {
             a.queued_ask = null;
             a.lock = .agent;
@@ -419,9 +434,20 @@ pub const Session = struct {
     }
 
     pub fn newBlock(a: *Session, source: blocks.Source, command: []const u8, dir: []const u8) ?*blocks.Block {
+        return a.newBlockLabeled(source, null, command, dir);
+    }
+
+    /// `label` replaces the command in the block's header, not in what runs.
+    pub fn newBlockLabeled(a: *Session, source: blocks.Source, label: ?[]const u8, command: []const u8, dir: []const u8) ?*blocks.Block {
         var buf: [128]u8 = undefined;
         const branch = blocks.gitBranch(a.io, &buf, dir);
         const b = blocks.Block.create(a.gpa, a.next_id, source, command, dir, branch) catch return null;
+        if (label) |text| {
+            b.label = a.gpa.dupe(u8, text) catch {
+                b.destroy(a.gpa);
+                return null;
+            };
+        }
         a.next_id += 1;
         a.all_blocks.append(a.gpa, b) catch {
             b.destroy(a.gpa);
@@ -498,11 +524,21 @@ pub const Session = struct {
     }
 
     pub fn run(a: *Session, command: []const u8) void {
+        a.runLabeled(null, command);
+    }
+
+    /// A command whose block shows `label` instead of the command itself;
+    /// the command still runs, copies, and repeats unchanged.
+    pub fn runAs(a: *Session, label: []const u8, command: []const u8) void {
+        a.runLabeled(label, command);
+    }
+
+    fn runLabeled(a: *Session, label: ?[]const u8, command: []const u8) void {
         // On a set-up SSH host: a block of its own, run there.
         if (a.shell.remoteReady()) {
             const r = a.shell.remote.?;
             const where = std.fmt.allocPrint(a.arena, "{s}:{s}", .{ r.host, r.cwd.items }) catch return;
-            const b = a.newBlock(.shell, command, where) orelse return;
+            const b = a.newBlockLabeled(.shell, label, command, where) orelse return;
             a.timeline.append(a.gpa, .{ .block = b }) catch return;
             a.pinLast();
             a.shell.submitRemote(b);
@@ -511,7 +547,9 @@ pub const Session = struct {
         // The shell is still starting (a new tab): run it at the first
         // prompt, or its marks would end the block before it starts.
         if (a.shell.phase == .starting) {
-            a.queue.append(a.gpa, a.arena.dupe(u8, command) catch return) catch {};
+            const copy = a.arena.dupe(u8, command) catch return;
+            const shown = if (label) |text| (a.arena.dupe(u8, text) catch return) else null;
+            a.enqueue(copy, shown);
             return;
         }
         if (a.shell.busy()) {
@@ -522,7 +560,7 @@ pub const Session = struct {
         }
         if (std.mem.eql(u8, command, "clear")) return a.clear();
         a.watchSignIn(command);
-        const b = a.newBlock(.shell, command, a.cwd()) orelse return;
+        const b = a.newBlockLabeled(.shell, label, command, a.cwd()) orelse return;
         a.timeline.append(a.gpa, .{ .block = b }) catch return;
         a.pinLast();
         a.selected = null;

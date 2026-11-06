@@ -216,7 +216,7 @@ fn open(w: *Workspace, e: palette.Entry) void {
             // A new tab connecting: it runs once its shell is ready.
             const tab = w.newTab(s.cwd()) catch return;
             const cmd = std.fmt.allocPrint(tab.arena, "ssh {s}", .{h}) catch return;
-            tab.queue.append(tab.gpa, cmd) catch {};
+            tab.enqueue(cmd, null);
         },
         .past => |i| {
             const x = w.shared.log.entries.items[i];
