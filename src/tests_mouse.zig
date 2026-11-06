@@ -180,7 +180,7 @@ test "a block folds a marked output section until clicked" {
     const s = try w.newTab(home);
     const b = try @import("blocks.zig").Block.create(gpa, 1, .shell, "printf", home, "");
     defer b.destroy(gpa);
-    b.label = try gpa.dupe(u8, "gh owner/repo#7");
+    b.label = try gpa.dupe(u8, "gh issue view --repo owner/repo 7");
     try b.output.feed("intro\n~~~ nanoterm-fold: 2 other comments ~~~\nboring one\nboring two\n~~~ nanoterm-fold-end ~~~\nmention me\n");
     b.finish(0);
     try s.timeline.append(gpa, .{ .block = b });
@@ -189,7 +189,7 @@ test "a block folds a marked output section until clicked" {
     try t.init(gpa, .init(&w, view.view), .{ .width = 800, .height = 600, .theme = theme.ui() });
     defer t.deinit();
     t.settle(1);
-    try std.testing.expect(t.hasText("gh owner/repo#7"));
+    try std.testing.expect(t.hasText("gh issue view --repo owner/repo 7"));
     try std.testing.expect(!t.hasText("printf"));
     try std.testing.expect(t.hasText("intro"));
     try std.testing.expect(t.hasText("Show 2 other comments"));

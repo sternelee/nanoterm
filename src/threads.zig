@@ -821,8 +821,9 @@ pub const Watcher = struct {
         const pr_query =
             "query($owner:String!,$repo:String!,$number:Int!){" ++
             "repository(owner:$owner,name:$repo){pullRequest(number:$number){" ++
-            "title url body comments(first:100){nodes{body createdAt url author{login}}} " ++
-            "reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{body createdAt url path author{login}}}}}}}}";
+            "title url body comments(first:100){nodes{body createdAt url author{login}}}" ++
+            "reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{body createdAt url path author{login}}}}}" ++
+            "}}}";
         const pr_jq =
             defs ++ " .data.repository.pullRequest as $root | (([$root.comments.nodes[] | normalized] + " ++
             "[$root.reviewThreads.nodes[] | select(.isResolved | not) | .comments.nodes[] | normalized]) | sort_by(.createdAt)) as $all | " ++ output;
@@ -850,7 +851,10 @@ pub const Watcher = struct {
         const p = self.projectFor(repo) orelse return false;
         const command = self.detailCommand(t, p) orelse return false;
         defer self.gpa.free(command);
-        const label = std.fmt.allocPrint(self.gpa, "gh {s}#{d}", .{ repo, t.number }) catch return false;
+        const label = if (t.kind == .issue)
+            std.fmt.allocPrint(self.gpa, "gh issue view --repo {s} {d}", .{ repo, t.number }) catch return false
+        else
+            std.fmt.allocPrint(self.gpa, "gh pr view --repo {s} {d}", .{ repo, t.number }) catch return false;
         defer self.gpa.free(label);
         t.session = h.detail(h.ctx, p.cwd, t.id, label, command) orelse return false;
         return true;
@@ -2357,7 +2361,7 @@ test "threads: clicking a thread without a tab opens its Github detail" {
     try std.testing.expectEqual(@as(u64, 91), t.session);
     try std.testing.expectEqual(@as(usize, 1), TestHost.details);
     try std.testing.expectEqualStrings(home ++ "/repo", TestHost.lastDetailCwd());
-    try std.testing.expectEqualStrings("gh owner/repo#7", TestHost.lastDetailLabel());
+    try std.testing.expectEqualStrings("gh issue view --repo owner/repo 7", TestHost.lastDetailLabel());
     const command = TestHost.lastDetailCommand();
     try std.testing.expect(std.mem.startsWith(u8, command, "login=\"$(gh api user"));
     try std.testing.expect(std.mem.indexOf(u8, command, "gh api graphql") != null);
@@ -2389,7 +2393,7 @@ test "threads: a pull request's detail folds other comments and drops resolved o
     w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .detail = TestHost.detail, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
     w.absorb(.{ .key = "pr:owner/repo#9", .kind = .pr, .number = 9, .title = "Review", .url = "", .fingerprint = "1" }, 10);
     try std.testing.expect(w.openDetail(w.threads.items[0].id));
-    try std.testing.expectEqualStrings("gh owner/repo#9", TestHost.lastDetailLabel());
+    try std.testing.expectEqualStrings("gh pr view --repo owner/repo 9", TestHost.lastDetailLabel());
     const command = TestHost.lastDetailCommand();
     try std.testing.expect(std.mem.startsWith(u8, command, "login=\"$(gh api user"));
     try std.testing.expect(std.mem.indexOf(u8, command, "pullRequest(number:$number)") != null);

@@ -160,7 +160,7 @@ test "the sidebar: watched Github threads, their proposal and Run" {
         if (std.mem.startsWith(u8, q, "login=\"$(gh api user") and std.mem.indexOf(u8, q, "gh api graphql") != null and std.mem.indexOf(u8, q, "nanoterm-fold") != null) {
             direct = true;
             if (maybe_label) |label| {
-                try std.testing.expectEqualStrings("gh owner/repo#7", label);
+                try std.testing.expectEqualStrings("gh issue view --repo owner/repo 7", label);
                 labeled = true;
             }
         }
@@ -170,7 +170,7 @@ test "the sidebar: watched Github threads, their proposal and Run" {
             if (std.mem.startsWith(u8, b.command, "login=\"$(gh api user") and std.mem.indexOf(u8, b.command, "gh api graphql") != null and std.mem.indexOf(u8, b.command, "nanoterm-fold") != null) {
                 direct = true;
                 if (b.label) |label| {
-                    try std.testing.expectEqualStrings("gh owner/repo#7", label);
+                    try std.testing.expectEqualStrings("gh issue view --repo owner/repo 7", label);
                     labeled = true;
                 }
             }
