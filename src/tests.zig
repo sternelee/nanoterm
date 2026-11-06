@@ -44,6 +44,7 @@ test {
     _ = @import("agent_fx.zig");
     _ = @import("agent_launch.zig");
     _ = @import("threads.zig");
+    _ = @import("gates.zig");
     _ = @import("pi.zig");
     _ = @import("tests_agent_native.zig");
     _ = @import("tests_settings.zig");
@@ -320,6 +321,135 @@ test "an ACP agent: messages, a terminal as a block, a permission" {
     };
     try std.testing.expect(tool_linked);
     try std.testing.expectEqualStrings(" got 'from the agent\\n' exit 0 answer yes", message);
+}
+
+const gated_agent =
+    \\import json, sys
+    \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+    \\def recv():
+    \\    line = sys.stdin.readline()
+    \\    return json.loads(line) if line else None
+    \\while True:
+    \\    m = recv()
+    \\    if m is None: break
+    \\    method = m.get("method")
+    \\    if method == "initialize":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    \\    elif method == "session/new":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    \\    elif method == "session/prompt":
+    \\        pid = m["id"]
+    \\        send({"jsonrpc": "2.0", "id": 100, "method": "session/request_permission", "params": {"sessionId": "s1", "toolCall": {"title": "Run command: git push origin main", "kind": "execute"}, "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}, {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}})
+    \\        answer = recv()["result"]["outcome"].get("optionId")
+    \\        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "answer " + str(answer)}}}})
+    \\        send({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "end_turn"}})
+    \\
+;
+
+test "an ACP agent: a reading turn's gate refuses what leaves the checkout" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = try tempHome(io, arena, "gated");
+    const script = try std.fs.path.join(arena, &.{ home, "gated_agent.py" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = script, .data = gated_agent });
+    var host: Host = .{ .gpa = gpa };
+    defer {
+        for (host.made.items) |b| b.destroy(gpa);
+        host.made.deinit(gpa);
+    }
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .claude, home);
+    defer a.destroy();
+    a.env = &.{"PATH=/usr/bin:/bin"};
+    // A watched thread's reading turn: nobody is at the keyboard to answer.
+    a.guard = .read;
+    try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", script }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
+    try a.prompt("push it");
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            const t = x.current() orelse return false;
+            return t.done;
+        }
+    }.f);
+    const t = a.current().?;
+    var message: []const u8 = "";
+    var refused = false;
+    for (t.items.items) |it| switch (it) {
+        .text => |l| message = l.items,
+        // The refusal is kept as an answered question: the person sees what
+        // the agent wanted and why it did not happen.
+        .permission => |p| {
+            try std.testing.expect(p.chosen != null);
+            const why = p.options[p.chosen.?].name;
+            refused = std.mem.indexOf(u8, why, "only reads") != null;
+        },
+        else => {},
+    };
+    try std.testing.expect(refused);
+    try std.testing.expectEqualStrings("answer no", message);
+}
+
+const terminal_agent =
+    \\import json, sys
+    \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+    \\def recv():
+    \\    line = sys.stdin.readline()
+    \\    return json.loads(line) if line else None
+    \\while True:
+    \\    m = recv()
+    \\    if m is None: break
+    \\    method = m.get("method")
+    \\    if method == "initialize":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    \\    elif method == "session/new":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    \\    elif method == "session/prompt":
+    \\        pid = m["id"]
+    \\        send({"jsonrpc": "2.0", "id": 200, "method": "terminal/create", "params": {"sessionId": "s1", "command": "git", "args": ["push", "origin", "main"]}})
+    \\        answer = recv()
+    \\        said = "error" in answer
+    \\        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "terminal " + str(said)}}}})
+    \\        send({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": "end_turn"}})
+    \\
+;
+
+test "an ACP agent: a reading turn's terminal is held to the same gate" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = try tempHome(io, arena, "gated-terminal");
+    const script = try std.fs.path.join(arena, &.{ home, "terminal_agent.py" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = script, .data = terminal_agent });
+    var host: Host = .{ .gpa = gpa };
+    defer {
+        for (host.made.items) |b| b.destroy(gpa);
+        host.made.deinit(gpa);
+    }
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .claude, home);
+    defer a.destroy();
+    a.env = &.{"PATH=/usr/bin:/bin"};
+    // A watched thread's reading turn asks for a terminal instead of permission:
+    // the gate answers it, and no command is run.
+    a.guard = .read;
+    try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", script }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
+    try a.prompt("push it");
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            const t = x.current() orelse return false;
+            return t.done;
+        }
+    }.f);
+    const t = a.current().?;
+    var message: []const u8 = "";
+    for (t.items.items) |it| {
+        if (it == .text) message = it.text.items;
+    }
+    try std.testing.expectEqualStrings("terminal True", message);
+    try std.testing.expectEqual(@as(usize, 0), host.made.items.len);
 }
 
 const ws_mod = @import("workspace.zig");

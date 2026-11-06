@@ -742,6 +742,7 @@ fn threadsPage(c: *ui.Context, w: *Workspace) void {
         }
     }
     watchSources(c, th);
+    watchBudget(c, th);
     {
         const b = box(c);
         defer b.end();
@@ -824,6 +825,28 @@ fn threadsPage(c: *ui.Context, w: *Workspace) void {
             ui.text(c, c.print("{s}. Reads only what gh reports; Run is the only step that writes.", .{when}), .{ .size = 11.5, .color = theme.muted, .wrap = true });
         }
     }
+}
+
+/// How many turns an hour the watcher may start, all threads together: the
+/// guard against a night of one issue being read over and over.
+fn watchBudget(c: *ui.Context, th: *threads_mod.Watcher) void {
+    const b = box(c);
+    defer b.end();
+    const head = ui.div(c).row().wFull().itemsCenter().gap(8);
+    {
+        defer head.end();
+        ui.text(c, "Turns an hour", .{ .size = 14, .weight = .semibold });
+        ui.spacer(c);
+        ui.text(c, c.print("{d} of {d} used", .{ th.turnsThisHour(), th.turnBudget() }), .{ .size = 11.5, .color = if (th.atLimit()) theme.warning else theme.muted });
+    }
+    const labels = [_][]const u8{ "6", "12", "24", "60" };
+    const values = [_]u32{ 6, 12, 24, 60 };
+    var picked: usize = 1;
+    for (values, 0..) |v, i| if (th.turnBudget() == v) {
+        picked = i;
+    };
+    if (ui.segmented(c, &labels, &picked)) th.setTurnBudget(values[picked]);
+    ui.text(c, "Reading and working turns both count. When the hour is spent nothing new starts until the oldest turn falls out of it.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
 }
 
 /// What to watch: one switch per `gh` query the poll can run.

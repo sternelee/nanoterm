@@ -201,24 +201,37 @@ pub const Workspace = struct {
             .start = threadStart,
             .ask = threadAsk,
             .focus = threadFocus,
+            .close = threadClose,
             .alive = threadAlive,
             .cwd = threadCwd,
             .redraw = threadRedraw,
         };
     }
 
-    fn threadStart(ctx: *anyopaque, cwd: []const u8, thread: u64, heading: []const u8, prompt: []const u8) ?u64 {
+    fn threadStart(ctx: *anyopaque, cwd: []const u8, thread: u64, mode: @import("threads.zig").Mode, heading: []const u8, prompt: []const u8) ?u64 {
         const w: *Workspace = @ptrCast(@alignCast(ctx));
         const s = w.newThreadTab(cwd, thread) orelse return null;
+        s.guard = guardOf(mode);
         s.askAs(heading, prompt);
         return s.id;
     }
 
-    fn threadAsk(ctx: *anyopaque, session: u64, heading: []const u8, prompt: []const u8) bool {
+    fn threadAsk(ctx: *anyopaque, session: u64, mode: @import("threads.zig").Mode, heading: []const u8, prompt: []const u8) bool {
         const w: *Workspace = @ptrCast(@alignCast(ctx));
         const s = w.findSession(session) orelse return false;
+        // The guard follows the turn: a thread that finished reading may now
+        // work on its branch, and one that read may read again.
+        s.guard = guardOf(mode);
+        if (s.agent) |ag| ag.guard = s.guard;
         s.askAs(heading, prompt);
         return true;
+    }
+
+    fn guardOf(mode: @import("threads.zig").Mode) @import("gates.zig").Guard {
+        return switch (mode) {
+            .read => .read,
+            .work => .work,
+        };
     }
 
     fn threadFocus(ctx: *anyopaque, session: u64) bool {
@@ -230,6 +243,35 @@ pub const Workspace = struct {
     fn threadAlive(ctx: *anyopaque, session: u64) bool {
         const w: *Workspace = @ptrCast(@alignCast(ctx));
         return w.findSession(session) != null;
+    }
+
+    /// Closes a thread's tab without asking: the thread is finished, so
+    /// nothing it runs is worth keeping. A pane shared with the person's own
+    /// shells keeps them and loses only the agent's pane; the last tab of the
+    /// window is left alone, as closing it would close the window.
+    fn threadClose(ctx: *anyopaque, session: u64) void {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        var buf: [64]*Node = undefined;
+        for (w.tabs.items, 0..) |t, i| for (leavesOf(t, &buf)) |n| {
+            if (n.kind.leaf.id != session) continue;
+            if (Tree.count(t.tree.root) > 1) {
+                const leaf = n.kind.leaf;
+                if (t.tree.remove(n)) |next| {
+                    t.zoomed = false;
+                    t.focused = next;
+                }
+                @import("pager.zig").forget(leaf);
+                leaf.destroy();
+            } else if (w.tabs.items.len > 1) {
+                _ = w.tabs.orderedRemove(i);
+                w.freeTab(t);
+                // The window still shows what it showed, or the tab before it.
+                if (i < w.active) w.active -= 1;
+                w.active = @min(w.active, w.tabs.items.len - 1);
+            } else return;
+            w.shared.redraw();
+            return;
+        };
     }
 
     fn threadCwd(ctx: *anyopaque) []const u8 {

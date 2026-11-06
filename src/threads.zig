@@ -75,6 +75,13 @@ pub const Thread = struct {
     /// Asked for by hand, as the switch that starts agents automatically is
     /// off: the poll queues it and this thread says to read it anyway.
     asked: bool = false,
+    /// The proposal's tail, as the prompt asks the agent to write it: one line
+    /// of plan, how many files it would touch, the command that proves it, and
+    /// the one question it wants answered (empty when it has none).
+    plan: []u8 = &.{},
+    files: u32 = 0,
+    verify: []u8 = &.{},
+    question: []u8 = &.{},
 
     fn deinit(t: *Thread, gpa: std.mem.Allocator) void {
         gpa.free(t.key);
@@ -85,6 +92,9 @@ pub const Thread = struct {
         freeIf(gpa, t.branch);
         freeIf(gpa, t.proposal);
         freeIf(gpa, t.note);
+        freeIf(gpa, t.plan);
+        freeIf(gpa, t.verify);
+        freeIf(gpa, t.question);
     }
 
     pub fn label(t: *const Thread) []const u8 {
@@ -98,6 +108,83 @@ pub const Thread = struct {
     /// "#42": the number as a thread reads.
     pub fn numberLabel(t: *const Thread, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "#{d}", .{t.number}) catch "";
+    }
+};
+
+/// The tail a proposal ends with, as the prompt asks for it:
+///
+///     plan: what it would do, in one line
+///     files: src/a.zig, src/b.zig      (or `none`)
+///     verify: zig build test
+///     question: none                   (or the one thing it must ask)
+///
+/// Borrowed from the reply unless the Watcher copies it into a Thread.
+pub const Plan = struct {
+    plan: []const u8 = "",
+    files: u32 = 0,
+    verify: []const u8 = "",
+    question: []const u8 = "",
+
+    pub fn of(reply: []const u8) Plan {
+        var out: Plan = .{};
+        var lines = std.mem.splitScalar(u8, reply, '\n');
+        while (lines.next()) |raw| {
+            const line = clean(raw);
+            if (after(line, "plan:")) |v| {
+                out.plan = orNothing(v);
+            } else if (after(line, "files:")) |v| {
+                out.files = countFiles(v);
+            } else if (after(line, "verify:")) |v| {
+                out.verify = orNothing(v);
+            } else if (after(line, "question:")) |v| {
+                out.question = orNothing(v);
+            }
+        }
+        return out;
+    }
+
+    /// A line of the tail without the markdown around it, so `- **plan:** …`,
+    /// `1. plan: …` and `### plan: …` all read as `plan: …`.
+    fn clean(raw: []const u8) []const u8 {
+        var line = std.mem.trim(u8, raw, " \t\r");
+        for ([_][]const u8{ "#", ">", "- ", "* ", "+ " }) |mark| {
+            if (std.mem.startsWith(u8, line, mark)) {
+                line = std.mem.trimStart(u8, line[mark.len..], " ");
+                break;
+            }
+        }
+        var digits: usize = 0;
+        while (digits < line.len and std.ascii.isDigit(line[digits])) digits += 1;
+        if (digits > 0 and digits < line.len and (line[digits] == '.' or line[digits] == ')')) {
+            line = std.mem.trimStart(u8, line[digits + 1 ..], " ");
+        }
+        return std.mem.trim(u8, line, " \t`*_");
+    }
+
+    /// `none` is how an agent says there is nothing to say.
+    fn orNothing(value: []const u8) []const u8 {
+        if (value.len == 0 or std.mem.eql(u8, value, "-")) return "";
+        if (std.ascii.eqlIgnoreCase(value, "none")) return "";
+        return value;
+    }
+
+    /// The text after `key`, or null when the line does not start with it.
+    fn after(line: []const u8, key: []const u8) ?[]const u8 {
+        if (line.len < key.len) return null;
+        if (!std.ascii.eqlIgnoreCase(line[0..key.len], key)) return null;
+        return std.mem.trim(u8, line[key.len..], " \t`*_");
+    }
+
+    /// "src/a.zig, src/b.zig" is two; "none", or nothing, is nil.
+    fn countFiles(value: []const u8) u32 {
+        var n: u32 = 0;
+        var paths = std.mem.splitScalar(u8, value, ',');
+        while (paths.next()) |path| {
+            const one = std.mem.trim(u8, path, " \t`()");
+            if (one.len == 0 or std.ascii.eqlIgnoreCase(one, "none")) continue;
+            n += 1;
+        }
+        return n;
     }
 };
 
@@ -146,6 +233,10 @@ pub const Config = struct {
     /// and the person asks for its plan (the sidebar's Read), as noop's
     /// routines may wait for approval.
     auto_start: bool = true,
+    /// How many turns the watcher may start in any hour, all threads
+    /// together. noop budgets a routine by the hour; a night of retries that
+    /// reads the same issue again and again costs the person money.
+    turns_per_hour: u32 = 12,
     /// The checkouts watched, each with the repository it holds.
     projects: std.ArrayListUnmanaged(Project) = .empty,
 
@@ -157,14 +248,21 @@ pub const Config = struct {
 
 /// What the watcher needs from the window: a tab to work in, a way to ask
 /// its agent, and where the person is looking. workspace.zig supplies it.
+/// Which turn a thread's tab is asked: a reading turn reads, so the tab's
+/// agent may read; a working one edits this checkout, and only this one.
+pub const Mode = enum { read, work };
+
 pub const Host = struct {
     ctx: *anyopaque,
     /// A background tab in `cwd`, asked `prompt`; its session id, or null.
-    start: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, heading: []const u8, prompt: []const u8) ?u64,
+    start: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, mode: Mode, heading: []const u8, prompt: []const u8) ?u64,
     /// Ask the tab's agent a follow-up; false when the tab is gone.
-    ask: *const fn (ctx: *anyopaque, session: u64, heading: []const u8, prompt: []const u8) bool,
+    ask: *const fn (ctx: *anyopaque, session: u64, mode: Mode, heading: []const u8, prompt: []const u8) bool,
     /// Focus the thread's tab.
     focus: *const fn (ctx: *anyopaque, session: u64) bool,
+    /// Close the thread's tab without asking, as a finished thread has no
+    /// reason to keep one open.
+    close: *const fn (ctx: *anyopaque, session: u64) void,
     /// Whether the tab still exists.
     alive: *const fn (ctx: *anyopaque, session: u64) bool,
     /// The focused pane's directory: the repository to watch by default.
@@ -191,6 +289,8 @@ pub const Watcher = struct {
     polling: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     active_analysis: u64 = 0,
     active_run: u64 = 0,
+    /// When this hour's turns were started, oldest first: the budget's ledger.
+    turns: std.ArrayListUnmanaged(f64) = .empty,
     started: bool = false,
     last_check: f64 = 0,
     last_ok: f64 = 0,
@@ -211,6 +311,7 @@ pub const Watcher = struct {
         if (self.working.load(.acquire)) return;
         for (self.threads.items) |*t| t.deinit(self.gpa);
         self.threads.deinit(self.gpa);
+        self.turns.deinit(self.gpa);
         self.cfg.deinit(self.gpa);
         freeIf(self.gpa, self.last_error);
         freeIf(self.gpa, self.path);
@@ -325,6 +426,8 @@ pub const Watcher = struct {
                     .done, .failed, .dismissed => {
                         t.state = .queued;
                         t.changed = now;
+                        // A row that came back has to say why it did.
+                        set(self.gpa, &t.note, "it moved on Github: reading it again");
                     },
                     else => {},
                 }
@@ -365,7 +468,8 @@ pub const Watcher = struct {
         }
     }
 
-    /// A thread whose tab was closed: nothing is working on it any more.
+    /// A thread whose tab was closed: the person cancelled it, they did not
+    /// ask it to fail.
     pub fn reap(self: *Watcher) void {
         const h = self.host orelse return;
         for (self.threads.items) |*t| {
@@ -373,8 +477,9 @@ pub const Watcher = struct {
             if (t.session != 0 and h.alive(h.ctx, t.session)) continue;
             if (self.active_analysis == t.id) self.active_analysis = 0;
             if (self.active_run == t.id) self.active_run = 0;
-            t.state = .failed;
-            set(self.gpa, &t.note, "its tab was closed");
+            t.state = .dismissed;
+            t.session = 0;
+            set(self.gpa, &t.note, "cancelled: its tab was closed");
             t.changed = blocks.now();
         }
     }
@@ -386,6 +491,7 @@ pub const Watcher = struct {
     fn pump(self: *Watcher) void {
         if (self.active_analysis != 0) return;
         const h = self.host orelse return;
+        if (self.atLimit()) return;
         for (self.threads.items) |*t| {
             if (t.state != .queued) continue;
             // The poll only lists what it found when agents start on their
@@ -393,7 +499,7 @@ pub const Watcher = struct {
             if (!self.cfg.auto_start and !t.asked) continue;
             const p = self.projectFor(threadRepo(t)) orelse continue;
             if (!p.verified) continue;
-            const text = self.prompt(t, .analysis, p) catch continue;
+            const text = self.prompt(t, .analysis, p, p.cwd) catch continue;
             defer self.gpa.free(text);
             const label_text = self.heading(t) catch continue;
             defer self.gpa.free(label_text);
@@ -401,18 +507,19 @@ pub const Watcher = struct {
             t.asked = false;
             t.changed = blocks.now();
             if (t.session != 0 and h.alive(h.ctx, t.session)) {
-                if (!h.ask(h.ctx, t.session, label_text, text)) {
+                if (!h.ask(h.ctx, t.session, .read, label_text, text)) {
                     self.failed(t, "its tab is gone");
                     continue;
                 }
             } else {
-                t.session = h.start(h.ctx, p.cwd, t.id, label_text, text) orelse 0;
+                t.session = h.start(h.ctx, p.cwd, t.id, .read, label_text, text) orelse 0;
                 if (t.session == 0) {
                     self.failed(t, "the agent tab could not start");
                     continue;
                 }
             }
             self.active_analysis = t.id;
+            self.spend();
             self.save();
             return;
         }
@@ -439,6 +546,11 @@ pub const Watcher = struct {
                     self.failed(t, if (did_fail) "the reading turn failed" else "the agent said nothing");
                 } else {
                     set(self.gpa, &t.proposal, reply[0..@min(reply.len, proposal_max)]);
+                    const plan = Plan.of(reply);
+                    set(self.gpa, &t.plan, plan.plan);
+                    set(self.gpa, &t.verify, plan.verify);
+                    set(self.gpa, &t.question, plan.question);
+                    t.files = plan.files;
                     t.state = .proposed;
                     t.seen = false;
                     t.changed = now;
@@ -458,6 +570,104 @@ pub const Watcher = struct {
         if (self.host) |h| h.redraw(h.ctx);
     }
 
+    /// The worktree a working turn edits: `<project>/.nanoterm/worktrees/<thread>`,
+    /// on the thread's branch. Made once per thread; a second approval of the
+    /// same thread carries on in the worktree the first one left behind.
+    fn worktree(self: *Watcher, t: *Thread, p: *const Project) ?[]u8 {
+        var name_buf: [24]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "{d}", .{t.id}) catch return null;
+        const path = std.fs.path.join(self.gpa, &.{ p.cwd, ".nanoterm", "worktrees", name }) catch return null;
+        const dir = std.Io.Dir.cwd();
+        if (dir.access(self.io, path, .{})) |_| {
+            // A folder left by an older branch, or emptied by hand, is made
+            // again rather than trusted for the worktree it is not.
+            if (self.isWorktree(path, t.branch)) return path;
+            dir.deleteTree(self.io, path) catch {
+                self.failed(t, "the worktree left behind could not be cleared");
+                self.gpa.free(path);
+                return null;
+            };
+        } else |_| {}
+
+        self.exclude(p.cwd);
+        if (std.fs.path.dirname(path)) |base| dir.createDirPath(self.io, base) catch {
+            self.failed(t, "the worktree folder could not be made");
+            self.gpa.free(path);
+            return null;
+        };
+
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        // `-b` makes the branch; when a branch of that name is already there,
+        // a plain `worktree add` checks it out instead.
+        if (!self.git(a, t, p.cwd, &.{ "git", "-C", p.cwd, "worktree", "add", path, "-b", t.branch })) {
+            if (!self.git(a, t, p.cwd, &.{ "git", "-C", p.cwd, "worktree", "add", path, t.branch })) {
+                self.gpa.free(path);
+                return null;
+            }
+            set(self.gpa, &t.note, "");
+        }
+        return path;
+    }
+
+    /// Whether `path` is a worktree checked out on `branch`, which is what a
+    /// folder left from an earlier approval has to be to be carried on with.
+    fn isWorktree(self: *Watcher, path: []const u8, branch: []const u8) bool {
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        const result = std.process.run(a, self.io, .{
+            .argv = &.{ "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD" },
+            .stdout_limit = .limited(4096),
+            .stderr_limit = .limited(4096),
+            .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(30), .clock = .boot } },
+        }) catch return false;
+        if (!result.term.success()) return false;
+        return std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \t\r\n"), branch);
+    }
+
+    /// Runs git in the person's own checkout. False, with git's first line of
+    /// complaint in the thread's note, when it fails.
+    fn git(self: *Watcher, a: std.mem.Allocator, t: *Thread, cwd: []const u8, argv: []const []const u8) bool {
+        _ = cwd;
+        const result = std.process.run(a, self.io, .{
+            .argv = argv,
+            .stdout_limit = .limited(1024 * 1024),
+            .stderr_limit = .limited(64 * 1024),
+            .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(120), .clock = .boot } },
+        }) catch |err| {
+            if (std.fmt.allocPrint(self.gpa, "git failed: {s}", .{@errorName(err)})) |why| {
+                set(self.gpa, &t.note, why);
+                self.gpa.free(why);
+            } else |_| set(self.gpa, &t.note, "git failed");
+            return false;
+        };
+        if (!result.term.success()) {
+            const text = std.mem.trim(u8, result.stderr, " \t\r\n");
+            const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+            set(self.gpa, &t.note, if (line.len > 0) line else "git returned an error");
+            return false;
+        }
+        return true;
+    }
+
+    /// Keeps `.nanoterm/` out of the project's own `git status`: the entry goes
+    /// into the checkout's `.git/info/exclude`, which is nobody else's business.
+    fn exclude(self: *Watcher, repo_cwd: []const u8) void {
+        var buf: [4096]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/.git/info/exclude", .{repo_cwd}) catch return;
+        const dir = std.Io.Dir.cwd();
+        const old = dir.readFileAlloc(self.io, path, self.gpa, .limited(64 * 1024)) catch "";
+        defer if (old.len > 0) self.gpa.free(old);
+        if (std.mem.indexOf(u8, old, ".nanoterm/") != null) return;
+        // Written whole: the file is the checkout's own, kept as it was with
+        // one line more, rather than overwritten from its first byte.
+        const text = std.fmt.allocPrint(self.gpa, "{s}\n.nanoterm/\n", .{std.mem.trimEnd(u8, old, "\r\n")}) catch return;
+        defer self.gpa.free(text);
+        dir.writeFile(self.io, .{ .sub_path = path, .data = text }) catch return;
+    }
+
     fn failed(self: *Watcher, t: *Thread, why: []const u8) void {
         t.state = .failed;
         set(self.gpa, &t.note, why);
@@ -468,31 +678,41 @@ pub const Watcher = struct {
     pub fn run(self: *Watcher, id: u64) bool {
         const t = self.findId(id) orelse return false;
         if (t.state != .proposed or self.active_run != 0) return false;
+        if (self.atLimit()) {
+            set(self.gpa, &t.note, "the hour's turns are spent; it waits for the next one");
+            if (self.host) |h| h.redraw(h.ctx);
+            return false;
+        }
         const p = self.projectFor(threadRepo(t)) orelse return false;
         if (!p.verified) return false;
         const h = self.host orelse return false;
         var branch_buf: [96]u8 = undefined;
         set(self.gpa, &t.branch, branchFor(t, &branch_buf));
-        const text = self.prompt(t, .work, p) catch return false;
+        // A worktree of its own, inside the project: the person's checkout is
+        // theirs, and the thread's work is a branch they can look at later.
+        const at = self.worktree(t, p) orelse return false;
+        defer self.gpa.free(at);
+        const text = self.prompt(t, .work, p, at) catch return false;
         defer self.gpa.free(text);
         const label_text = self.heading(t) catch return false;
         defer self.gpa.free(label_text);
+        // The reading tab sits in the person's own checkout: the work goes on
+        // in a tab of its own, in the worktree, so no prompt is left half done
+        // and nothing edits the checkout the person is looking at.
+        if (t.session != 0) {
+            if (h.alive(h.ctx, t.session)) h.close(h.ctx, t.session);
+            t.session = 0;
+        }
         t.state = .running;
         t.changed = blocks.now();
-        if (t.session != 0 and h.alive(h.ctx, t.session)) {
-            if (!h.ask(h.ctx, t.session, label_text, text)) {
-                self.failed(t, "its tab is gone");
-                self.save();
-                return false;
-            }
-        } else {
-            t.session = h.start(h.ctx, p.cwd, t.id, label_text, text) orelse 0;
-            if (t.session == 0) {
-                self.failed(t, "the agent tab could not start");
-                self.save();
-                return false;
-            }
+        t.session = h.start(h.ctx, at, t.id, .work, label_text, text) orelse 0;
+        if (t.session == 0) {
+            self.failed(t, "the agent tab could not start");
+            self.save();
+            return false;
         }
+        // A turn is spent when it has somewhere to run.
+        self.spend();
         self.active_run = t.id;
         self.save();
         if (self.host) |x| x.redraw(x.ctx);
@@ -501,11 +721,26 @@ pub const Watcher = struct {
 
     pub fn dismiss(self: *Watcher, id: u64) void {
         const t = self.findId(id) orelse return;
+        // A working thread is ended by closing its tab, which `reap` sees.
         if (t.state == .analyzing or t.state == .running) return;
         t.state = .dismissed;
         t.changed = blocks.now();
+        // The thread is gone: so is the tab that showed it. Its transcript
+        // stays in the session log, where the log viewer finds it.
+        self.closeSession(t);
         self.save();
         if (self.host) |h| h.redraw(h.ctx);
+    }
+
+    /// Takes the thread's tab away, if one is still open.
+    fn closeSession(self: *Watcher, t: *Thread) void {
+        if (t.session == 0) return;
+        const h = self.host orelse {
+            t.session = 0;
+            return;
+        };
+        h.close(h.ctx, t.session);
+        t.session = 0;
     }
 
     /// Focus the thread's tab, if it has one.
@@ -726,6 +961,42 @@ pub const Watcher = struct {
         return p.verified;
     }
 
+    /// Turns started in the last hour, the budget's ledger pruned as it is read.
+    pub fn turnsThisHour(self: *Watcher) u32 {
+        const now = blocks.now();
+        var live: usize = 0;
+        for (self.turns.items) |at| {
+            if (now - at >= 3600) continue;
+            self.turns.items[live] = at;
+            live += 1;
+        }
+        self.turns.shrinkRetainingCapacity(live);
+        return @intCast(live);
+    }
+
+    pub fn turnBudget(self: *const Watcher) u32 {
+        return self.cfg.turns_per_hour;
+    }
+
+    pub fn setTurnBudget(self: *Watcher, n: u32) void {
+        const clamped = std.math.clamp(n, 1, 120);
+        if (clamped == self.cfg.turns_per_hour) return;
+        self.cfg.turns_per_hour = clamped;
+        self.save();
+        if (self.host) |h| h.redraw(h.ctx);
+    }
+
+    /// The hour's turns are spent: nothing new starts until one falls out of
+    /// the hour, whichever thread it is or whoever asked for it.
+    pub fn atLimit(self: *Watcher) bool {
+        return self.turnsThisHour() >= self.cfg.turns_per_hour;
+    }
+
+    /// A turn is about to start: note it against the hour.
+    fn spend(self: *Watcher) void {
+        self.turns.append(self.gpa, blocks.now()) catch {};
+    }
+
     /// Whether the thread is from a project watched now. A ledger can hold
     /// threads from a folder that was removed; they are not shown or run.
     pub fn belongs(self: *const Watcher, t: *const Thread) bool {
@@ -848,7 +1119,7 @@ pub const Watcher = struct {
 
     /// What the agent is asked. The reading turn is read-only; the working
     /// turn gets a branch of its own and the rules noop's policy keeps.
-    fn prompt(self: *const Watcher, t: *const Thread, phase: Phase, p: *const Project) ![]u8 {
+    fn prompt(self: *const Watcher, t: *const Thread, phase: Phase, p: *const Project, at: []const u8) ![]u8 {
         const repo_name = p.repo;
         const where = p.cwd;
         var branch_buf: [96]u8 = undefined;
@@ -864,13 +1135,18 @@ pub const Watcher = struct {
                 \\- Inspect the code and tests it touches.
                 \\- Do not edit files, commit, push, comment, switch branches, or change anything on Github.
                 \\- Answer with a compact proposal: what is being asked, the files you would change, the steps, how to verify, and the risks. Ask a question only when a product decision is truly needed. End with the branch you would use, as `branch: {s}`.
+                \\- Finish with these four lines and nothing after them, so nanoterm can read the proposal without guessing:
+                \\    plan: what you would do, in one line
+                \\    files: the paths you would change, comma separated, or `none`
+                \\    verify: the one command that proves the change works
+                \\    question: none, or the single question you need answered
             , .{
                 t.label(),
                 repo_name,
                 t.number,
                 t.title,
                 t.url,
-                where,
+                at,
                 if (t.kind == .issue) "issue" else "pr",
                 t.number,
                 repo_name,
@@ -882,10 +1158,10 @@ pub const Watcher = struct {
                 \\The user approved your proposal for Github {s} {s}#{d}: {s}
                 \\{s}
                 \\
-                \\Work only in the repository at {s}, on the branch `{s}`.
+                \\You are in {s}: a git worktree of the repository at {s}, on the branch `{s}`, made for this thread. The person's own checkout is elsewhere and you do not go near it.
                 \\1. Run `git status --porcelain`. If it is not clean, stop and say so instead of touching the files.
-                \\2. `git switch -c {s}` (or `git switch {s}` when it already exists).
-                \\3. Make the change, run the repository's build and tests, and commit with a clear message.
+                \\2. Make the change and commit on this branch with a clear message.
+                \\3. Run `{s}` and the repository's own tests, and report what they printed.
                 \\
                 \\Do not push, merge, force-push, close the issue or pull request, or comment on Github. Those need the user's word in a later turn.
                 \\Finish with a short summary: what changed, what you ran, and anything the user must decide.
@@ -895,10 +1171,10 @@ pub const Watcher = struct {
                 t.number,
                 t.title,
                 t.url,
+                at,
                 where,
                 t.branch,
-                t.branch,
-                t.branch,
+                if (t.verify.len > 0) t.verify else "the repository's build and tests",
             }),
         };
     }
@@ -920,6 +1196,10 @@ pub const Watcher = struct {
             branch: []const u8,
             proposal: []const u8,
             note: []const u8,
+            plan: []const u8,
+            files: u32,
+            verify: []const u8,
+            question: []const u8,
             created: f64,
             changed: f64,
         };
@@ -940,8 +1220,10 @@ pub const Watcher = struct {
             ci: bool,
             notifications: bool,
             auto_start: bool,
+            turns_per_hour: u32,
             projects: []const SavedProject,
             next_id: u64,
+            turns: []const f64,
             threads: []const SavedThread,
         };
         var list: std.ArrayListUnmanaged(SavedThread) = .empty;
@@ -967,6 +1249,10 @@ pub const Watcher = struct {
             .branch = t.branch,
             .proposal = t.proposal,
             .note = t.note,
+            .plan = t.plan,
+            .files = t.files,
+            .verify = t.verify,
+            .question = t.question,
             .created = t.created,
             .changed = t.changed,
         }) catch return;
@@ -981,8 +1267,10 @@ pub const Watcher = struct {
             .ci = self.cfg.ci,
             .notifications = self.cfg.notifications,
             .auto_start = self.cfg.auto_start,
+            .turns_per_hour = self.cfg.turns_per_hour,
             .projects = saved_projects.items,
             .next_id = self.next_id,
+            .turns = self.turns.items,
             .threads = list.items,
         }, .{}) catch return;
         defer self.gpa.free(data);
@@ -1007,6 +1295,10 @@ pub const Watcher = struct {
             branch: []const u8 = "",
             proposal: []const u8 = "",
             note: []const u8 = "",
+            plan: []const u8 = "",
+            files: u32 = 0,
+            verify: []const u8 = "",
+            question: []const u8 = "",
             created: f64 = 0,
             changed: f64 = 0,
         };
@@ -1029,6 +1321,7 @@ pub const Watcher = struct {
             ci: bool = true,
             notifications: bool = true,
             auto_start: bool = true,
+            turns_per_hour: u32 = 12,
             projects: []const SavedProject = &.{},
             /// Before folders were a list: one checkout and its repository.
             cwd: []const u8 = "",
@@ -1036,6 +1329,8 @@ pub const Watcher = struct {
             unverified: bool = false,
             found_repo: []const u8 = "",
             next_id: u64 = 1,
+            /// The turns spent this hour; a restart does not hand the hour back.
+            turns: []const f64 = &.{},
             threads: []const SavedThread = &.{},
         };
         const parsed = std.json.parseFromSlice(Saved, self.gpa, data, .{ .ignore_unknown_fields = true }) catch return;
@@ -1051,6 +1346,9 @@ pub const Watcher = struct {
         self.cfg.ci = v.ci;
         self.cfg.notifications = v.notifications;
         self.cfg.auto_start = v.auto_start;
+        self.cfg.turns_per_hour = std.math.clamp(v.turns_per_hour, 1, 120);
+        for (v.turns) |at| self.turns.append(self.gpa, at) catch {};
+        _ = self.turnsThisHour();
         for (v.projects) |p| self.appendProject(p.cwd, p.repo, p.verified, p.found);
         if (v.projects.len == 0 and (v.cwd.len > 0 or v.repo.len > 0)) {
             self.appendProject(v.cwd, v.repo, !v.unverified, v.found_repo);
@@ -1074,6 +1372,10 @@ pub const Watcher = struct {
             if (s.branch.len > 0) t.branch = self.gpa.dupe(u8, s.branch) catch &.{};
             if (s.proposal.len > 0) t.proposal = self.gpa.dupe(u8, s.proposal) catch &.{};
             if (s.note.len > 0) t.note = self.gpa.dupe(u8, s.note) catch &.{};
+            if (s.plan.len > 0) t.plan = self.gpa.dupe(u8, s.plan) catch &.{};
+            if (s.verify.len > 0) t.verify = self.gpa.dupe(u8, s.verify) catch &.{};
+            if (s.question.len > 0) t.question = self.gpa.dupe(u8, s.question) catch &.{};
+            t.files = s.files;
             self.next_id = @max(self.next_id, t.id + 1);
             // Tabs do not survive a restart. A reading turn starts again; a
             // working one is reported, since it may have changed something.
@@ -1603,24 +1905,29 @@ const TestHost = struct {
     var cwd_buf: [512]u8 = undefined;
     var cwd_len: usize = 0;
     var starts: usize = 0;
+    var closes: usize = 0;
+    /// Whether the tabs the host started are still open.
+    var open: bool = true;
 
     fn reset() void {
         cwd_len = 0;
         starts = 0;
+        closes = 0;
+        open = true;
     }
 
     fn lastCwd() []const u8 {
         return cwd_buf[0..cwd_len];
     }
 
-    fn start(_: *anyopaque, cwd: []const u8, _: u64, _: []const u8, _: []const u8) ?u64 {
+    fn start(_: *anyopaque, cwd: []const u8, _: u64, _: Mode, _: []const u8, _: []const u8) ?u64 {
         starts += 1;
         cwd_len = @min(cwd.len, cwd_buf.len);
         @memcpy(cwd_buf[0..cwd_len], cwd[0..cwd_len]);
         return 7 + starts;
     }
 
-    fn ask(_: *anyopaque, _: u64, _: []const u8, _: []const u8) bool {
+    fn ask(_: *anyopaque, _: u64, _: Mode, _: []const u8, _: []const u8) bool {
         return true;
     }
 
@@ -1628,8 +1935,13 @@ const TestHost = struct {
         return true;
     }
 
+    fn close(_: *anyopaque, _: u64) void {
+        closes += 1;
+        open = false;
+    }
+
     fn alive(_: *anyopaque, _: u64) bool {
-        return true;
+        return open;
     }
 
     fn folder(_: *anyopaque) []const u8 {
@@ -1783,6 +2095,7 @@ test "threads: one row per thread, and a newer version of a finished one comes b
         .fingerprint = "t4",
     }, 40);
     try std.testing.expectEqual(State.queued, w.threads.items[0].state);
+    try std.testing.expect(std.mem.indexOf(u8, w.threads.items[0].note, "moved on Github") != null);
 }
 
 test "threads: several project folders are watched, each task belongs to its own" {
@@ -1898,7 +2211,7 @@ test "threads: a thread's tab opens in the folder of its own project" {
     w.cfg.projects.items[1].verified = true;
     TestHost.reset();
     var ctx: u8 = 0;
-    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .focus = TestHost.focus, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
     w.absorb(.{ .key = "issue:owner/b#5", .kind = .issue, .number = 5, .title = "B's", .url = "", .fingerprint = "1" }, 10);
     w.pump();
     try std.testing.expectEqual(@as(usize, 1), TestHost.starts);
@@ -1910,6 +2223,144 @@ test "threads: a thread's tab opens in the folder of its own project" {
     w.absorb(.{ .key = "pr:owner/b#6", .kind = .pr, .number = 6, .title = "B's next", .url = "", .fingerprint = "1" }, 11);
     w.pump();
     try std.testing.expectEqual(@as(usize, 1), TestHost.starts);
+}
+
+test "threads: dismissing a thread takes its tab away" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-dismiss-tab";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/a");
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expect(w.addProject(home ++ "/a"));
+    set(w.gpa, &w.cfg.projects.items[0].repo, "owner/a");
+    w.cfg.projects.items[0].verified = true;
+    TestHost.reset();
+    var ctx: u8 = 0;
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.absorb(.{ .key = "issue:owner/a#1", .kind = .issue, .number = 1, .title = "A's", .url = "", .fingerprint = "1" }, 10);
+    w.pump();
+    try std.testing.expectEqual(State.analyzing, w.threads.items[0].state);
+    try std.testing.expect(w.threads.items[0].session != 0);
+    // A working thread is not dismissed; its tab is closed to cancel it.
+    const id = w.threads.items[0].id;
+    w.dismiss(id);
+    try std.testing.expectEqual(State.analyzing, w.threads.items[0].state);
+    try std.testing.expectEqual(@as(usize, 0), TestHost.closes);
+    // A finished one goes, and its tab with it.
+    w.threads.items[0].state = .proposed;
+    w.active_analysis = 0;
+    w.dismiss(id);
+    try std.testing.expectEqual(State.dismissed, w.threads.items[0].state);
+    try std.testing.expectEqual(@as(usize, 1), TestHost.closes);
+    try std.testing.expectEqual(@as(u64, 0), w.threads.items[0].session);
+}
+
+test "threads: closing a working thread's tab cancels it, it does not fail" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-cancel";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/a");
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expect(w.addProject(home ++ "/a"));
+    set(w.gpa, &w.cfg.projects.items[0].repo, "owner/a");
+    w.cfg.projects.items[0].verified = true;
+    TestHost.reset();
+    var ctx: u8 = 0;
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.absorb(.{ .key = "issue:owner/a#2", .kind = .issue, .number = 2, .title = "A's", .url = "", .fingerprint = "1" }, 10);
+    w.pump();
+    try std.testing.expectEqual(State.analyzing, w.threads.items[0].state);
+    // The person closed the tab while the reading turn ran.
+    TestHost.open = false;
+    w.reap();
+    try std.testing.expectEqual(State.dismissed, w.threads.items[0].state);
+    try std.testing.expectEqual(@as(u64, 0), w.threads.items[0].session);
+    try std.testing.expectEqual(@as(u64, 0), w.active_analysis);
+    try std.testing.expect(std.mem.indexOf(u8, w.threads.items[0].note, "cancelled") != null);
+    // The next thread reads at once: the slot was given back.
+    w.absorb(.{ .key = "pr:owner/a#3", .kind = .pr, .number = 3, .title = "A's next", .url = "", .fingerprint = "1" }, 11);
+    TestHost.open = true;
+    w.pump();
+    try std.testing.expectEqual(@as(usize, 2), TestHost.starts);
+}
+
+test "threads: an approved thread works in a worktree inside its project" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-worktree";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    const repo = home ++ "/a";
+    try std.Io.Dir.cwd().createDirPath(io, repo);
+    // A repository with one commit, so there is a HEAD to branch a worktree from.
+    for ([_][]const []const u8{
+        &.{ "git", "-C", repo, "init", "-q" },
+        &.{ "git", "-C", repo, "-c", "user.name=nanoterm", "-c", "user.email=nanoterm@example.com", "commit", "-q", "--allow-empty", "-m", "first" },
+    }) |argv| {
+        const r = std.process.run(gpa, io, .{
+            .argv = argv,
+            .stdout_limit = .limited(1 << 20),
+            .stderr_limit = .limited(1 << 16),
+        }) catch return error.SkipZigTest;
+        defer gpa.free(r.stdout);
+        defer gpa.free(r.stderr);
+        try std.testing.expect(r.term.success());
+    }
+
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expect(w.addProject(repo));
+    set(w.gpa, &w.cfg.projects.items[0].repo, "owner/a");
+    w.cfg.projects.items[0].verified = true;
+    TestHost.reset();
+    var ctx: u8 = 0;
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.absorb(.{ .key = "issue:owner/a#1", .kind = .issue, .number = 1, .title = "A's", .url = "", .fingerprint = "1" }, 10);
+    w.pump();
+    const id = w.threads.items[0].id;
+    w.threads.items[0].state = .proposed;
+    w.active_analysis = 0;
+    // The reading tab is still open: the approval closes it and opens one of
+    // its own in the worktree, so the person's checkout is left alone.
+    try std.testing.expect(w.run(id));
+    try std.testing.expectEqual(@as(usize, 1), TestHost.closes);
+
+    var path_buf: [512]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&path_buf, "{s}/.nanoterm/worktrees/{d}", .{ repo, id });
+    try std.testing.expectEqualStrings(expected, TestHost.lastCwd());
+    std.Io.Dir.cwd().access(io, expected, .{}) catch |err| {
+        std.debug.print("worktree not there: {s}\n", .{@errorName(err)});
+        return error.TestUnexpectedResult;
+    };
+    // The folder is the project's, but `git status` there stays quiet.
+    const exclude_text = try std.Io.Dir.cwd().readFileAlloc(io, repo ++ "/.git/info/exclude", gpa, .limited(64 * 1024));
+    defer gpa.free(exclude_text);
+    try std.testing.expect(std.mem.indexOf(u8, exclude_text, ".nanoterm/") != null);
+}
+
+test "threads: the exclude file keeps what it had" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-exclude";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    const repo = home ++ "/a";
+    try std.Io.Dir.cwd().createDirPath(io, repo ++ "/.git/info");
+    // The person's own entries come first, and stay first.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = repo ++ "/.git/info/exclude", .data = "node_modules/\n.env\n" });
+
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    w.exclude(repo);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, repo ++ "/.git/info/exclude", gpa, .limited(64 * 1024));
+    defer gpa.free(text);
+    try std.testing.expectEqualStrings("node_modules/\n.env\n.nanoterm/\n", text);
 }
 
 test "threads: without a linked project, nothing belongs" {
@@ -2041,4 +2492,107 @@ test "gh's colour codes never reach the parser" {
     // Answers without escapes are handed on untouched.
     const plain_json = "[{\"number\":1}]";
     try std.testing.expectEqualStrings(plain_json, Job.plain(arena, plain_json));
+}
+
+test "threads: a proposal's tail is read, not guessed" {
+    const reply =
+        \\The parser drops the last field when the row has a trailing comma.
+        \\
+        \\plan: split the row before trimming it
+        \\files: src/csv.zig, src/csv_test.zig
+        \\verify: zig build test
+        \\question: none
+    ;
+    const asked = Plan.of(reply);
+    try std.testing.expectEqualStrings("split the row before trimming it", asked.plan);
+    try std.testing.expectEqual(@as(u32, 2), asked.files);
+    try std.testing.expectEqualStrings("zig build test", asked.verify);
+    try std.testing.expectEqualStrings("", asked.question);
+
+    // A question is kept; "none" is not a question, and no files is no count.
+    const unsure = Plan.of("plan: `do it`\nfiles: none\nverify: zig build\nquestion: do we keep the old flag?");
+    try std.testing.expectEqualStrings("do it", unsure.plan);
+    try std.testing.expectEqual(@as(u32, 0), unsure.files);
+    try std.testing.expectEqualStrings("do we keep the old flag?", unsure.question);
+
+    // A reply that never got the tail leaves every field empty.
+    const bare = Plan.of("I would change the parser.");
+    try std.testing.expectEqualStrings("", bare.plan);
+    try std.testing.expectEqual(@as(u32, 0), bare.files);
+
+    // Markdown around the tail is not part of it.
+    const styled = Plan.of("- **plan:** split the row\n2. `files:` src/csv.zig\n- verify: none\n**question:** none");
+    try std.testing.expectEqualStrings("split the row", styled.plan);
+    try std.testing.expectEqual(@as(u32, 1), styled.files);
+    try std.testing.expectEqualStrings("", styled.verify);
+    try std.testing.expectEqualStrings("", styled.question);
+}
+
+test "threads: the hour's turns stop a run of them" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-budget";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/a");
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expect(w.addProject(home ++ "/a"));
+    set(w.gpa, &w.cfg.projects.items[0].repo, "owner/a");
+    w.cfg.projects.items[0].verified = true;
+    w.setTurnBudget(1);
+    TestHost.reset();
+    var ctx: u8 = 0;
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.absorb(.{ .key = "issue:owner/a#1", .kind = .issue, .number = 1, .title = "one", .url = "", .fingerprint = "1" }, 10);
+    w.absorb(.{ .key = "issue:owner/a#2", .kind = .issue, .number = 2, .title = "two", .url = "", .fingerprint = "1" }, 11);
+    w.pump();
+    try std.testing.expectEqual(@as(usize, 1), TestHost.starts);
+    try std.testing.expect(w.atLimit());
+    try std.testing.expectEqual(@as(u32, 1), w.turnsThisHour());
+
+    // The hour is spent: the second thread waits its turn.
+    w.active_analysis = 0;
+    w.pump();
+    try std.testing.expectEqual(@as(usize, 1), TestHost.starts);
+
+    // Once the oldest turn falls out of the hour, the next one may start.
+    w.turns.items[0] -= 3601;
+    try std.testing.expect(!w.atLimit());
+    w.pump();
+    try std.testing.expectEqual(@as(usize, 2), TestHost.starts);
+
+    // A person's Run is refused too, and says why on the row.
+    const id = w.threads.items[0].id;
+    w.threads.items[0].state = .proposed;
+    w.active_analysis = 0;
+    w.active_run = 0;
+    try std.testing.expect(!w.run(id));
+    try std.testing.expect(std.mem.indexOf(u8, w.threads.items[0].note, "spent") != null);
+}
+
+test "threads: the turn budget is kept between runs, and held to its range" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-budget-saved";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    {
+        var w = Watcher.init(gpa, io, home);
+        defer w.deinit();
+        try std.testing.expectEqual(@as(u32, 12), w.turnBudget());
+        w.setTurnBudget(0);
+        try std.testing.expectEqual(@as(u32, 1), w.turnBudget());
+        w.setTurnBudget(500);
+        try std.testing.expectEqual(@as(u32, 120), w.turnBudget());
+        w.setTurnBudget(24);
+        // Turns spent stay spent for the hour, even if the window closes.
+        w.spend();
+        w.spend();
+        w.save();
+    }
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expectEqual(@as(u32, 24), w.turnBudget());
+    try std.testing.expectEqual(@as(u32, 2), w.turnsThisHour());
 }

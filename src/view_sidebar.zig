@@ -279,12 +279,21 @@ fn threadRow(w: *Workspace, c: *ui.Context, t: *threads_mod.Thread, now: f64) vo
         ui.text(c, t.title, .{ .size = 13, .color = theme.text, .truncate = .ellipsis });
     }
     if (t.state == .proposed) {
-        if (ui.button(c, "Run", .{ .variant = .primary, .size = 10.5, .disabled = th.active_run != 0 or !th.canTrigger(t) }).clicked) _ = th.run(t.id);
+        // What the proposal amounts to, without opening it: how much it
+        // touches, and whether it is waiting on an answer.
+        if (t.question.len > 0) {
+            const pill = ui.div(c).h(16).px(6).rounded(8).bg(theme.warning.alpha(0.16)).center();
+            defer pill.end();
+            ui.text(c, "question", .{ .size = 10, .color = theme.warning });
+        } else if (t.files > 0) {
+            ui.text(c, c.print("{d} {s}", .{ t.files, if (t.files == 1) "file" else "files" }), .{ .size = 10.5, .color = theme.faint });
+        }
+        if (ui.button(c, "Run", .{ .variant = .primary, .size = 10.5, .disabled = th.active_run != 0 or !th.canTrigger(t) or th.atLimit() }).clicked) _ = th.run(t.id);
         if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "xmark" }).clicked) th.dismiss(t.id);
     } else if (t.state == .queued and !th.autoStart()) {
         // Agents start on their own only when Settings says so: this is the
         // ask for one that waited.
-        if (ui.button(c, "Read", .{ .variant = .primary, .size = 10.5 }).clicked) _ = th.analyze(t.id);
+        if (ui.button(c, "Read", .{ .variant = .primary, .size = 10.5, .disabled = th.atLimit() }).clicked) _ = th.analyze(t.id);
         if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "xmark" }).clicked) th.dismiss(t.id);
     } else {
         if (st != .idle) {

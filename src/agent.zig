@@ -189,6 +189,9 @@ pub const Agent = struct {
     mcp: ?McpServer = null,
     /// Called when the agent goes, to stop routing visuals to it.
     on_destroy: ?struct { ctx: *anyopaque, func: *const fn (ctx: *anyopaque, a: *Agent) void } = null,
+    /// What this agent may do without being asked (gates.zig): a watched
+    /// thread's tab decides by turn, the person's own tab asks everything.
+    guard: @import("gates.zig").Guard = .none,
     msg_buf: [512]u8 = undefined,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, app: App, which: Which, cwd: []const u8) !*Agent {
@@ -912,6 +915,37 @@ pub const Agent = struct {
 
     pub fn addItem(a: *Agent, t: *Turn, item: Item) void {
         t.items.append(a.gpa, item) catch {};
+    }
+
+    /// A request its gate refused, shown in the turn as an answered question:
+    /// the person sees what the agent wanted and why it did not happen, and
+    /// nothing is left waiting for their click.
+    pub fn noteGate(a: *Agent, title: []const u8, why: []const u8) void {
+        const t = a.current() orelse return;
+        noteGateItem(a, t, title, why) catch {};
+    }
+
+    /// The item `noteGate` shows, its strings owned once: a half-made question
+    /// leaves nothing behind.
+    fn noteGateItem(a: *Agent, t: *Turn, title: []const u8, why: []const u8) !void {
+        const options = try a.gpa.alloc(Option, 1);
+        errdefer a.gpa.free(options);
+        options[0] = .{
+            .id = try a.gpa.dupe(u8, "reject_once"),
+            .name = try a.gpa.dupe(u8, why),
+            .kind = try a.gpa.dupe(u8, "reject_once"),
+        };
+        errdefer {
+            a.gpa.free(options[0].id);
+            a.gpa.free(options[0].name);
+            a.gpa.free(options[0].kind);
+        }
+        a.addItem(t, .{ .permission = .{
+            .rpc_id = try a.gpa.dupe(u8, ""),
+            .title = try a.gpa.dupe(u8, title),
+            .options = options,
+            .chosen = 0,
+        } });
     }
 
     /// Shows a visual in the turn running; null, or why it was not shown.

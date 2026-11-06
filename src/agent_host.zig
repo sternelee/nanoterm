@@ -98,7 +98,15 @@ fn permission(a: *Agent, id: []const u8, params: std.json.Value) !void {
     const t = a.current() orelse return a.client.respond(id, .{ .outcome = .{ .outcome = "cancelled" } });
     const tc = acp.obj(params, "toolCall") orelse .null;
     const title = acp.str(tc, "title") orelse "The agent asks to go on";
+    const kind = acp.str(tc, "kind") orelse "other";
+    // A watched thread's tab works while nobody watches it: the gate decides,
+    // and the agent is told why, so the turn goes on and reports it.
+    switch (@import("gates.zig").verdict(a.guard, kind, title)) {
+        .ask => {},
+        .deny => |why| return refuse(a, id, params, why),
+    }
     var options: std.ArrayList(agent_mod.Option) = .empty;
+    defer options.deinit(a.gpa);
     if (acp.obj(params, "options")) |opts| if (opts == .array) for (opts.array.items) |o| {
         try options.append(a.gpa, .{
             .id = try a.gpa.dupe(u8, acp.str(o, "optionId") orelse continue),
@@ -111,6 +119,20 @@ fn permission(a: *Agent, id: []const u8, params: std.json.Value) !void {
         .title = try a.gpa.dupe(u8, title),
         .options = try options.toOwnedSlice(a.gpa),
     } });
+}
+
+/// Refuses a request the gate does not allow, with the option the agent
+/// offered for refusing; when it offered none, the request is cancelled.
+fn refuse(a: *Agent, id: []const u8, params: std.json.Value, why: []const u8) !void {
+    const tc = acp.obj(params, "toolCall") orelse .null;
+    a.noteGate(acp.str(tc, "title") orelse "The agent asked to go on", why);
+    if (acp.obj(params, "options")) |opts| if (opts == .array) for (opts.array.items) |o| {
+        const kind = acp.str(o, "kind") orelse "";
+        if (!std.mem.startsWith(u8, kind, "reject")) continue;
+        const option_id = acp.str(o, "optionId") orelse continue;
+        return a.client.respond(id, .{ .outcome = .{ .outcome = "selected", .optionId = option_id } });
+    };
+    a.client.respond(id, .{ .outcome = .{ .outcome = "cancelled" } });
 }
 
 fn readFile(a: *Agent, id: []const u8, params: std.json.Value, arena: std.mem.Allocator) void {
@@ -137,6 +159,18 @@ fn readFile(a: *Agent, id: []const u8, params: std.json.Value, arena: std.mem.Al
 
 fn writeFile(a: *Agent, id: []const u8, params: std.json.Value, arena: std.mem.Allocator) void {
     const path = acp.str(params, "path") orelse return a.client.respondError(id, -32602, "no path");
+    // A reading turn writes nothing, however it asks: this path needs no
+    // permission request, so the gate is checked here too.
+    if (a.guard == .read) {
+        a.noteGate(acp.str(params, "path") orelse "Write a file", "a reading turn does not change the repository");
+        return a.client.respondError(id, -32000, "a reading turn only reads");
+    }
+    // A watched turn writes inside its own folder or not at all: the path is
+    // the agent's to give, and `../..` would take it anywhere.
+    if (a.guard != .none and outside(path)) {
+        a.noteGate(acp.str(params, "path") orelse "Write a file", "a watched turn writes inside its own folder");
+        return a.client.respondError(id, -32000, "a watched turn writes inside its own folder");
+    }
     const content = acp.str(params, "content") orelse "";
     if (a.remote) |r| return @import("agent_remote.zig").writeFile(a, r, id, path, content, arena);
     const cwd = std.Io.Dir.cwd();
@@ -144,6 +178,21 @@ fn writeFile(a: *Agent, id: []const u8, params: std.json.Value, arena: std.mem.A
     cwd.writeFile(a.io, .{ .sub_path = path, .data = content }) catch |err|
         return a.client.respondError(id, -32603, @errorName(err));
     a.client.respond(id, acp.Client.Empty{});
+}
+
+/// Whether `path` leads out of the folder the agent was given: absolute, or
+/// climbing further with `..` than it goes down.
+fn outside(path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) return true;
+    var it = std.mem.tokenizeAny(u8, path, "/\\");
+    var depth: isize = 0;
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) {
+            depth -= 1;
+            if (depth < 0) return true;
+        } else if (!std.mem.eql(u8, part, ".")) depth += 1;
+    }
+    return false;
 }
 
 fn terminal(a: *Agent, id: []const u8, params: std.json.Value) ?*Terminal {
@@ -171,7 +220,16 @@ fn createTerminal(a: *Agent, id: []const u8, params: std.json.Value, arena: std.
     };
     // `sh -c "…"` shows as the command it runs.
     const label = if (argv.items.len == 3 and std.mem.eql(u8, argv.items[1], "-c")) argv.items[2] else shown.items;
-    var cwd = acp.str(params, "cwd") orelse a.cwd;
+    // The gate covers terminals too: a command run here is a command run, and
+    // the folder is the turn's, not the agent's to choose.
+    switch (@import("gates.zig").verdict(a.guard, "execute", label)) {
+        .ask => {},
+        .deny => |why| {
+            a.noteGate(label, why);
+            return a.client.respondError(id, -32000, why);
+        },
+    }
+    var cwd = if (a.guard == .none) acp.str(params, "cwd") orelse a.cwd else a.cwd;
     // On an SSH host: the command runs there, through the shared connection.
     var where: []const u8 = cwd;
     if (a.remote) |r| {

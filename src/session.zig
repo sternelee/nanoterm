@@ -204,6 +204,9 @@ pub const Session = struct {
     shell: shell_mod.Shell,
     agent: ?*agent_mod.Agent = null,
     which: agent_mod.Which = .agent,
+    /// What this pane's agent may do without asking (gates.zig). A watched
+    /// thread's tab sets it per turn; the person's own pane never does.
+    guard: @import("gates.zig").Guard = .none,
     /// Every block made, owned here; the timeline and turns point to them.
     all_blocks: std.ArrayList(*blocks.Block) = .empty,
     timeline: std.ArrayList(Entry) = .empty,
@@ -538,6 +541,9 @@ pub const Session = struct {
 
     /// A prompt whose turn shows `title` (a short line) instead of `text`.
     pub fn askAs(a: *Session, heading: ?[]const u8, text: []const u8) void {
+        // What the person types is their own turn: no gate, whatever a watched
+        // thread's turn in this pane was allowed.
+        if (heading == null) a.guard = .none;
         const ag = a.ensureAgent() orelse return;
         // On an SSH host: the agent works there, and is told so.
         a.syncRemote(ag);
@@ -619,9 +625,13 @@ pub const Session = struct {
     }
 
     pub fn ensureAgent(a: *Session) ?*agent_mod.Agent {
-        if (a.agent) |ag| return ag;
+        if (a.agent) |ag| {
+            ag.guard = a.guard;
+            return ag;
+        }
         const ag = agent_mod.Agent.create(a.gpa, a.io, .{ .ctx = a, .changed = changed, .newBlock = agentBlock, .finished = finished }, a.which, a.cwd()) catch return null;
         ag.env = a.shared.env_list;
+        ag.guard = a.guard;
         a.agent = ag;
         a.offerVisuals(ag);
         if (a.model_choice) |m| {

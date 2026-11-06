@@ -247,18 +247,44 @@ repository is added again.
 
 Each thread first gets a read-only turn in a background tab: the agent reads
 the issue or pull request, looks at the code it touches, and writes a
-proposal (what it would change, how it would verify it, the branch it would
-use). Nothing is written until you press Run on the row. Run starts the
-agent on `nanoterm/<kind>-<number>` in the checkout with the same rules: it
-must stop on a dirty working tree, and it may commit but never push, merge,
-comment, or close anything. Dismiss puts a thread away until Github moves it
-again.
+proposal (what it would change, how it verifies it, the branch it would
+use, and a last block of four lines: `plan:`, `files:`, `verify:`,
+`question:`). A reading turn is held to that: the tab's tools refuse to write
+a file, whether through the client or a terminal tool, a run command is
+refused when it would leave the checkout or write a file, and a write from a
+watched turn lands in the folder the turn was given, not above it.
+Nothing is written until you press Run on the row. The row reads the four
+lines: `4 files` says how much it touches, `question` says it is waiting on
+an answer, and the work turn is told to run the `verify:` command before it
+reports back.
+
+Run starts the agent on `nanoterm/<kind>-<number>` in a git worktree of its
+own, `<project>/.nanoterm/worktrees/<thread>`: your checkout is never
+touched. Its reading tab is closed and a tab of its own opens in the
+worktree, so the prompts are not stacked in one pane and nothing edits the
+checkout you are looking at. A worktree left by an earlier approval is
+carried on with only when it is still on that branch; `.nanoterm/` is written into
+that checkout's `.git/info/exclude`, so `git status` stays quiet. The branch,
+and whatever the agent committed on it, is left for you: review it, push it,
+or drop it with `git worktree remove .nanoterm/worktrees/<thread>`. Commands
+that leave the checkout — `git push`, `gh pr merge`, `gh issue comment`,
+`npm publish` and the like — are refused; so is merging or rewriting
+history locally. Dismiss puts a thread away until Github moves it again, and
+closing a thread's tab while it works cancels it instead of leaving it
+looking failed.
 
 **Check now** in Settings → Threads asks gh straight away, and the button reads
 **Checking…** until it answers. **Read new threads as they arrive**, under the
 watch switch, decides whether a thread the poll finds is read at once (the
 default) or waits in the sidebar with **Read** until you ask for its plan, as
 noop's routines may wait for approval. Either way one turn runs at a time.
+
+**Turns an hour** is the budget noop keeps for a routine, for all threads
+together: 12 by default, and reading and working turns both count. When the
+hour is spent nothing new starts — no poll, no Read, no Run — until the
+oldest turn falls out of the hour; the switch reads `12 of 12 used` in the
+warning colour while that lasts. A finished thread that Github moves on comes
+back to be read again, and its row says so.
 
 Polls are deduplicated by thread and by what changed (a CI failure is keyed
 by its head and failing checks, so a rerun of the same failure does not read
