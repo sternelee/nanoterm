@@ -17,6 +17,11 @@ pub const Source = enum {
 
 pub const State = enum { running, done };
 
+/// A command can ask for one section of its output to fold behind a
+/// summary. Thread details use it for comments that do not mention you.
+pub const fold_start = "~~~ nanoterm-fold: ";
+pub const fold_end = "~~~ nanoterm-fold-end ~~~";
+
 pub const Block = struct {
     id: u64,
     source: Source,
@@ -30,6 +35,8 @@ pub const Block = struct {
     ended: f64 = 0,
     /// Showing all the output, past the last lines shown by default.
     expanded: bool = false,
+    /// A `nanoterm-fold` output section is open instead of its summary.
+    fold_expanded: bool = false,
     /// Markdown printed by `cat`, shown as the text it was (not rendered).
     raw: bool = false,
     /// When `pulse_state` last changed, on the frames' clock — its bar

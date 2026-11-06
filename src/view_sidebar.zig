@@ -302,7 +302,7 @@ fn threadRow(w: *Workspace, c: *ui.Context, t: *threads_mod.Thread, now: f64) vo
         }
         mark(c, st, st == .done and !t.seen, now);
     }
-    if (clicked) _ = th.open(t.id);
+    if (clicked) _ = th.openDetail(t.id);
 }
 
 /// A tab's row; true when clicked.

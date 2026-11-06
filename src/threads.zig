@@ -254,12 +254,18 @@ pub const Config = struct {
 /// agent may read; a working one edits this checkout, and only this one.
 pub const Mode = enum { read, work };
 
+fn noDetail(_: *anyopaque, _: []const u8, _: u64, _: []const u8) ?u64 {
+    return null;
+}
+
 pub const Host = struct {
     ctx: *anyopaque,
     /// A background tab in `cwd`, asked `prompt`; its session id, or null.
     start: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, mode: Mode, heading: []const u8, prompt: []const u8) ?u64,
     /// Ask the tab's agent a follow-up; false when the tab is gone.
     ask: *const fn (ctx: *anyopaque, session: u64, mode: Mode, heading: []const u8, prompt: []const u8) bool,
+    /// A tab showing the thread's Github detail; its session id, or null.
+    detail: *const fn (ctx: *anyopaque, cwd: []const u8, thread: u64, command: []const u8) ?u64 = noDetail,
     /// Focus the thread's tab.
     focus: *const fn (ctx: *anyopaque, session: u64) bool,
     /// Close the thread's tab without asking, as a finished thread has no
@@ -786,6 +792,64 @@ pub const Watcher = struct {
             self.save();
         }
         return self.focus(id);
+    }
+
+    /// The script a detail tab runs: the whole unresolved thread, with the
+    /// comments that do not mention the signed-in person folded behind one
+    /// summary. Resolved pull-request review comments stay out.
+    fn detailCommand(self: *Watcher, t: *const Thread, p: *const Project) ?[]u8 {
+        const slash = std.mem.indexOfScalar(u8, p.repo, '/') orelse return null;
+        const owner = p.repo[0..slash];
+        const repo = p.repo[slash + 1 ..];
+        const defs =
+            "def mention: ((.body // \"\") | ascii_downcase | contains(\"@\" + (env.LOGIN | ascii_downcase))); " ++
+            "def comment: \"\\n--- @\\(.author.login // \"ghost\") · \\(.createdAt) ---\\n\\(.url // \"\")\\n\\(.body // \"\")\"; " ++
+            "def normalized: { body: (.body // \"\"), createdAt: .createdAt, url: (.url // \"\"), author: .author };";
+        const output =
+            "([$all[] | select(mention | not)]) as $folded | " ++
+            "([$all[] | select(mention)]) as $important | " ++
+            "\"# \\($root.title)\\n\\($root.url)\\n\\n\\($root.body // \"\")\\n\" + " ++
+            "(if ($folded | length) > 0 then \"\\n" ++ blocks.fold_start ++ "\\($folded | length) other comments ~~~\" + ($folded | map(comment) | join(\"\")) + \"\\n" ++ blocks.fold_end ++ "\\n\" else \"\" end) + " ++
+            "(if ($important | length) > 0 then \"\\n=== Mentions ===\" + ($important | map(comment) | join(\"\")) else \"\" end)";
+        const issue_query =
+            "query($owner:String!,$repo:String!,$number:Int!){" ++
+            "repository(owner:$owner,name:$repo){issue(number:$number){" ++
+            "title url body comments(first:100){nodes{body createdAt url author{login}}}}}}";
+        const issue_jq =
+            defs ++ " .data.repository.issue as $root | ([$root.comments.nodes[] | normalized] | sort_by(.createdAt)) as $all | " ++ output;
+        const pr_query =
+            "query($owner:String!,$repo:String!,$number:Int!){" ++
+            "repository(owner:$owner,name:$repo){pullRequest(number:$number){" ++
+            "title url body comments(first:100){nodes{body createdAt url author{login}}} " ++
+            "reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{body createdAt url path author{login}}}}}}}}";
+        const pr_jq =
+            defs ++ " .data.repository.pullRequest as $root | (([$root.comments.nodes[] | normalized] + " ++
+            "[$root.reviewThreads.nodes[] | select(.isResolved | not) | .comments.nodes[] | normalized]) | sort_by(.createdAt)) as $all | " ++ output;
+        const query = if (t.kind == .issue) issue_query else pr_query;
+        const jq = if (t.kind == .issue) issue_jq else pr_jq;
+        return std.fmt.allocPrint(self.gpa, "login=\"$(gh api user --jq '.login')\" && LOGIN=\"$login\" gh api graphql -f query='{s}' -F owner={s} -F repo={s} -F number={d} --jq '{s}'", .{ query, owner, repo, t.number, jq }) catch null;
+    }
+
+    /// The person clicked a thread without a tab: show what Github says it
+    /// is, with only the comments that mention them, instead of spending an
+    /// agent turn to read it.
+    pub fn openDetail(self: *Watcher, id: u64) bool {
+        const t = self.findId(id) orelse return false;
+        if (!t.seen) {
+            t.seen = true;
+            self.save();
+        }
+        const h = self.host orelse return false;
+        if (t.session != 0) {
+            if (self.focus(id)) return true;
+            if (h.alive(h.ctx, t.session)) return false;
+            t.session = 0;
+        }
+        const p = self.projectFor(threadRepo(t)) orelse return false;
+        const command = self.detailCommand(t, p) orelse return false;
+        defer self.gpa.free(command);
+        t.session = h.detail(h.ctx, p.cwd, t.id, command) orelse return false;
+        return true;
     }
 
     // ---------------------------------------------------------------- settings
@@ -1931,14 +1995,22 @@ fn turnReply(gpa: std.mem.Allocator, turn: *agent_mod.Turn) ![]u8 {
 const TestHost = struct {
     var cwd_buf: [512]u8 = undefined;
     var cwd_len: usize = 0;
+    var detail_cwd_buf: [512]u8 = undefined;
+    var detail_cwd_len: usize = 0;
+    var detail_command_buf: [8192]u8 = undefined;
+    var detail_command_len: usize = 0;
     var starts: usize = 0;
+    var details: usize = 0;
     var closes: usize = 0;
     /// Whether the tabs the host started are still open.
     var open: bool = true;
 
     fn reset() void {
         cwd_len = 0;
+        detail_cwd_len = 0;
+        detail_command_len = 0;
         starts = 0;
+        details = 0;
         closes = 0;
         open = true;
     }
@@ -1947,11 +2019,28 @@ const TestHost = struct {
         return cwd_buf[0..cwd_len];
     }
 
+    fn lastDetailCwd() []const u8 {
+        return detail_cwd_buf[0..detail_cwd_len];
+    }
+
+    fn lastDetailCommand() []const u8 {
+        return detail_command_buf[0..detail_command_len];
+    }
+
     fn start(_: *anyopaque, cwd: []const u8, _: u64, _: Mode, _: []const u8, _: []const u8) ?u64 {
         starts += 1;
         cwd_len = @min(cwd.len, cwd_buf.len);
         @memcpy(cwd_buf[0..cwd_len], cwd[0..cwd_len]);
         return 7 + starts;
+    }
+
+    fn detail(_: *anyopaque, cwd: []const u8, _: u64, command: []const u8) ?u64 {
+        details += 1;
+        detail_cwd_len = @min(cwd.len, detail_cwd_buf.len);
+        @memcpy(detail_cwd_buf[0..detail_cwd_len], cwd[0..detail_cwd_len]);
+        detail_command_len = @min(command.len, detail_command_buf.len);
+        @memcpy(detail_command_buf[0..detail_command_len], command[0..detail_command_len]);
+        return 90 + details;
     }
 
     fn ask(_: *anyopaque, _: u64, _: Mode, _: []const u8, _: []const u8) bool {
@@ -2218,6 +2307,83 @@ test "threads: a poll records each folder's repository, and a mismatch keeps the
     try std.testing.expectEqualStrings("", w.projects()[1].found);
     w.absorb(.{ .key = "issue:new/repo#4", .kind = .issue, .number = 4, .title = "Theirs", .url = "", .fingerprint = "1" }, 10);
     try std.testing.expect(w.canTrigger(&w.threads.items[0]));
+}
+
+fn detailQueryBalanced(command: []const u8) bool {
+    const marker = "-f query='";
+    const at = std.mem.indexOf(u8, command, marker) orelse return false;
+    const start = at + marker.len;
+    const end = std.mem.indexOfPos(u8, command, start, "' -F owner") orelse return false;
+    var depth: i32 = 0;
+    for (command[start..end]) |ch| {
+        if (ch == '{') depth += 1 else if (ch == '}') depth -= 1;
+        if (depth < 0) return false;
+    }
+    return depth == 0;
+}
+
+test "threads: clicking a thread without a tab opens its Github detail" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-detail";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/repo");
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expect(w.addProject(home ++ "/repo"));
+    set(w.gpa, &w.cfg.projects.items[0].repo, "owner/repo");
+    w.cfg.projects.items[0].verified = true;
+    TestHost.reset();
+    var ctx: u8 = 0;
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .detail = TestHost.detail, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.absorb(.{ .key = "issue:owner/repo#7", .kind = .issue, .number = 7, .title = "Fix it", .url = "", .fingerprint = "1" }, 10);
+    const t = &w.threads.items[0];
+    try std.testing.expect(w.openDetail(t.id));
+    try std.testing.expect(t.seen);
+    try std.testing.expectEqual(@as(u64, 91), t.session);
+    try std.testing.expectEqual(@as(usize, 1), TestHost.details);
+    try std.testing.expectEqualStrings(home ++ "/repo", TestHost.lastDetailCwd());
+    const command = TestHost.lastDetailCommand();
+    try std.testing.expect(std.mem.startsWith(u8, command, "login=\"$(gh api user"));
+    try std.testing.expect(std.mem.indexOf(u8, command, "gh api graphql") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "issue(number:$number)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "nanoterm-fold") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "=== Mentions ===") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "-F number=7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "thread-detail-") == null);
+    try std.testing.expect(detailQueryBalanced(command));
+    // A second click focuses the tab it already opened.
+    try std.testing.expect(w.openDetail(t.id));
+    try std.testing.expectEqual(@as(usize, 1), TestHost.details);
+}
+
+test "threads: a pull request's detail folds other comments and drops resolved ones" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-detail-pr";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/repo");
+    var w = Watcher.init(gpa, io, home);
+    defer w.deinit();
+    try std.testing.expect(w.addProject(home ++ "/repo"));
+    set(w.gpa, &w.cfg.projects.items[0].repo, "owner/repo");
+    w.cfg.projects.items[0].verified = true;
+    TestHost.reset();
+    var ctx: u8 = 0;
+    w.host = .{ .ctx = &ctx, .start = TestHost.start, .ask = TestHost.ask, .detail = TestHost.detail, .focus = TestHost.focus, .close = TestHost.close, .alive = TestHost.alive, .cwd = TestHost.folder, .redraw = TestHost.redraw };
+    w.absorb(.{ .key = "pr:owner/repo#9", .kind = .pr, .number = 9, .title = "Review", .url = "", .fingerprint = "1" }, 10);
+    try std.testing.expect(w.openDetail(w.threads.items[0].id));
+    const command = TestHost.lastDetailCommand();
+    try std.testing.expect(std.mem.startsWith(u8, command, "login=\"$(gh api user"));
+    try std.testing.expect(std.mem.indexOf(u8, command, "pullRequest(number:$number)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "reviewThreads(first:100)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "select(.isResolved | not)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "nanoterm-fold") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "-F owner=owner -F repo=repo -F number=9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "thread-detail-") == null);
+    try std.testing.expect(detailQueryBalanced(command));
 }
 
 test "threads: a thread's tab opens in the folder of its own project" {

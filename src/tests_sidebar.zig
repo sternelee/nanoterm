@@ -127,6 +127,7 @@ test "the sidebar: watched Github threads, their proposal and Run" {
         .created = now,
         .changed = now,
     });
+    th.host = w.threadsHost();
     w.sidebar = .shown;
     var t: ui.Tester = undefined;
     try t.init(gpa, .init(&w, view.view), .{ .width = 1100, .height = 640, .theme = theme.ui() });
@@ -145,6 +146,25 @@ test "the sidebar: watched Github threads, their proposal and Run" {
     try std.testing.expect(projects.y > t.findText("Checks failed").?.y);
     // The tab's own group sits under that heading (its folder is the home).
     try std.testing.expect(projects.y < t.findText("~").?.y);
+
+    // Clicking a thread that has no agent opens its Github detail instead.
+    try t.clickText("Fix the flaky test");
+    t.settle(0.5);
+    try std.testing.expect(th.threads.items[0].seen);
+    try std.testing.expectEqual(@as(u64, 1), w.tab().thread_id);
+    try std.testing.expectEqual(th.threads.items[0].session, w.tab().session().id);
+    const s = w.tab().session();
+    var direct = false;
+    for (s.queue.items) |q| {
+        if (std.mem.startsWith(u8, q, "login=\"$(gh api user") and std.mem.indexOf(u8, q, "gh api graphql") != null and std.mem.indexOf(u8, q, "nanoterm-fold") != null) direct = true;
+    }
+    for (s.timeline.items) |entry| switch (entry) {
+        .block => |b| {
+            if (std.mem.startsWith(u8, b.command, "login=\"$(gh api user") and std.mem.indexOf(u8, b.command, "gh api graphql") != null and std.mem.indexOf(u8, b.command, "nanoterm-fold") != null) direct = true;
+        },
+        .turn => {},
+    };
+    try std.testing.expect(direct);
 }
 
 test "the sidebar: a thread waits for Read when agents start by hand" {

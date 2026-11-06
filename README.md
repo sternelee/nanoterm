@@ -238,6 +238,12 @@ found (what needs you first, then what is being read or worked on, then the
 rest), and **Projects** below, your own tabs grouped by repository. Each
 section counts its rows and how many need you.
 
+Clicking a thread that has no tab yet opens its Github detail instead: the
+issue or pull request with its unresolved comments, yours kept visible and the
+rest behind one fold, resolved review threads left out. The pane runs the
+`gh api graphql` command itself — jq and all — so the command shown is exactly
+what ran.
+
 Settings → Threads lists the checkouts gh reads; add as many as you like with
 **Add folder** or **Use focused pane**. Each poll runs `gh repo view` in a
 folder to learn the repository it holds (the repository is never guessed from

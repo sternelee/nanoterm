@@ -200,6 +200,7 @@ pub const Workspace = struct {
             .ctx = w,
             .start = threadStart,
             .ask = threadAsk,
+            .detail = threadDetail,
             .focus = threadFocus,
             .close = threadClose,
             .alive = threadAlive,
@@ -213,6 +214,17 @@ pub const Workspace = struct {
         const s = w.newThreadTab(cwd, thread) orelse return null;
         s.guard = guardOf(mode);
         s.askAs(heading, prompt);
+        return s.id;
+    }
+
+    /// A click on a thread that has no agent yet: a terminal tab with the
+    /// issue or pull request and its comments, focused for the person.
+    fn threadDetail(ctx: *anyopaque, cwd: []const u8, thread: u64, command: []const u8) ?u64 {
+        const w: *Workspace = @ptrCast(@alignCast(ctx));
+        const s = w.newThreadTab(cwd, thread) orelse return null;
+        s.guard = .read;
+        s.run(command);
+        _ = w.focusSession(s);
         return s.id;
     }
 

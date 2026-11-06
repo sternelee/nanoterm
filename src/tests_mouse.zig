@@ -159,3 +159,45 @@ test "a block's output is selected by a drag and copied" {
     t.textOps(&.{.{ .command = .copy }});
     try std.testing.expect(std.mem.indexOf(u8, t.clipboard.items, "agent reply") != null);
 }
+
+test "a block folds a marked output section until clicked" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-output-fold";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    const b = try @import("blocks.zig").Block.create(gpa, 1, .shell, "printf", home, "");
+    defer b.destroy(gpa);
+    try b.output.feed("intro\n~~~ nanoterm-fold: 2 other comments ~~~\nboring one\nboring two\n~~~ nanoterm-fold-end ~~~\nmention me\n");
+    b.finish(0);
+    try s.timeline.append(gpa, .{ .block = b });
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 800, .height = 600, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    try std.testing.expect(t.hasText("intro"));
+    try std.testing.expect(t.hasText("Show 2 other comments"));
+    try std.testing.expect(t.hasText("mention me"));
+    try std.testing.expect(!t.hasText("boring one"));
+    try t.clickText("Show 2 other comments");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Hide 2 other comments"));
+    try std.testing.expect(t.hasText("boring one"));
+    try std.testing.expect(t.hasText("boring two"));
+    try t.clickText("Hide 2 other comments");
+    t.settle(1);
+    try std.testing.expect(!t.hasText("boring one"));
+}

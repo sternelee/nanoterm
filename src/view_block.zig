@@ -20,7 +20,33 @@ var no_find: find.State = .{};
 const tail_lines = 400;
 /// Markdown longer than this stays text: it is parsed every frame.
 const markdown_lines = 3000;
+const fold_suffix = " ~~~";
 const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+
+const Fold = struct {
+    start: usize,
+    end: usize,
+    summary: []const u8,
+};
+
+fn foldRange(lines: anytype) ?Fold {
+    var start: ?usize = null;
+    var summary: []const u8 = "";
+    for (lines, 0..) |*l, i| {
+        const text = l.text.items;
+        if (start == null and std.mem.startsWith(u8, text, blocks.fold_start)) {
+            start = i;
+            summary = text[blocks.fold_start.len..];
+            if (std.mem.endsWith(u8, summary, fold_suffix)) summary = summary[0 .. summary.len - fold_suffix.len];
+            continue;
+        }
+        if (start != null and std.mem.eql(u8, text, blocks.fold_end)) {
+            if (i <= start.?) return null;
+            return .{ .start = start.?, .end = i, .summary = summary };
+        }
+    }
+    return null;
+}
 
 pub const mono: ui.TextStyle = .{ .size = 12.5, .mono = true };
 
@@ -173,19 +199,38 @@ fn output(c: *ui.Context, app: *App, b: *blocks.Block, f: *const find.State) voi
         view_markdown.markdownIn(c, text, std.fs.path.dirname(path));
         return;
     }
+    const match = f.currentMatch();
     // The current match in lines not shown: show them all.
-    if (f.currentMatch()) |m| if (m.block == b.id and m.line != find.command and count > tail_lines and m.line < count - tail_lines) {
+    if (match) |m| if (m.block == b.id and m.line != find.command and count > tail_lines and m.line < count - tail_lines) {
         b.expanded = true;
     };
-    const first = if (b.expanded or count <= tail_lines) 0 else count - tail_lines;
+    const fold = foldRange(lines);
+    if (fold) |fr| if (match) |m| if (m.block == b.id and m.line > fr.start and m.line < fr.end) {
+        b.fold_expanded = true;
+    };
+    // A semantic fold owns its own hidden range; the line-count tail would
+    // otherwise cut through its markers.
+    const first = if (fold != null or b.expanded or count <= tail_lines) 0 else count - tail_lines;
     const listing = if (app.shared.prefs.file_icons) file_icons.listing(b.command) else .none;
     const col = ui.div(c).column().wFull().gap(0);
     defer col.end();
-    if (first > 0 or b.output.dropped > 0) {
+    if (fold == null and (first > 0 or b.output.dropped > 0)) {
         const hidden = first + b.output.dropped;
         if (ui.button(c, c.print("Show {d} earlier lines", .{hidden}), .{ .variant = .ghost, .size = 11.5, .icon = "chevron.up" }).clicked) b.expanded = true;
     }
-    for (lines[first..count], first..) |*l, i| {
+    var i = first;
+    while (i < count) : (i += 1) {
+        const l = &lines[i];
+        if (fold) |fr| {
+            if (i == fr.start) {
+                const label = if (b.fold_expanded) c.print("Hide {s}", .{fr.summary}) else c.print("Show {s}", .{fr.summary});
+                const icon = if (b.fold_expanded) "chevron.down" else "chevron.right";
+                if (ui.button(c, label, .{ .variant = .ghost, .size = 11.5, .icon = icon }).clicked) b.fold_expanded = !b.fold_expanded;
+                if (!b.fold_expanded) i = fr.end;
+                continue;
+            }
+            if (i == fr.end) continue;
+        }
         var style = mono;
         style.wrap = true;
         style.color = theme.text;
@@ -200,7 +245,7 @@ fn output(c: *ui.Context, app: *App, b: *blocks.Block, f: *const find.State) voi
         }
         ui.richText(c, l.text.items, spans, style);
     }
-    if (b.expanded and count > tail_lines) {
+    if (fold == null and b.expanded and count > tail_lines) {
         if (ui.button(c, "Show less", .{ .variant = .ghost, .size = 11.5, .icon = "chevron.down" }).clicked) b.expanded = false;
     }
 }
