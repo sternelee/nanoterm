@@ -370,11 +370,14 @@ pub const Hub = struct {
             w.writeAll("]}") catch {};
             h.finish(&aw, c);
         }
+        if (!h.alive(c)) return;
         for (h.sessions.items) |s| {
             h.sendSession(c, s);
+            if (!h.alive(c)) return;
             for (s.timeline.items) |e| {
                 const id = h.idFor(e);
                 h.sendEntry(c, s, id, e, h.slots.getPtr(entryKey(e)));
+                if (!h.alive(c)) return;
             }
         }
     }
@@ -640,17 +643,31 @@ pub const Hub = struct {
         }
     }
 
+    /// A connection `c` is with us until `drop` frees it. A client that
+    /// cannot be written to is dropped by the first event that notices; the
+    /// events after it in the same burst must not touch — or drop — it again.
+    fn alive(h: *const Hub, c: *const Conn) bool {
+        for (h.conns.items) |x| if (x == c) return true;
+        return false;
+    }
+
+    /// Removes `c` and frees it. Nothing happens when `c` is already gone:
+    /// a client that left mid-burst is noticed by every event that follows,
+    /// and freeing it — and releasing its watch's dispatch source — a second
+    /// time is the over-release libdispatch traps on.
     fn drop(h: *Hub, c: *Conn) void {
         for (h.conns.items, 0..) |x, i| {
-            if (x == c) {
-                _ = h.conns.swapRemove(i);
-                break;
+            if (x != c) continue;
+            _ = h.conns.swapRemove(i);
+            if (c.watch) |w| {
+                c.watch = null;
+                w.cancel();
             }
+            _ = sys.close(c.fd);
+            c.in.deinit(h.gpa);
+            h.gpa.destroy(c);
+            return;
         }
-        if (c.watch) |w| w.cancel();
-        _ = sys.close(c.fd);
-        c.in.deinit(h.gpa);
-        h.gpa.destroy(c);
     }
 
     /// The session a command names, or null when the id is not one of ours.
@@ -895,7 +912,11 @@ pub const Hub = struct {
                 keep = false;
                 break;
             }
+            // A reply that could not be written dropped the client already;
+            // its bytes went with it.
+            if (!h.alive(c)) return;
         }
+        if (!h.alive(c)) return;
         if (used > 0) {
             const left = c.in.items.len - used;
             std.mem.copyForwards(u8, c.in.items[0..left], c.in.items[used..]);
@@ -1475,4 +1496,40 @@ test "a block's tail carries its spans' colors as escapes" {
     try t.expect(std.mem.indexOf(u8, out, "\x1b[0m") != null);
     try t.expect(std.mem.startsWith(u8, out, "plain \x1b[38;2;"));
     try t.expect(std.mem.endsWith(u8, out, "\x1b[0m end"));
+}
+
+const AF_INET = 2;
+const SOCK_STREAM = 1;
+
+test "a client that leaves mid-burst is dropped once, not once per event" {
+    if (windows) return error.SkipZigTest;
+    const socket = struct {
+        extern "c" fn socket(domain: c_int, kind: c_int, protocol: c_int) c_int;
+    }.socket;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const h = try Hub.create(gpa, io, .{ .port = 0, .token = "0123456789abcdef0123456789abcdef" });
+    defer h.destroy();
+    // A client the phone closed mid-welcome: writes to its fd fail, so every
+    // event in the burst notices that it is gone. The socket is closed before
+    // the conn is made of it, as one that was dropped would be.
+    const gone = socket(AF_INET, SOCK_STREAM, 0);
+    try std.testing.expect(gone >= 0);
+    _ = sys.close(gone);
+    const c = try gpa.create(Conn);
+    c.* = .{ .hub = h, .fd = gone };
+    // Its watch, as a connected client has one. The second drop the burst
+    // once made released this dispatch source again — libdispatch's
+    // over-release trap, a crash — and freed the conn a second time.
+    const quiet = socket(AF_INET, SOCK_STREAM, 0);
+    try std.testing.expect(quiet >= 0);
+    errdefer _ = sys.close(quiet);
+    c.watch = try fdwatch.readable(quiet, c, Hub.onReadable);
+    try h.conns.append(gpa, c);
+    h.drop(c);
+    // The second notice — the next session's event, or the read loop's end —
+    // must find nothing to do.
+    h.drop(c);
+    try std.testing.expectEqual(@as(usize, 0), h.conns.items.len);
+    try std.testing.expect(!h.alive(c));
 }

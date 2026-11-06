@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draws nanoterm's app icon, a prompt over blocks in Codegraff colors (amber
+"""Draws nanoterm's app icon, a prompt over blocks in the house dark's colors (amber
 on warm charcoal), and writes AppIcon.icns beside this file.
 Needs Pillow and macOS's iconutil. Usage: python3 macos/make-icon.py"""
 import os, subprocess, tempfile

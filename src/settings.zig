@@ -169,8 +169,10 @@ pub const Prefs = struct {
 
     /// The theme by its id, kept for the next launch; a theme that is
     /// not on the shelf reads as none, following the system instead.
+    /// The shelf entry's own id is what is kept, so a theme saved under
+    /// an old id is saved under its current name from here on.
     pub fn setTheme(p: *Prefs, id: []const u8) void {
-        const kept_id = if (theme.find(id) == null) "" else id;
+        const kept_id = if (theme.find(id)) |e| e.id else "";
         if (std.mem.eql(u8, p.theme, kept_id)) return;
         const kept = p.gpa.dupe(u8, kept_id) catch return;
         if (p.theme.len > 0) p.gpa.free(p.theme);

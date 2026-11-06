@@ -60,7 +60,7 @@ The Windows job also runs the application headless and exercises self-update; re
 
 - Do not edit build output or caches: `.zig-cache/`, `zig-out/`, `zig-pkg/`, `bench/.cache/`, `bench/zig-out/`, `bench/zig-cache/`, `bench/target/`, or generated `bench/results/*/screen-*` files. Packaging scripts also generate archives, checksums, app bundles, and `zig-out/package/manifest.json`.
 - Do not edit `vendor/fx` by hand. The build applies `patches/fx/nanoterm-embed.patch` to it, so a dirty submodule working tree after a build is expected and must not be committed; only the pinned commit pointer and the patch belong in the change. Move fx with `scripts/update-fx.sh`, then `zig build test` before committing the updated pointer and patch.
-- Preserve `third_party/licenses/CodeGraff-LICENSE.txt` and `src/marks/LICENSE.lobehub` verbatim. Not all derived material is covered by the repository's MIT license; read `THIRD_PARTY_NOTICES.md` before changing or reusing the Codegraff palettes, Harness-derived UI/visual material, or the bundled marks.
+- Preserve `third_party/licenses/Harness-LICENSE.txt` and `src/marks/LICENSE.lobehub` verbatim. Not all derived material is covered by the repository's MIT license; read `THIRD_PARTY_NOTICES.md` before changing or reusing the Harness-derived palettes, UI/visual material, or bundled marks.
 
 ## Safety and data handling
 

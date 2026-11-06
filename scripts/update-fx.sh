@@ -22,6 +22,7 @@ expected=(
     src/core/config/settings_store.zig
     src/core/terminal/native_session.zig
     src/embedded.zig
+    src/gateway/chat_completions_protocol.zig
 )
 unexpected=0
 while read -r status path; do

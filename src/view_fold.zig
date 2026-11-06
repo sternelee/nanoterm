@@ -49,6 +49,22 @@ fn plural(c: *ui.Context, n: usize, one: []const u8, many: []const u8) []const u
     return c.print("{d} {s}", .{ n, if (n == 1) one else many });
 }
 
+/// What one tool call counts as in a group's line. The kind is the ACP
+/// vocabulary, whichever agent supplied it: the built-in Agent maps fx's own
+/// tools onto the same words, so both agents read the same way.
+pub const Bucket = enum { read, edit, command, search, fetch, think, other };
+
+pub fn bucket(kind: []const u8) Bucket {
+    const eq = std.mem.eql;
+    if (eq(u8, kind, "read")) return .read;
+    if (eq(u8, kind, "edit") or eq(u8, kind, "delete") or eq(u8, kind, "move")) return .edit;
+    if (eq(u8, kind, "execute")) return .command;
+    if (eq(u8, kind, "search")) return .search;
+    if (eq(u8, kind, "fetch")) return .fetch;
+    if (eq(u8, kind, "think")) return .think;
+    return .other;
+}
+
 /// What a group did, in Harness's words.
 pub fn summary(c: *ui.Context, t: *agent_mod.Turn, items: []const Item) []const u8 {
     var reads: usize = 0;
@@ -69,9 +85,15 @@ pub fn summary(c: *ui.Context, t: *agent_mod.Turn, items: []const Item) []const 
             .command => commands += 1,
             .tool => |tl| {
                 if (tl.status == .failed) failed += 1;
-                const k = tl.kind;
-                const eq = std.mem.eql;
-                if (eq(u8, k, "read")) reads += 1 else if (eq(u8, k, "edit") or eq(u8, k, "delete") or eq(u8, k, "move")) edits += 1 else if (eq(u8, k, "execute")) commands += 1 else if (eq(u8, k, "search")) searches += 1 else if (eq(u8, k, "fetch")) fetches += 1 else if (eq(u8, k, "think")) thoughts += 1 else other += 1;
+                switch (bucket(tl.kind)) {
+                    .read => reads += 1,
+                    .edit => edits += 1,
+                    .command => commands += 1,
+                    .search => searches += 1,
+                    .fetch => fetches += 1,
+                    .think => thoughts += 1,
+                    .other => other += 1,
+                }
             },
             else => {},
         }

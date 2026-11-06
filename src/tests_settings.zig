@@ -7,6 +7,8 @@ const ws_mod = @import("workspace.zig");
 const session_mod = @import("session.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
+const engine = @import("fx");
+const Store = @import("agent_settings.zig").Store;
 
 test "the Settings page: built-in Agent, agents, appearance, updates" {
     const gpa = std.testing.allocator;
@@ -404,4 +406,40 @@ test "Settings' Relay page: off by default, and LAN turns the relay on" {
     t.settle(1);
     try std.testing.expect(shared.relay == null);
     try std.testing.expect(t.hasText("The relay is off."));
+}
+
+test "a saved provider is one fx itself can read back" {
+    // fx parses the `providers` map strictly: an entry without `protocol` and
+    // `auth` fails the whole settings file, so every other provider (and the
+    // saved permission mode) goes with it. Save one and read it back with fx's
+    // own loader, the way the agent does at startup.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-settings-provider";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    store.provider_name.set("local-smoke");
+    store.provider_url.set("http://127.0.0.1:11434/v1");
+    store.provider_model.set("smoke-model");
+    store.provider_auth_env.set("");
+    store.saveProvider();
+    try std.testing.expectEqualStrings("Provider saved and selected", store.status);
+
+    // A second write, so the file also carries a value a failed parse would
+    // take down with the providers map.
+    var outcome = try engine.provider_settings.setUserPreferencesAtHome(gpa, home, .{ .permission_mode = .yolo });
+    outcome.deinit(gpa);
+
+    // fx parses its own settings from a HOME, as it does at startup.
+    var settings = engine.provider_settings.loadMergedSettingsFromHome(gpa, home, home) catch
+        return error.ProviderSettingsUnreadable;
+    defer settings.deinit(gpa);
+    const providers = settings.providers orelse return error.NoProviders;
+    try std.testing.expect(providers.get("local-smoke") != null);
+    // The provider is the one that was saved, bound to its name.
+    try std.testing.expectEqualStrings("local-smoke", settings.provider.?.label());
 }

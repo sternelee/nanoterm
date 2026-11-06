@@ -23,9 +23,25 @@ pub const Event = union(enum) {
     idle,
 
     pub const Tool = struct {
+        /// The call's id, shared by its start event and its completion.
+        id: []u8,
         name: []u8,
+        /// "start", "completed" or "failed".
         status: []u8,
+        /// read | edit | delete | move | search | execute | think | fetch | other.
+        kind: []u8,
+        /// A human-readable action, such as "Reading src/main.zig".
+        label: []u8,
+        /// The command a shell call runs; empty for every other tool.
+        command: []u8,
+        /// The call's exit code, when it has one.
+        exit_code: ?i64,
+        /// How long the call took, in milliseconds.
+        duration_ms: ?u64,
+        /// What the tool printed, as the host should show it.
         output: []u8,
+        /// Whether `output` is the head of more the host did not get.
+        truncated: bool,
     };
     pub const Done = struct {
         session_id: []u8,
@@ -252,15 +268,36 @@ pub const Runtime = struct {
         try self.emit(.{ .diagnostic = copy });
     }
 
-    fn tool(context: ?*anyopaque, name: []const u8, status: []const u8, output: []const u8) anyerror!void {
+    fn tool(context: ?*anyopaque, event: engine.ToolEvent) anyerror!void {
         const self: *Runtime = @ptrCast(@alignCast(context.?));
-        const owned_name = try allocator.dupe(u8, name);
+        // Every string is copied: fx's arena for the event is freed as soon as
+        // this returns, while the queue outlives it.
+        const owned_id = try allocator.dupe(u8, event.id);
+        errdefer allocator.free(owned_id);
+        const owned_name = try allocator.dupe(u8, event.name);
         errdefer allocator.free(owned_name);
-        const owned_status = try allocator.dupe(u8, status);
+        const owned_status = try allocator.dupe(u8, event.status);
         errdefer allocator.free(owned_status);
-        const owned_output = try allocator.dupe(u8, output);
+        const owned_kind = try allocator.dupe(u8, event.kind);
+        errdefer allocator.free(owned_kind);
+        const owned_label = try allocator.dupe(u8, event.label);
+        errdefer allocator.free(owned_label);
+        const owned_command = try allocator.dupe(u8, event.command);
+        errdefer allocator.free(owned_command);
+        const owned_output = try allocator.dupe(u8, event.output);
         errdefer allocator.free(owned_output);
-        try self.emit(.{ .tool = .{ .name = owned_name, .status = owned_status, .output = owned_output } });
+        try self.emit(.{ .tool = .{
+            .id = owned_id,
+            .name = owned_name,
+            .status = owned_status,
+            .kind = owned_kind,
+            .label = owned_label,
+            .command = owned_command,
+            .exit_code = event.exit_code,
+            .duration_ms = event.duration_ms,
+            .output = owned_output,
+            .truncated = event.truncated,
+        } });
     }
 
     fn threadMain(self: *Runtime) void {
@@ -340,8 +377,12 @@ pub const Runtime = struct {
         switch (event) {
             .text, .diagnostic, .failed => |value| allocator.free(value),
             .tool => |call| {
+                allocator.free(call.id);
                 allocator.free(call.name);
                 allocator.free(call.status);
+                allocator.free(call.kind);
+                allocator.free(call.label);
+                allocator.free(call.command);
                 allocator.free(call.output);
             },
             .done => |done| {

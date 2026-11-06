@@ -149,7 +149,7 @@ fn toolIcon(kind: []const u8) []const u8 {
     const table = .{
         .{ "read", "doc.text" },      .{ "edit", "pencil" },     .{ "delete", "trash" },
         .{ "move", "arrow.right" },   .{ "search", "magnifyingglass" }, .{ "execute", "terminal" },
-        .{ "think", "brain" },        .{ "fetch", "globe" },
+        .{ "think", "brain" },        .{ "fetch", "globe" },     .{ "list", "list.bullet" },
     };
     inline for (table) |e| if (std.mem.eql(u8, kind, e[0])) return e[1];
     return "wrench.and.screwdriver";
@@ -172,26 +172,48 @@ fn tool(c: *ui.Context, app: *App, tl: *agent_mod.Tool) void {
     }
     if (tl.block) |b| {
         view_block.block(c, app, b, true);
-    } else if (tl.detail.items.len > 0 and tl.status != .in_progress) {
-        // A tool that listed files without a terminal — its output's shape
-        // says so — shows them with their icons, like any listing.
-        const d = tl.detail.items;
-        if (app.shared.prefs.file_icons) {
-            // Whole lines only: a listing cut mid-row would not be one.
-            const shown = if (d.len > 400)
-                (if (std.mem.lastIndexOfScalar(u8, d[0..400], '\n')) |nl| d[0..nl] else "")
-            else
-                d;
-            const cwd = if (app.agent) |ag| ag.cwd else app.cwd();
-            if (file_icons.decorateOutput(c.alloc(), app.shared.io, cwd, shown)) |dec| {
-                ui.richText(c, dec.text, dec.spans, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
-                if (shown.len < d.len) ui.text(c, "…", .{ .size = 11.5, .mono = true, .color = theme.faint });
-                return;
+    } else {
+        // A tool that ran a command itself: say what it ran and how it ended,
+        // then what it printed. No block holds it — the built-in Agent's shell
+        // runs in the agent's own process, not nanoterm's terminal.
+        if (tl.command.items.len > 0) commandLine(c, tl);
+        if (tl.detail.items.len > 0 and tl.status != .in_progress) {
+            // A tool that listed files without a terminal — its output's shape
+            // says so — shows them with their icons, like any listing.
+            const d = tl.detail.items;
+            if (app.shared.prefs.file_icons) {
+                const shown = if (d.len > 400)
+                    (if (std.mem.lastIndexOfScalar(u8, d[0..400], '\n')) |nl| d[0..nl] else "")
+                else
+                    d;
+                const cwd = if (app.agent) |ag| ag.cwd else app.cwd();
+                if (file_icons.decorateOutput(c.alloc(), app.shared.io, cwd, shown)) |dec| {
+                    ui.richText(c, dec.text, dec.spans, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+                    if (shown.len < d.len) ui.text(c, "…", .{ .size = 11.5, .mono = true, .color = theme.faint });
+                    return;
+                }
             }
+            // The output fx already cut to a preview; show all of it, and say
+            // when more was dropped rather than silently ending mid-line.
+            ui.text(c, d, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+            if (tl.truncated) ui.text(c, "… output truncated", .{ .size = 11.5, .mono = true, .color = theme.faint });
         }
-        const shown = if (d.len > 400) c.print("{s}…", .{d[0..400]}) else d;
-        ui.text(c, shown, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
     }
+}
+
+/// What a tool that ran a command itself ran, and how it ended: the command
+/// on one line, its exit code beside it when it has one.
+fn commandLine(c: *ui.Context, tl: *agent_mod.Tool) void {
+    const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+    defer r.end();
+    ui.icon(c, "chevron.right", .{ .size = 9, .weight = .semibold, .color = theme.faint });
+    ui.text(c, tl.command.items, .{ .size = 11.5, .mono = true, .color = theme.muted, .wrap = true });
+    ui.spacer(c);
+    if (tl.exit_code) |code| {
+        const failed = code != 0;
+        ui.text(c, c.print("exit {d}", .{code}), .{ .size = 11, .mono = true, .color = if (failed) theme.failure else theme.faint });
+    }
+    if (tl.duration_ms) |ms| ui.text(c, view_block.duration(c, @as(f64, @floatFromInt(ms)) / 1000.0), .{ .size = 11, .mono = true, .color = theme.faint });
 }
 
 fn plan(c: *ui.Context, entries: []const agent_mod.PlanEntry) void {
