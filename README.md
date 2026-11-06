@@ -284,10 +284,10 @@ closing a thread's tab while it works cancels it instead of leaving it
 looking failed.
 
 **Check now** in Settings → Threads asks gh straight away, and the button reads
-**Checking…** until it answers. **Read new threads as they arrive**, under the
-watch switch, decides whether a thread the poll finds is read at once (the
-default) or waits in the sidebar with **Read** until you ask for its plan, as
-noop's routines may wait for approval. Either way one turn runs at a time.
+**Checking…** until it answers. **Let agents process threads automatically**,
+under the watch switch, decides whether a thread the poll finds is read at once
+(the default) or waits in the sidebar with **Read** until you ask for its plan;
+clicking a row always opens the Github detail with gh, whichever way it points.
 
 **Turns an hour** is the budget noop keeps for a routine, for all threads
 together: 12 by default, and reading and working turns both count. When the

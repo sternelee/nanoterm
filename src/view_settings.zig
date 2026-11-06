@@ -734,8 +734,8 @@ fn threadsPage(c: *ui.Context, w: *Workspace) void {
             const t = ui.div(c).column().grow().gap(2);
             {
                 defer t.end();
-                ui.text(c, "Read new threads as they arrive", .{ .size = 13 });
-                ui.text(c, "Off, each waits for Read in the sidebar.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                ui.text(c, "Let agents process threads automatically", .{ .size = 13 });
+                ui.text(c, "Off, each waits in the sidebar with Read; clicking a row still opens its Github detail with gh.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
             }
             var auto = th.autoStart();
             if (ui.toggle(c, "", &auto)) th.setAutoStart(auto);
