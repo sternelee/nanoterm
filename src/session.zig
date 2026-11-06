@@ -96,7 +96,7 @@ pub const Shared = struct {
             .log = .{ .gpa = gpa },
             .pictures = .{ .gpa = gpa, .io = io, .home = home, .fetch = true },
             .prefs = .init(gpa, io, arena, home, env),
-            .threads = .init(gpa, io, home),
+            .threads = .initWithEnv(gpa, io, home, env),
         };
         s.log.load(io, try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "sessions.jsonl" }));
         s.appearance_path = try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "appearance" });

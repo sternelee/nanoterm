@@ -10,7 +10,9 @@
 const std = @import("std");
 const nanoui = @import("nanoui");
 const agent_mod = @import("agent.zig");
+const agents = @import("agents.zig");
 const blocks = @import("blocks.zig");
+const proc = @import("proc.zig");
 
 pub const Kind = enum { issue, pr, ci };
 
@@ -295,14 +297,36 @@ pub const Watcher = struct {
     last_check: f64 = 0,
     last_ok: f64 = 0,
     last_error: []u8 = &.{},
+    /// The app's environment, including the tool folders a Finder launch
+    /// would leave off PATH, for Thread child processes.
+    env: ?*const std.process.Environ.Map = null,
     app: ?*nanoui.App = null,
     host: ?Host = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, home: []const u8) Watcher {
-        var s: Watcher = .{ .gpa = gpa, .io = io, .home = home };
+        return initWithEnv(gpa, io, home, null);
+    }
+
+    pub fn initWithEnv(gpa: std.mem.Allocator, io: std.Io, home: []const u8, env: ?*const std.process.Environ.Map) Watcher {
+        var s: Watcher = .{ .gpa = gpa, .io = io, .home = home, .env = env };
         s.path = std.fs.path.join(gpa, &.{ home, "Library", "Application Support", "nanoterm", "threads.json" }) catch "";
         s.load();
         return s;
+    }
+
+    /// `argv` for a tool child process. Zig resolves `argv[0]` from the OS
+    /// environment even when `environ_map` is passed, so give the child the
+    /// absolute path found on the app's augmented PATH.
+    fn toolArgv(self: *Watcher, a: std.mem.Allocator, argv: []const []const u8) []const []const u8 {
+        if (argv.len == 0) return argv;
+        const out = a.alloc([]const u8, argv.len) catch return argv;
+        @memcpy(out[1..], argv[1..]);
+        out[0] = argv[0];
+        if (self.env) |env| {
+            const path = agents.searchPath(a, env.get("PATH") orelse "", self.home);
+            if (proc.which(a, self.io, path, argv[0])) |exe| out[0] = exe;
+        }
+        return out;
     }
 
     pub fn deinit(self: *Watcher) void {
@@ -618,7 +642,8 @@ pub const Watcher = struct {
         defer arena_state.deinit();
         const a = arena_state.allocator();
         const result = std.process.run(a, self.io, .{
-            .argv = &.{ "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD" },
+            .argv = self.toolArgv(a, &.{ "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD" }),
+            .environ_map = self.env,
             .stdout_limit = .limited(4096),
             .stderr_limit = .limited(4096),
             .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(30), .clock = .boot } },
@@ -632,7 +657,8 @@ pub const Watcher = struct {
     fn git(self: *Watcher, a: std.mem.Allocator, t: *Thread, cwd: []const u8, argv: []const []const u8) bool {
         _ = cwd;
         const result = std.process.run(a, self.io, .{
-            .argv = argv,
+            .argv = self.toolArgv(a, argv),
+            .environ_map = self.env,
             .stdout_limit = .limited(1024 * 1024),
             .stderr_limit = .limited(64 * 1024),
             .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(120), .clock = .boot } },
@@ -1485,7 +1511,8 @@ const Job = struct {
     /// when it fails; the output is the arena's to keep.
     fn gh(job: *Job, a: std.mem.Allocator, cwd: []const u8, argv: []const []const u8) ?[]const u8 {
         const result = std.process.run(a, job.io, .{
-            .argv = argv,
+            .argv = job.owner.toolArgv(a, argv),
+            .environ_map = job.owner.env,
             .cwd = if (cwd.len > 0) .{ .path = cwd } else .inherit,
             .stdout_limit = .limited(4 * 1024 * 1024),
             .stderr_limit = .limited(64 * 1024),
@@ -2288,6 +2315,56 @@ test "threads: closing a working thread's tab cancels it, it does not fail" {
     TestHost.open = true;
     w.pump();
     try std.testing.expectEqual(@as(usize, 2), TestHost.starts);
+}
+
+test "threads: a Finder-launched app finds gh and git through the app PATH" {
+    if (@import("builtin").os.tag == .windows) return;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-threads-app-path";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/bin");
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = home ++ "/bin/nanoterm-thread-gh",
+        .data = "#!/bin/sh\nprintf 'GH_PATH=%s\\n' \"$PATH\"\nprintf 'GH_HOME=%s\\n' \"$HOME\"\nprintf 'gh-ok'\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = home ++ "/bin/git",
+        .data = "#!/bin/sh\nprintf 'main\\n'\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = home ++ "/bin/nanoterm-thread-git-env",
+        .data = "#!/bin/sh\nprintf 'GIT_PATH=%s\\n' \"$PATH\"\nprintf 'GIT_HOME=%s\\n' \"$HOME\"\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", home ++ "/bin:/usr/bin:/bin");
+    try @import("env_path.zig").augment(arena, io, &env, home);
+
+    var w = Watcher.initWithEnv(gpa, io, home, &env);
+    defer w.deinit();
+    try std.testing.expect(w.isWorktree(home, "main"));
+
+    w.absorb(.{ .key = "issue:owner/a#1", .kind = .issue, .number = 1, .title = "A's", .url = "", .fingerprint = "1" }, 10);
+    var thread_arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer thread_arena_state.deinit();
+    try std.testing.expect(w.git(thread_arena_state.allocator(), &w.threads.items[0], "", &.{ "nanoterm-thread-git-env", "status" }));
+
+    const job = try gpa.create(Job);
+    job.* = .{ .owner = &w, .arena = .init(gpa), .io = io };
+    defer job.destroy();
+    const out = job.gh(job.arena.allocator(), "", &.{ "nanoterm-thread-gh", "repo", "view" }) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, out, "gh-ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "GH_HOME=" ++ home) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, home ++ "/bin") != null);
 }
 
 test "threads: an approved thread works in a worktree inside its project" {
