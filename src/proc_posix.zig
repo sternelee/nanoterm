@@ -41,6 +41,7 @@ const linux = @import("builtin").os.tag == .linux;
 const FileActions = if (linux) extern struct { bytes: [80]u8 align(8) = @splat(0) } else extern struct { ptr: ?*anyopaque = null };
 const SpawnAttr = if (linux) extern struct { bytes: [336]u8 align(8) = @splat(0) } else extern struct { ptr: ?*anyopaque = null };
 const TIOCSWINSZ: c_ulong = if (linux) 0x5414 else 0x80087467;
+const F_GETFL = 3;
 const F_SETFL = 4;
 const O_NONBLOCK = if (linux) 0o4000 else 0x4;
 const POSIX_SPAWN_SETSID: c_short = if (linux) 0x80 else 0x0400;
@@ -99,11 +100,24 @@ pub const Process = struct {
 
     /// Writes all of `bytes` to the process.
     pub fn send(p: *Process, bytes: []const u8) void {
+        // The master fd is nonblocking so reads can stop at EAGAIN. Writing
+        // to a full input queue must wait for the shell instead: a long
+        // command cut short at an open quote leaves zsh waiting forever.
+        // Make this write blocking, then put the read side back as it was.
+        const flags = fcntl(p.input, F_GETFL, @as(c_int, 0));
+        if (flags >= 0) _ = fcntl(p.input, F_SETFL, flags & ~@as(c_int, O_NONBLOCK));
+        defer {
+            if (flags >= 0) _ = fcntl(p.input, F_SETFL, flags);
+        }
         var rest = bytes;
         while (rest.len > 0) {
             const n = write(p.input, rest.ptr, rest.len);
-            if (n <= 0) return;
-            rest = rest[@intCast(n)..];
+            if (n > 0) {
+                rest = rest[@intCast(n)..];
+                continue;
+            }
+            if (n < 0 and std.c.errno(n) == .INTR) continue;
+            return;
         }
     }
 

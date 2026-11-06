@@ -158,6 +158,42 @@ test "a real zsh, cut into blocks" {
     try std.testing.expect(std.mem.endsWith(u8, sh.cwd.items, "/tmp"));
 }
 
+test "a long command line reaches the shell whole" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = try tempHome(io, arena, "shell-long-line");
+
+    var sh: shell_mod.Shell = .init(gpa, .{ .ctx = undefined, .changed = Noop.changed, .exited = Noop.exited });
+    defer sh.deinit();
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    try sh.start(arena, io, try std.fs.path.join(arena, &.{ home, "zdot" }), home, &env, home, .{ .rows = 24, .cols = 80 });
+    try pumpUntil(&sh, struct {
+        fn f(s: *shell_mod.Shell) bool {
+            return s.phase == .ready;
+        }
+    }.f);
+
+    // More than a terminal's input queue holds: a short write must not
+    // cut the line and leave zsh waiting for the closing quote.
+    const filler = try arena.alloc(u8, 6000);
+    @memset(filler, 'x');
+    const command = try std.fmt.allocPrint(arena, "true '{s}'", .{filler});
+    const b = try blocks.Block.create(gpa, 1, .shell, command, home, "");
+    defer b.destroy(gpa);
+    sh.submit(b);
+    try pumpUntil(b, struct {
+        fn done(x: *blocks.Block) bool {
+            return x.state == .done;
+        }
+    }.done);
+    try std.testing.expectEqual(@as(?i32, 0), b.exit_code);
+}
+
 test "a finished command tells its exit status" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
