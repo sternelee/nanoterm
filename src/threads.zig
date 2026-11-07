@@ -13,6 +13,7 @@ const agent_mod = @import("agent.zig");
 const agents = @import("agents.zig");
 const blocks = @import("blocks.zig");
 const proc = @import("proc.zig");
+const crypto = std.crypto;
 
 pub const Kind = enum { issue, pr, ci };
 
@@ -47,8 +48,14 @@ pub const State = enum {
     proposed,
     /// You approved it: the agent is working on a branch.
     running,
+    /// P0-C: Gracefully stopping (sending SIGTERM to process tree)
+    stopping,
+    /// P0-C: Cancelled (user took over or stop succeeded)
+    cancelled,
     done,
     failed,
+    /// P0-C: Stop failed (timeout or could not stop)
+    stop_failed,
     /// Put away; a newer version of it comes back.
     dismissed,
 };
@@ -84,6 +91,26 @@ pub const Thread = struct {
     files: u32 = 0,
     verify: []u8 = &.{},
     question: []u8 = &.{},
+    /// 本次 Proposal 对应的 instruction revision，每次追加需求或编辑时递增
+    instruction_revision: u64 = 0,
+    /// 本次 Proposal 的 revision，每次重新分析后递增
+    proposal_revision: u64 = 0,
+    /// 回答 question 后的有效标志，必须匹配当前 proposal_revision
+    question_answered: bool = false,
+    /// 回答 question 时记录的 proposal_revision，用于验证是否过期
+    question_answered_at_revision: u64 = 0,
+    /// HEAD commit SHA at analysis time
+    baseline_commit: []u8 = &.{},
+    /// Dirty file list at analysis time (path + content hash)
+    baseline_dirty: []DirtyFile = &.{},
+    /// Baseline at run time (recorded when Run starts)
+    run_baseline_commit: []u8 = &.{},
+    /// Dirty fingerprint at run time
+    run_baseline_dirty_hash: []u8 = &.{},
+    /// P0-C: PID of the running process (for graceful stop)
+    pid: u32 = 0,
+    /// P0-C: Timestamp when graceful stop started (for timeout detection)
+    stop_started_at: f64 = 0,
 
     fn deinit(t: *Thread, gpa: std.mem.Allocator) void {
         gpa.free(t.key);
@@ -97,6 +124,15 @@ pub const Thread = struct {
         freeIf(gpa, t.plan);
         freeIf(gpa, t.verify);
         freeIf(gpa, t.question);
+        freeIf(gpa, t.baseline_commit);
+        freeIf(gpa, t.run_baseline_commit);
+        freeIf(gpa, t.run_baseline_dirty_hash);
+        // baseline_dirty
+        for (t.baseline_dirty) |df| {
+            gpa.free(df.path);
+            gpa.free(df.hash);
+        }
+        gpa.free(t.baseline_dirty);
     }
 
     pub fn label(t: *const Thread) []const u8 {
@@ -112,6 +148,127 @@ pub const Thread = struct {
         return std.fmt.bufPrint(buf, "#{d}", .{t.number}) catch "";
     }
 };
+
+/// Dirty file representation for baseline tracking
+pub const DirtyFile = struct {
+    path: []u8,
+    hash: []u8,
+};
+
+/// Git helper: get HEAD commit SHA
+fn gitHeadSha(gpa: std.mem.Allocator, io: std.Io, repo_dir: []const u8) ![]u8 {
+    const result = std.process.run(gpa, io, .{
+        .argv = &.{ "git", "-C", repo_dir, "rev-parse", "HEAD" },
+        .stdout_limit = .limited(64),
+        .stderr_limit = .limited(64),
+        .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(10), .clock = .boot } },
+    }) catch return error.GitFailed;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    if (!result.term.success()) return error.GitFailed;
+    // Trim newline
+    const sha = std.mem.trim(u8, result.stdout, "\n");
+    return gpa.dupe(u8, sha);
+}
+
+/// Git helper: get list of dirty files with content hashes
+fn gitDirtyFiles(gpa: std.mem.Allocator, io: std.Io, repo_dir: []const u8) !std.ArrayListUnmanaged(DirtyFile) {
+    var list: std.ArrayListUnmanaged(DirtyFile) = .empty;
+    errdefer {
+        for (list.items) |df| {
+            gpa.free(df.path);
+            gpa.free(df.hash);
+        }
+        list.deinit(gpa);
+    }
+
+    // Get list of modified files
+    const result = std.process.run(gpa, io, .{
+        .argv = &.{ "git", "-C", repo_dir, "status", "--porcelain" },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64),
+        .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromSeconds(10), .clock = .boot } },
+    }) catch return error.GitFailed;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    if (!result.term.success()) return error.GitFailed;
+
+    var iter = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (iter.next()) |line| {
+        if (line.len < 4) continue;
+        const status = line[0..2];
+        const path = std.mem.trim(u8, line[3..], "\n");
+        if (path.len == 0) continue;
+
+        // Only track modified (M) or added (A) files in working tree
+        if (status[0] != 'M' and status[0] != 'A' and status[1] != 'M' and status[1] != 'A') continue;
+
+        // Read file and compute hash
+        const file_path = try std.fs.path.join(gpa, &.{ repo_dir, path });
+        defer gpa.free(file_path);
+        const content = std.Io.Dir.cwd().readFileAlloc(io, file_path, gpa, .limited(10 * 1024 * 1024)) catch continue;
+        defer gpa.free(content);
+
+        const hash = hashString(gpa, content) catch continue;
+        errdefer gpa.free(hash);
+
+        const path_copy = try gpa.dupe(u8, path);
+        errdefer gpa.free(path_copy);
+
+        try list.append(gpa, .{ .path = path_copy, .hash = hash });
+    }
+
+    return list;
+}
+
+/// Git helper: compute combined hash of all dirty files
+fn gitDirtyHash(gpa: std.mem.Allocator, io: std.Io, repo_dir: []const u8) ![]u8 {
+    var dirty_files = try gitDirtyFiles(gpa, io, repo_dir);
+    defer {
+        for (dirty_files.items) |df| {
+            gpa.free(df.path);
+            gpa.free(df.hash);
+        }
+        dirty_files.deinit(gpa);
+    }
+
+    // Simple approach: just concatenate all file hashes and hash the result
+    if (dirty_files.items.len == 0) {
+        return gpa.dupe(u8, "");
+    }
+
+    var total_len: usize = 0;
+    for (dirty_files.items) |df| {
+        total_len += df.hash.len;
+    }
+
+    const combined = try gpa.alloc(u8, total_len);
+    errdefer gpa.free(combined);
+    var offset: usize = 0;
+    for (dirty_files.items) |df| {
+        @memcpy(combined[offset..][0..df.hash.len], df.hash);
+        offset += df.hash.len;
+    }
+
+    return hashString(gpa, combined);
+}
+
+/// Simple string hash (SHA256)
+fn hashString(gpa: std.mem.Allocator, s: []const u8) ![]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(s);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    // Convert to hex string
+    const hex = try gpa.alloc(u8, 64);
+    for (digest, 0..) |b, i| {
+        const hex_chars = "0123456789abcdef";
+        hex[i * 2] = hex_chars[b >> 4];
+        hex[i * 2 + 1] = hex_chars[b & 0xF];
+    }
+    return hex;
+}
 
 /// The tail a proposal ends with, as the prompt asks for it:
 ///
@@ -444,7 +601,7 @@ pub const Watcher = struct {
     }
 
     /// A new item, or a newer version of one already known.
-    fn absorb(self: *Watcher, it: Item, now: f64) void {
+    pub fn absorb(self: *Watcher, it: Item, now: f64) void {
         if (self.findKey(it.key)) |t| {
             set(self.gpa, &t.title, it.title);
             set(self.gpa, &t.url, it.url);
@@ -504,7 +661,7 @@ pub const Watcher = struct {
     pub fn reap(self: *Watcher) void {
         const h = self.host orelse return;
         for (self.threads.items) |*t| {
-            if (t.state != .analyzing and t.state != .running) continue;
+            if (t.state != .analyzing and t.state != .running and t.state != .stopping) continue;
             if (t.session != 0 and h.alive(h.ctx, t.session)) continue;
             if (self.active_analysis == t.id) self.active_analysis = 0;
             if (self.active_run == t.id) self.active_run = 0;
@@ -519,7 +676,7 @@ pub const Watcher = struct {
 
     /// The next thread waiting for a reading turn gets one. One at a time:
     /// the tabs may share a checkout.
-    fn pump(self: *Watcher) void {
+    pub fn pump(self: *Watcher) void {
         if (self.active_analysis != 0) return;
         const h = self.host orelse return;
         if (self.atLimit()) return;
@@ -537,6 +694,10 @@ pub const Watcher = struct {
             t.state = .analyzing;
             t.asked = false;
             t.changed = blocks.now();
+
+            // P0-B: 记录分析时基线（非阻塞，失败不影响分析）
+            self.recordBaseline(t, p.cwd) catch {};
+
             if (t.session != 0 and h.alive(h.ctx, t.session)) {
                 if (!h.ask(h.ctx, t.session, .read, label_text, text)) {
                     self.failed(t, "its tab is gone");
@@ -553,6 +714,21 @@ pub const Watcher = struct {
             self.spend();
             self.save();
             return;
+        }
+
+        // P0-C: Check for stopping threads that have timed out
+        const now = blocks.now();
+        const timeout_seconds: f64 = 30; // 30 second graceful stop timeout
+        for (self.threads.items) |*t| {
+            if (t.state != .stopping) continue;
+            if (t.stop_started_at == 0) continue;
+            if (now - t.stop_started_at < timeout_seconds) continue;
+            // Timeout exceeded: transition to stop_failed
+            t.state = .stop_failed;
+            set(self.gpa, &t.note, "graceful stop timed out");
+            t.changed = now;
+            self.save();
+            if (self.host) |h2| h2.redraw(h2.ctx);
         }
     }
 
@@ -582,6 +758,8 @@ pub const Watcher = struct {
                     set(self.gpa, &t.verify, plan.verify);
                     set(self.gpa, &t.question, plan.question);
                     t.files = plan.files;
+                    // Increment proposal revision on successful analysis
+                    t.proposal_revision += 1;
                     t.state = .proposed;
                     t.seen = false;
                     t.changed = now;
@@ -591,6 +769,13 @@ pub const Watcher = struct {
                 if (self.active_run == t.id) self.active_run = 0;
                 t.state = if (did_fail) .failed else .done;
                 if (did_fail) set(self.gpa, &t.note, "the working turn failed");
+                t.seen = false;
+                t.changed = now;
+            },
+            .stopping => {
+                if (self.active_run == t.id) self.active_run = 0;
+                t.state = if (did_fail) .stop_failed else .cancelled;
+                if (did_fail) set(self.gpa, &t.note, "graceful stop failed");
                 t.seen = false;
                 t.changed = now;
             },
@@ -640,6 +825,58 @@ pub const Watcher = struct {
             set(self.gpa, &t.note, "");
         }
         return path;
+    }
+
+    /// Sync WIP from main checkout to worktree before running
+    fn syncWipToWorktree(self: *Watcher, p: *const Project, worktree_path: []const u8) !void {
+        var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+
+        // 1. Stash uncommitted changes in main checkout
+        const stash_result = std.process.run(a, self.io, .{
+            .argv = self.toolArgv(a, &.{ "git", "-C", p.cwd, "stash", "push", "-m", "nanoterm-wip-sync" }),
+            .stdout_limit = .limited(64),
+            .stderr_limit = .limited(64),
+        }) catch return error.GitFailed;
+        defer a.free(stash_result.stdout);
+        defer a.free(stash_result.stderr);
+
+        // Check if there were actually changes to stash
+        const had_changes = !std.mem.eql(u8, std.mem.trim(u8, stash_result.stdout, " \n"), "No local changes to save");
+
+        if (had_changes) {
+            // 2. Pop the stash in the worktree
+            const pop_result = std.process.run(a, self.io, .{
+                .argv = self.toolArgv(a, &.{ "git", "-C", worktree_path, "stash", "pop" }),
+                .stdout_limit = .limited(64),
+                .stderr_limit = .limited(64),
+            }) catch return error.GitFailed;
+            defer a.free(pop_result.stdout);
+            defer a.free(pop_result.stderr);
+            if (!pop_result.term.success()) return error.GitFailed;
+        }
+    }
+
+    /// P0-C: Gracefully stop a running thread's process tree
+    pub fn stopGracefully(self: *Watcher, id: u64) bool {
+        const t = self.findId(id) orelse return false;
+        if (t.state != .running) return false;
+        if (t.pid == 0) return false;
+
+        // Transition to stopping state
+        t.state = .stopping;
+        t.stop_started_at = blocks.now();
+        t.changed = blocks.now();
+        self.save();
+        if (self.host) |h| h.redraw(h.ctx);
+
+        // TODO: Send SIGTERM to process group
+        // This requires integrating with the agent's process tracking
+        // For now, just mark as stopping - the actual signal sending
+        // will be implemented when the agent process tracking is exposed
+
+        return true;
     }
 
     /// Whether `path` is a worktree checked out on `branch`, which is what a
@@ -718,6 +955,44 @@ pub const Watcher = struct {
         }
         const p = self.projectFor(threadRepo(t)) orelse return false;
         if (!p.verified) return false;
+
+        // P0-A: question 门槛检查
+        if (t.question.len > 0) {
+            set(self.gpa, &t.note, "questions must be answered before running");
+            if (self.host) |h| h.redraw(h.ctx);
+            return false;
+        }
+
+        // P0-B: 记录运行时基线
+        const repo_dir = p.cwd;
+        self.recordRunBaseline(t, repo_dir) catch {
+            set(self.gpa, &t.note, "failed to record run baseline");
+            if (self.host) |h| h.redraw(h.ctx);
+            return false;
+        };
+
+        // P0-B: 检查基线漂移
+        var drift_note: ?[]const u8 = null;
+        defer if (drift_note) |n| self.gpa.free(n);
+
+        if (t.baseline_commit.len > 0) {
+            // 检查 HEAD 是否变化
+            if (!std.mem.eql(u8, t.baseline_commit, t.run_baseline_commit)) {
+                drift_note = std.fmt.allocPrint(self.gpa, "baseline drift: HEAD changed from {s} to {s}", .{ t.baseline_commit, t.run_baseline_commit }) catch "baseline drift: HEAD changed";
+            }
+            // TODO: 检查 dirty 文件列表是否变化（需比较 baseline_dirty）
+        }
+
+        if (drift_note) |note| {
+            set(self.gpa, &t.note, note);
+            if (self.host) |h| h.redraw(h.ctx);
+            // TODO: P0-B 后续添加 UI 确认对话框
+            return false;
+        }
+
+        // P0-A: 检查 proposal revision 是否匹配
+        // （后续 P0-B 基线检查后再扩展）
+
         const h = self.host orelse return false;
         var branch_buf: [96]u8 = undefined;
         set(self.gpa, &t.branch, branchFor(t, &branch_buf));
@@ -725,6 +1000,14 @@ pub const Watcher = struct {
         // theirs, and the thread's work is a branch they can look at later.
         const at = self.worktree(t, p) orelse return false;
         defer self.gpa.free(at);
+
+        // P0-B: Sync WIP from main checkout to worktree
+        self.syncWipToWorktree(p, at) catch {
+            set(self.gpa, &t.note, "failed to sync WIP to worktree");
+            if (self.host) |host| host.redraw(host.ctx);
+            return false;
+        };
+
         const text = self.prompt(t, .work, p, at) catch return false;
         defer self.gpa.free(text);
         const label_text = self.heading(t) catch return false;
@@ -755,7 +1038,7 @@ pub const Watcher = struct {
     pub fn dismiss(self: *Watcher, id: u64) void {
         const t = self.findId(id) orelse return;
         // A working thread is ended by closing its tab, which `reap` sees.
-        if (t.state == .analyzing or t.state == .running) return;
+        if (t.state == .analyzing or t.state == .running or t.state == .stopping) return;
         t.state = .dismissed;
         t.changed = blocks.now();
         // The thread is gone: so is the tab that showed it. Its transcript
@@ -1030,6 +1313,101 @@ pub const Watcher = struct {
         return true;
     }
 
+    /// Answer a thread's question, triggering re-analysis.
+    pub fn answerQuestion(self: *Watcher, id: u64, answer: []const u8) bool {
+        const t = self.findId(id) orelse return false;
+        if (t.state != .proposed) return false;
+        if (t.question.len == 0) return false; // No question to answer
+        if (answer.len == 0) return false; // Empty answer not allowed
+
+        // Record the answer, mark for re-analysis
+        set(self.gpa, &t.note, "answered; awaiting re-analysis");
+        t.question_answered = true;
+        t.question_answered_at_revision = t.proposal_revision;
+        t.changed = blocks.now();
+        self.save();
+
+        // Re-analyze
+        return self.reanalyze(t);
+    }
+
+    /// Re-analyze a thread after a question is answered or instruction changes.
+    fn reanalyze(self: *Watcher, t: *Thread) bool {
+        // Increment instruction revision if there was a new answer
+        if (t.question_answered) {
+            t.instruction_revision += 1;
+            t.question_answered = false; // Consume the answer
+        }
+
+        // Clear baseline: will be re-recorded on next analysis
+        if (t.baseline_commit.len > 0) {
+            self.gpa.free(t.baseline_commit);
+            t.baseline_commit = &.{};
+        }
+        // Skip baseline_dirty for now (slice management complexity)
+
+        // Reset to queued state for re-analysis
+        t.state = .queued;
+        t.proposal_revision += 1;
+        t.changed = blocks.now();
+        self.save();
+
+        // Trigger pump to start new analysis
+        self.pump();
+        if (self.host) |h| h.redraw(h.ctx);
+        return true;
+    }
+
+    /// Record analysis baseline: get HEAD commit SHA and dirty file list (path + content hash)
+    pub fn recordBaseline(self: *Watcher, t: *Thread, repo_dir: []const u8) !void {
+        // 1. Get HEAD commit SHA
+        const head_sha = try gitHeadSha(self.gpa, self.io, repo_dir);
+        defer self.gpa.free(head_sha);
+
+        if (t.baseline_commit.len > 0) self.gpa.free(t.baseline_commit);
+        t.baseline_commit = self.gpa.dupe(u8, head_sha) catch &.{};
+
+        // 2. Get dirty file list
+        var dirty_files = try gitDirtyFiles(self.gpa, self.io, repo_dir);
+        defer {
+            for (dirty_files.items) |df| {
+                self.gpa.free(df.path);
+                self.gpa.free(df.hash);
+            }
+            dirty_files.deinit(self.gpa);
+        }
+
+        // 3. Store baseline_dirty (deep copy)
+        if (t.baseline_dirty.len > 0) {
+            for (t.baseline_dirty) |df| {
+                self.gpa.free(df.path);
+                self.gpa.free(df.hash);
+            }
+            self.gpa.free(t.baseline_dirty);
+        }
+        t.baseline_dirty = self.gpa.dupe(DirtyFile, dirty_files.items) catch &.{};
+        for (dirty_files.items, 0..) |src, i| {
+            t.baseline_dirty[i].path = self.gpa.dupe(u8, src.path) catch &.{};
+            t.baseline_dirty[i].hash = self.gpa.dupe(u8, src.hash) catch &.{};
+        }
+    }
+
+    /// Record run baseline: get current HEAD and dirty fingerprint
+    pub fn recordRunBaseline(self: *Watcher, t: *Thread, repo_dir: []const u8) !void {
+        const head_sha = try gitHeadSha(self.gpa, self.io, repo_dir);
+        defer self.gpa.free(head_sha);
+
+        if (t.run_baseline_commit.len > 0) self.gpa.free(t.run_baseline_commit);
+        t.run_baseline_commit = self.gpa.dupe(u8, head_sha) catch &.{};
+
+        // Compute combined hash of all dirty files
+        const dirty_hash = try gitDirtyHash(self.gpa, self.io, repo_dir);
+        defer self.gpa.free(dirty_hash);
+
+        if (t.run_baseline_dirty_hash.len > 0) self.gpa.free(t.run_baseline_dirty_hash);
+        t.run_baseline_dirty_hash = self.gpa.dupe(u8, dirty_hash) catch &.{};
+    }
+
     // ---------------------------------------------------------------- lookups
 
     pub fn watching(self: *const Watcher) bool {
@@ -1109,7 +1487,7 @@ pub const Watcher = struct {
         return t.key[colon + 1 .. hash];
     }
 
-    fn projectFor(self: *const Watcher, repo: []const u8) ?*const Project {
+    pub fn projectFor(self: *const Watcher, repo: []const u8) ?*const Project {
         if (repo.len == 0) return null;
         for (self.cfg.projects.items) |*p| {
             if (std.mem.eql(u8, p.repo, repo)) return p;
@@ -1298,6 +1676,16 @@ pub const Watcher = struct {
             files: u32,
             verify: []const u8,
             question: []const u8,
+            instruction_revision: u64,
+            proposal_revision: u64,
+            question_answered: bool,
+            question_answered_at_revision: u64,
+            baseline_commit: []const u8,
+            baseline_dirty: []const u8, // Serialized as JSON array
+            run_baseline_commit: []const u8,
+            run_baseline_dirty_hash: []const u8,
+            pid: u32,
+            stop_started_at: f64,
             created: f64,
             changed: f64,
         };
@@ -1351,6 +1739,16 @@ pub const Watcher = struct {
             .files = t.files,
             .verify = t.verify,
             .question = t.question,
+            .instruction_revision = t.instruction_revision,
+            .proposal_revision = t.proposal_revision,
+            .question_answered = t.question_answered,
+            .question_answered_at_revision = t.question_answered_at_revision,
+            .baseline_commit = t.baseline_commit,
+            .baseline_dirty = &.{}, // Skip for now
+            .run_baseline_commit = t.run_baseline_commit,
+            .run_baseline_dirty_hash = t.run_baseline_dirty_hash,
+            .pid = t.pid,
+            .stop_started_at = t.stop_started_at,
             .created = t.created,
             .changed = t.changed,
         }) catch return;
@@ -1397,6 +1795,16 @@ pub const Watcher = struct {
             files: u32 = 0,
             verify: []const u8 = "",
             question: []const u8 = "",
+            instruction_revision: u64 = 0,
+            proposal_revision: u64 = 0,
+            question_answered: bool = false,
+            question_answered_at_revision: u64 = 0,
+            baseline_commit: []const u8 = "",
+            baseline_dirty: []const u8 = "",
+            run_baseline_commit: []const u8 = "",
+            run_baseline_dirty_hash: []const u8 = "",
+            pid: u32 = 0,
+            stop_started_at: f64 = 0,
             created: f64 = 0,
             changed: f64 = 0,
         };
@@ -1474,12 +1882,22 @@ pub const Watcher = struct {
             if (s.verify.len > 0) t.verify = self.gpa.dupe(u8, s.verify) catch &.{};
             if (s.question.len > 0) t.question = self.gpa.dupe(u8, s.question) catch &.{};
             t.files = s.files;
+            t.instruction_revision = s.instruction_revision;
+            t.proposal_revision = s.proposal_revision;
+            t.question_answered = s.question_answered;
+            t.question_answered_at_revision = s.question_answered_at_revision;
+            if (s.baseline_commit.len > 0) t.baseline_commit = self.gpa.dupe(u8, s.baseline_commit) catch &.{};
+            if (s.run_baseline_commit.len > 0) t.run_baseline_commit = self.gpa.dupe(u8, s.run_baseline_commit) catch &.{};
+            if (s.run_baseline_dirty_hash.len > 0) t.run_baseline_dirty_hash = self.gpa.dupe(u8, s.run_baseline_dirty_hash) catch &.{};
+            t.pid = s.pid;
+            t.stop_started_at = s.stop_started_at;
+            // baseline_dirty is serialized as JSON array; we'll skip for now
             self.next_id = @max(self.next_id, t.id + 1);
             // Tabs do not survive a restart. A reading turn starts again; a
             // working one is reported, since it may have changed something.
             switch (t.state) {
                 .analyzing => t.state = .queued,
-                .running => {
+                .running, .stopping => {
                     t.state = .failed;
                     set(self.gpa, &t.note, "interrupted when nanoterm quit");
                 },

@@ -71,6 +71,11 @@ test {
     _ = @import("tests_file_icons.zig");
     _ = @import("tests_view.zig");
     _ = @import("tests_sidebar.zig");
+    _ = @import("tests_threads.zig");
+    _ = @import("tests_agent.zig");
+    _ = @import("tests_stream.zig");
+    _ = @import("tests_attach.zig");
+    _ = @import("tests_file_icons.zig");
     _ = @import("open_files.zig");
     _ = @import("view_sidebar.zig");
     _ = @import("tests_agent.zig");

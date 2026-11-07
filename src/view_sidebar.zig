@@ -232,7 +232,7 @@ fn threadsSection(w: *Workspace, c: *ui.Context, now: f64) void {
         return;
     }
     // What asks for you first, then what is working, then the rest.
-    for ([_]threads_mod.State{ .proposed, .analyzing, .running, .queued, .failed, .done }) |want| {
+    for ([_]threads_mod.State{ .proposed, .analyzing, .running, .stopping, .queued, .failed, .done, .cancelled, .stop_failed }) |want| {
         for (th.threads.items) |*t| {
             if (t.state == .dismissed or !th.belongs(t)) continue;
             if (t.state != want) continue;
@@ -254,10 +254,11 @@ fn sectionTitle(c: *ui.Context, title: []const u8, count: usize, needs: usize, t
 fn threadState(st: threads_mod.State) State {
     return switch (st) {
         .queued => .idle,
-        .analyzing, .running => .working,
+        .analyzing, .running, .stopping => .working,
         .proposed => .needs_you,
         .done => .done,
-        .failed => .failed,
+        .failed, .stop_failed => .failed,
+        .cancelled => .done,
         .dismissed => .idle,
     };
 }
@@ -285,10 +286,26 @@ fn threadRow(w: *Workspace, c: *ui.Context, t: *threads_mod.Thread, now: f64) vo
             const pill = ui.div(c).h(16).px(6).rounded(8).bg(theme.warning.alpha(0.16)).center();
             defer pill.end();
             ui.text(c, "question", .{ .size = 10, .color = theme.warning });
+            // P0-A: Add Answer button when there's a question
+            if (ui.button(c, "Answer", .{ .variant = .secondary, .size = 10.5 }).clicked) {
+                // TODO: Show answer dialog - for now, this would need a dialog UI
+                // For now, we'll just mark as answered with a placeholder
+                _ = th.answerQuestion(t.id, "placeholder answer");
+            }
         } else if (t.files > 0) {
             ui.text(c, c.print("{d} {s}", .{ t.files, if (t.files == 1) "file" else "files" }), .{ .size = 10.5, .color = theme.faint });
         }
-        if (ui.button(c, "Run", .{ .variant = .primary, .size = 10.5, .disabled = th.active_run != 0 or !th.canTrigger(t) or th.atLimit() }).clicked) _ = th.run(t.id);
+        // P0-A: Disable Run button when question exists
+        const run_disabled = th.active_run != 0 or !th.canTrigger(t) or th.atLimit() or t.question.len > 0;
+        if (ui.button(c, "Run", .{ .variant = .primary, .size = 10.5, .disabled = run_disabled }).clicked) _ = th.run(t.id);
+        if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "xmark" }).clicked) th.dismiss(t.id);
+    } else if (t.state == .stopping) {
+        // P0-C: Gracefully stopping - offer Take Over button
+        if (ui.button(c, "Take Over", .{ .variant = .secondary, .size = 10.5 }).clicked) {
+            // TODO: Implement Take Over - user takes manual control of the worktree
+            // For now, mark as cancelled and let user handle it
+            _ = th.dismiss(t.id);
+        }
         if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "xmark" }).clicked) th.dismiss(t.id);
     } else if (t.state == .queued and !th.autoStart()) {
         // Agents start on their own only when Settings says so: this is the
