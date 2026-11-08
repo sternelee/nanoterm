@@ -2275,9 +2275,7 @@ pub const Phone = struct {
                     if (new_idx != current_idx) {
                         p.session = p.sessions.items[new_idx].id;
                         // Trigger haptic feedback on tab switch
-                        if (builtin.os.tag == .ios) {
-                            _ = c.leaf(.{ .haptic = .light }, .none, null);
-                        }
+                        if (builtin.os.tag == .ios) nanoui.haptics.impact(.light);
                         p.notify(.info, "swiped to tab {d}", .{p.session});
                     }
                 }
@@ -2298,9 +2296,7 @@ pub const Phone = struct {
             if (p.pull_distance > 120 and !p.pull_refreshing) {
                 p.pull_refreshing = true;
                 // Trigger haptic feedback on refresh
-                if (builtin.os.tag == .ios) {
-                    _ = c.leaf(.{ .haptic = .medium }, .none, null);
-                }
+                if (builtin.os.tag == .ios) nanoui.haptics.impact(.medium);
                 p.refresh();
                 p.pull_distance = 0;
             }
