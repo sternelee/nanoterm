@@ -159,6 +159,29 @@ index eab73bd6a..04989e457 100644
      for (global_roots) |spec| {
          try std.testing.expect(spec.source != .global_fx);
      }
+diff --git a/src/core/agent/runtime/orchestrator.zig b/src/core/agent/runtime/orchestrator.zig
+index b294a346d..06205eee1 100644
+--- a/src/core/agent/runtime/orchestrator.zig
++++ b/src/core/agent/runtime/orchestrator.zig
+@@ -8800,10 +8800,14 @@ fn processQueuedPromptLoop(
+                             reset_stream_for_next_attempt = true;
+                             continue;
+                         }
+-                        stream_ctx.drop_staged_response_language_candidate();
+-                        try deps.push_system_notice(deps.ctx, response_language_failure_notice);
+-                        finish_trace.finish("response_language_mismatch");
+-                        return error.ResponseLanguageMismatch;
++                        // nanoterm: a correction that still comes back in
++                        // another language is delivered, not discarded. The
++                        // strict path returned ResponseLanguageMismatch and
++                        // halted the whole turn (losing the answer) whenever an
++                        // injected English prompt — e.g. /compact's handoff —
++                        // met a conversation actually written in another
++                        // language. Keep what the model wrote and finish.
++                        try stream_ctx.accept_staged_response_language();
+                     },
+                 }
+             }
 diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
 index 647759058..2ae04b527 100644
 --- a/src/core/cli/cli_ask.zig
