@@ -454,3 +454,23 @@ test "notification duration varies by kind" {
     p.notify(.err, "error", .{});
     try std.testing.expectEqual(@as(f32, 5.0), p.notifications.items[3].duration);
 }
+
+test "a scanned link fills the connect fields, and a bad one changes nothing" {
+    const p = try phone(std.testing.allocator);
+    defer p.destroy();
+
+    // Not a link: the fields keep what they had (empty here).
+    try std.testing.expect(!p.applyScannedLink("hello world"));
+    try std.testing.expectEqualStrings("", p.host_input.text());
+
+    // The desktop's own QR link.
+    try std.testing.expect(p.applyScannedLink("nanoterm://relay?host=192.168.31.124&port=4789&token=0123456789abcdef0123456789abcdef"));
+    try std.testing.expectEqualStrings("192.168.31.124", p.host_input.text());
+    try std.testing.expectEqualStrings("4789", p.port_input.text());
+    try std.testing.expectEqual(@as(usize, 32), p.token_input.text().len);
+
+    // A link without a port takes the relay's default.
+    try std.testing.expect(p.applyScannedLink("nanoterm://relay?host=10.0.0.9&token=0123456789abcdef0123456789abcdef"));
+    try std.testing.expectEqualStrings("10.0.0.9", p.host_input.text());
+    try std.testing.expectEqualStrings("4789", p.port_input.text());
+}

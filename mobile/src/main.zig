@@ -19,6 +19,7 @@ const fdwatch = nanoui.fdwatch;
 const settings = @import("settings.zig");
 const md = @import("markdown");
 const highlight = @import("highlight");
+const relayLink = @import("relayLink.zig");
 /// The desktop's palette: the phone wears the same theme.
 const theme = @import("theme");
 
@@ -1787,6 +1788,21 @@ pub const Phone = struct {
         }
     }
 
+    /// The link a QR code carried, into the connect fields: a scan, a paste,
+    /// or a deep link all land here. Returns what `parse` did — false leaves
+    /// the fields as they were. The person still taps Connect, so a wrong
+    /// scan is seen before it is tried.
+    pub fn applyScannedLink(p: *Phone, text: []const u8) bool {
+        const link = relayLink.parse(text) orelse return false;
+        p.host_input.set(link.host);
+        var buf: [8]u8 = undefined;
+        p.port_input.set(std.fmt.bufPrint(&buf, "{d}", .{link.port}) catch "4789");
+        p.token_input.set(link.token);
+        p.notify(.success, "Scanned {s}:{d}", .{ link.host, link.port });
+        p.draw();
+        return true;
+    }
+
     /// Save a connection to the recent history, keeping last 5.
     fn saveConnection(p: *Phone, host: []const u8, port: u16, token: []const u8) void {
         // Check if already exists, update last_used.
@@ -2883,4 +2899,5 @@ fn closed(ctx: *anyopaque, _: *nanoui.Window) void {
 test {
     _ = @import("tests_phone.zig");
     _ = @import("settings.zig");
+    _ = @import("relayLink.zig");
 }
