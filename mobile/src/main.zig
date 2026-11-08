@@ -286,7 +286,6 @@ fn summary(c: *ui.Context, t: *const Turn, items: []const Item) []const u8 {
 fn agentTone(c: *ui.Context) ui.Color {
     return ui.Color.hex(if (c.theme.dark) 0xbd80e4 else 0x7a4ea3);
 }
-
 fn cwdTone(c: *ui.Context) ui.Color {
     return ui.Color.hex(if (c.theme.dark) 0x8a9bb0 else 0x3b6fb0);
 }
@@ -298,6 +297,36 @@ fn faintTone(c: *ui.Context) ui.Color {
 
 fn warningTone(c: *ui.Context) ui.Color {
     return ui.Color.hex(if (c.theme.dark) 0xd9a441 else 0x9a6e1b);
+}
+
+/// The theme to draw with: the chosen shelf theme from the desktop, else the
+/// house pair the preference (or the system's appearance) asks for.
+fn currentTheme(p: *Phone) ui.Theme {
+    theme.select(if (p.theme_choice_len > 0) p.theme_choice[0..p.theme_choice_len] else "");
+    const appearance: theme.Appearance = switch (p.theme_pref) {
+        .system => if (nanoui.isDark()) .dark else .light,
+        .light => .light,
+        .dark => .dark,
+    };
+    theme.apply(appearance);
+    return theme.ui();
+}
+
+/// One theme on the desktop's shelf: its name and note, checked when it is
+/// the one in play. Tapping it picks it.
+fn themeRow(c: *ui.Context, p: *Phone, id: []const u8, name: []const u8, desc: []const u8) void {
+    const selected = std.mem.eql(u8, p.themeId(), id);
+    ui.key(c, c.print("theme-{s}", .{if (id.len > 0) id else "default"}));
+    var row = ui.div(c).row().wFull().gap(10).itemsCenter().px(12).py(10).rounded(8)
+        .bg(if (selected) c.theme.surface_hover else c.theme.surface)
+        .border(if (selected) c.theme.accent else c.theme.border);
+    defer row.end();
+    if (row.clicked()) p.setTheme(id);
+    const col = ui.div(c).column().grow().gap(1);
+    defer col.end();
+    ui.text(c, name, .{ .size = 13, .weight = if (selected) .semibold else .medium, .color = c.theme.text });
+    ui.text(c, desc, .{ .size = 11, .color = c.theme.muted, .wrap = true, .leading = 1.3 });
+    if (selected) ui.icon(c, "checkmark", .{ .size = 13, .color = c.theme.accent });
 }
 
 fn avatar(c: *ui.Context, icon: []const u8, color: ui.Color) void {
@@ -903,6 +932,10 @@ pub const Phone = struct {
     host_len: usize = 0,
     /// Theme preference: system, light, or dark.
     theme_pref: settings.ThemePreference = .system,
+    /// A named theme from the desktop's shelf (id), empty to follow the
+    /// preference above. Held in a fixed buffer, as host and token are.
+    theme_choice: [32]u8 = @splat(0),
+    theme_choice_len: usize = 0,
     arena_state: std.heap.ArenaAllocator,
 
     fn create(init: std.process.Init, args: []const []const u8) !*Phone {
@@ -921,6 +954,10 @@ pub const Phone = struct {
             }
             p.port = saved.port;
             p.theme_pref = saved.theme;
+            if (saved.theme_id.len <= p.theme_choice.len) {
+                @memcpy(p.theme_choice[0..saved.theme_id.len], saved.theme_id);
+                p.theme_choice_len = saved.theme_id.len;
+            }
             p.layout = saved.layout;
             if (saved.usable()) {
                 @memcpy(&p.token, saved.token);
@@ -1654,7 +1691,7 @@ pub const Phone = struct {
     /// The layout and theme, saved as the connect fields were.
     fn persist(p: *Phone) void {
         if (!p.has_token) return;
-        _ = settings.save(p.io, p.gpa, p.host[0..p.host_len], p.port, &p.token, p.theme_pref, p.layout);
+        _ = settings.save(p.io, p.gpa, p.host[0..p.host_len], p.port, &p.token, p.theme_pref, p.themeId(), p.layout);
     }
 
     /// Tabs as pills, or the desktop's sidebar as a drawer.
@@ -1662,6 +1699,22 @@ pub const Phone = struct {
         if (p.layout == layout) return;
         p.layout = layout;
         p.drawer_open = false;
+        p.persist();
+        p.draw();
+    }
+
+    /// The chosen theme's id from the desktop's shelf; empty follows the
+    /// preference (the system's light or dark).
+    fn themeId(p: *const Phone) []const u8 {
+        return p.theme_choice[0..p.theme_choice_len];
+    }
+
+    /// Pick a theme from the desktop's shelf, or "" to follow the
+    /// preference. Applies at once: the view hands it to nanoui each frame.
+    pub fn setTheme(p: *Phone, id: []const u8) void {
+        const n = @min(id.len, p.theme_choice.len);
+        @memcpy(p.theme_choice[0..n], id[0..n]);
+        p.theme_choice_len = n;
         p.persist();
         p.draw();
     }
@@ -1717,7 +1770,7 @@ pub const Phone = struct {
         p.where_len = printed.len;
         // Saved before it is tried: a phone that cannot save still works
         // for this run, and one that can does not ask again.
-        _ = settings.save(p.io, p.gpa, host, port, token, p.theme_pref, p.layout);
+        _ = settings.save(p.io, p.gpa, host, port, token, p.theme_pref, p.themeId(), p.layout);
         // Save to recent connections history.
         p.saveConnection(host, port, token);
         p.connect_why_len = 0;
@@ -1925,7 +1978,7 @@ pub const Phone = struct {
             ui.text(c, "Appearance", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
             const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);
             defer box.end();
-            ui.text(c, "The phone follows the system's light or dark; a new choice applies when the app restarts.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
+            ui.text(c, "The phone follows the system's light or dark, unless a theme below is chosen. Choices apply at once.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
             const order = [_][]const u8{ "System", "Light", "Dark" };
             var picked: usize = switch (p.theme_pref) {
                 .system => 0,
@@ -1942,10 +1995,13 @@ pub const Phone = struct {
                     p.theme_pref = next;
                     const host = p.host[0..p.host_len];
                     const port = p.port;
-                    if (p.has_token) _ = settings.save(p.io, p.gpa, host, port, &p.token, p.theme_pref, p.layout);
-                    p.notify(.info, "Theme saved: it applies when the app restarts.", .{});
+                    if (p.has_token) _ = settings.save(p.io, p.gpa, host, port, &p.token, p.theme_pref, p.themeId(), p.layout);
+                    p.notify(.info, "Theme: {s}", .{if (p.theme_choice_len > 0) p.themeId() else @tagName(p.theme_pref)});
                 }
             }
+            ui.text(c, "Theme", .{ .size = 13, .weight = .medium, .color = c.theme.muted });
+            themeRow(c, p, "", "Default", "follow the light and dark above");
+            for (theme.list) |e| themeRow(c, p, e.id, e.name, e.note);
             ui.text(c, "Sessions", .{ .size = 13, .weight = .medium, .color = c.theme.muted });
             const layouts = [_][]const u8{ "Tabs", "Sidebar" };
             var picked_layout: usize = if (p.layout == .tabs) 0 else 1;
@@ -2491,6 +2547,9 @@ pub const Phone = struct {
     }
 
     pub fn view(p: *Phone, c: *ui.Context) void {
+        // Hand nanoui the theme each frame so a pick in Settings shows at
+        // once, the way the desktop's view does.
+        c.theme_chosen = currentTheme(p);
         if (p.screen == .connect) return p.connectView(c);
 
         // Gesture detection: horizontal swipe to switch tabs, pull down to refresh.
@@ -2801,22 +2860,11 @@ pub fn main(init: std.process.Init) !void {
     const app = try nanoui.App.create(init, .{ .name = "nanoterm" });
     defer app.destroy();
 
-    // The desktop's palette, chosen by preference (system appearance when
-    // it is the system's), so the phone looks like the workstation.
-    const appearance: theme.Appearance = switch (p.theme_pref) {
-        .system => if (nanoui.isDark()) .dark else .light,
-        .light => .light,
-        .dark => .dark,
-    };
-    theme.apply(appearance);
-    const theme_override: ?ui.Theme = theme.ui();
-
     p.window = try app.newWindow(.{
         .title = "nanoterm",
         .width = 430,
         .height = 932,
         .full_bleed = true,
-        .theme = theme_override,
         .content = .{ .view = .init(p, Phone.view) },
         .on_close = .{ .ctx = p, .func = closed },
     });
