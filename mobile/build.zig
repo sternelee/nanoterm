@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) void {
             .nanoui = dep.module("nanoui"),
         });
         if (android.Sdk.find(b)) |sdk| _ = android.linkNdk(b, lib, sdk);
-        const opts: android.Options = .{ .name = "nanoterm", .id = "com.justrach.nanoterm", .version = "0.1" };
+        const opts: android.Options = .{ .name = "nanoterm", .id = "com.justrach.nanoterm", .version = "0.1", .icon = b.path("android/ic_launcher.png") };
         const apk = android.apk(b, lib, opts);
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(apk, .prefix, "android/nanoterm.apk").step);
         const run_android = android.runOnDevice(b, apk, opts, b.path("."));
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     // iOS: the bundle, then the Simulator.
     if (target.result.os.tag != .ios) return;
     const ios = @import("nanoui").ios;
-    const opts: ios.Options = .{ .name = "nanoterm", .id = "com.justrach.nanoterm", .version = "0.1" };
+    const opts: ios.Options = .{ .name = "nanoterm", .id = "com.justrach.nanoterm", .version = "0.1", .assets = b.path("ios/Assets.xcassets") };
     const bundle = ios.app(b, exe, opts);
     b.getInstallStep().dependOn(&b.addInstallDirectory(.{
         .source_dir = bundle,
