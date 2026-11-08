@@ -52,6 +52,7 @@ test {
     _ = @import("tests_multiline.zig");
     _ = @import("agent_prompt.zig");
     _ = @import("analytics.zig");
+    _ = @import("qrcode.zig");
     _ = @import("tests_screen.zig");
     _ = @import("split.zig");
     _ = @import("commands.zig");

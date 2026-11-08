@@ -634,6 +634,43 @@ fn privacy(c: *ui.Context, w: *Workspace) void {
     if (ui.button(c, "Terms", .{ .variant = .ghost, .size = 11.5, .icon = "doc.text" }).clicked) _ = nanoui.shell.openUrl(an.terms_url);
 }
 
+/// Draws `text` as a QR code (dark modules on white) in a ~200pt box.
+/// Returns false when the payload is too long to encode.
+fn qrCode(c: *ui.Context, text: []const u8) bool {
+    const qrcode = @import("qrcode.zig");
+    const gpa = c.alloc();
+    var m = qrcode.encode(gpa, text) catch return false;
+    defer m.deinit();
+    const dim: f32 = 200;
+    const quiet: usize = 4;
+    const modules: f32 = @floatFromInt(m.size + quiet * 2);
+    const cell = dim / modules;
+    const cv = ui.canvas(c, .{
+        .width = .{ .px = dim },
+        .height = .{ .px = dim },
+        .background = ui.Color.hex(0xffffff),
+        .radius = 8,
+        .border = theme.border,
+    });
+    const dark = ui.Color.hex(0x000000);
+    var y: usize = 0;
+    while (y < m.size) : (y += 1) {
+        var x: usize = 0;
+        while (x < m.size) : (x += 1) {
+            if (!m.at(x, y)) continue;
+            const qx: f32 = @floatFromInt(x + quiet);
+            const qy: f32 = @floatFromInt(y + quiet);
+            cv.rect(.{
+                .x = @floor(qx * cell),
+                .y = @floor(qy * cell),
+                .w = @ceil(cell),
+                .h = @ceil(cell),
+            }, dark, 0);
+        }
+    }
+    return true;
+}
+
 /// The phone's relay: off, on the LAN, or over Tailscale — the addresses a
 /// phone must be told, and the token it has to say when it connects.
 fn relayPage(c: *ui.Context, w: *Workspace) void {
@@ -675,6 +712,13 @@ fn relayPage(c: *ui.Context, w: *Workspace) void {
             ui.text(c, c.print("Token   {s}", .{token}), .{ .size = 12.5, .weight = .semibold });
             if (ui.button(c, "Copy", .{ .size = 12 }).clicked) c.clipboard.write(c.clipboard.ctx, token);
             ui.text(c, "Paste it into the phone's Connect screen.", .{ .size = 11, .color = theme.muted });
+            if (addr.len > 0) {
+                ui.spacer(c);
+                const url = c.print("nanoterm://relay?host={s}&port={d}&token={s}", .{ addr, port, token });
+                if (qrCode(c, url)) {
+                    ui.text(c, "Or scan this in the phone's Connect screen.", .{ .size = 11, .color = theme.muted, .wrap = true });
+                }
+            }
         } else if (p.relay == .off) {
             ui.text(c, "The relay is off.", .{ .size = 12, .color = theme.muted });
         }

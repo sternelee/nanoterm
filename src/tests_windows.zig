@@ -17,6 +17,7 @@ test {
     _ = @import("classify.zig");
     _ = @import("proc_windows.zig");
     _ = @import("blocks.zig");
+    _ = @import("qrcode.zig");
 }
 
 extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buf: ?[*]u16, size: u32) callconv(.winapi) u32;

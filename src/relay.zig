@@ -1401,33 +1401,35 @@ fn output(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, out: *st
     var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .inherit }) catch return;
     defer _ = child.wait(io) catch {};
     const file = child.stdout orelse return;
-    var buffer: [16 * 1024]u8 = undefined;
-    var reader = std.Io.File.Reader.init(file, io, buffer[0..]);
-    var lines: std.ArrayListUnmanaged(u8) = .empty;
-    defer lines.deinit(gpa);
-    var chunk: [1][]u8 = .{buffer[0..]};
+    // The reader's internal buffer must be distinct from the read destination,
+    // otherwise readv() iovecs alias the same memory. `initStreaming` skips the
+    // positional pread probe that returns 0 (not EOF) on a pipe.
+    var in_buffer: [16 * 1024]u8 = undefined;
+    var reader = std.Io.File.Reader.initStreaming(file, io, in_buffer[0..]);
+    var all: std.ArrayListUnmanaged(u8) = .empty;
+    defer all.deinit(gpa);
+    var chunk_buf: [16 * 1024]u8 = undefined;
+    var chunk = [_][]u8{chunk_buf[0..]};
     while (true) {
+        // A return of 0 does NOT mean end of stream; only `error.EndOfStream` does.
         const n = reader.interface.readVec(&chunk) catch break;
-        if (n == 0) break;
-        lines.appendSlice(gpa, buffer[0..n]) catch {};
-        var i: usize = 0;
-        while (i < lines.items.len) {
-            if (lines.items[i] == '\n') {
-                if (i > 0) out.append(gpa, gpa.dupe(u8, lines.items[0..i]) catch "") catch {};
-                lines.items = lines.items[i + 1 ..];
-                i = 0;
-                continue;
-            }
-            i += 1;
-        }
+        if (n == 0) continue;
+        all.appendSlice(gpa, chunk_buf[0..n]) catch return;
     }
-    if (lines.items.len > 0) out.append(gpa, gpa.dupe(u8, lines.items) catch "") catch {};
+    var it = std.mem.splitScalar(u8, all.items, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        out.append(gpa, gpa.dupe(u8, line) catch "") catch {};
+    }
 }
 
 /// The first address the command's output mentions.
 fn firstAddress(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8, comptime find: fn ([]const u8) ?[]const u8) []const u8 {
     var lines: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer lines.deinit(gpa);
+    defer {
+        for (lines.items) |line| gpa.free(line);
+        lines.deinit(gpa);
+    }
     output(gpa, io, argv, &lines);
     for (lines.items) |line| {
         if (find(line)) |a| return gpa.dupe(u8, a) catch "";
