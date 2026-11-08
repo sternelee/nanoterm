@@ -36,11 +36,14 @@ pub const Stored = struct {
     port: u16 = port_default,
     token: []u8 = &.{},
     theme: ThemePreference = .system,
+    /// A named theme from the desktop's shelf; empty follows the appearance.
+    theme_id: []u8 = &.{},
     layout: Layout = .tabs,
 
     pub fn deinit(s: Stored, gpa: std.mem.Allocator) void {
         if (s.host.len > 0) gpa.free(s.host);
         if (s.token.len > 0) gpa.free(s.token);
+        if (s.theme_id.len > 0) gpa.free(s.theme_id);
     }
 
     /// A token is 32 hex characters, or it is not a token: a file with
@@ -65,6 +68,7 @@ const Written = struct {
     port: u16 = port_default,
     token: []const u8 = "",
     theme: []const u8 = "system",
+    theme_id: []const u8 = "",
     layout: []const u8 = "tabs",
 };
 
@@ -88,6 +92,11 @@ pub fn loadFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8) ?Stored {
         gpa.free(s.host);
         return null;
     };
+    s.theme_id = gpa.dupe(u8, w.theme_id) catch {
+        gpa.free(s.host);
+        gpa.free(s.token);
+        return null;
+    };
     // Theme preference: parse the string, default to system.
     s.theme = if (std.mem.eql(u8, w.theme, "light")) .light else if (std.mem.eql(u8, w.theme, "dark")) .dark else .system;
     s.layout = if (std.mem.eql(u8, w.layout, "sidebar")) .sidebar else .tabs;
@@ -96,13 +105,13 @@ pub fn loadFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8) ?Stored {
 
 /// Writes it, and says whether it landed: a phone that cannot save still
 /// works for this run, it just asks again next time.
-pub fn save(io: std.Io, gpa: std.mem.Allocator, host: []const u8, port: u16, token: []const u8, theme: ThemePreference, layout: Layout) bool {
+pub fn save(io: std.Io, gpa: std.mem.Allocator, host: []const u8, port: u16, token: []const u8, theme: ThemePreference, theme_id: []const u8, layout: Layout) bool {
     var buf: [512]u8 = undefined;
     const p = path(&buf) orelse return false;
-    return saveFile(io, gpa, p, host, port, token, theme, layout);
+    return saveFile(io, gpa, p, host, port, token, theme, theme_id, layout);
 }
 
-pub fn saveFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8, host: []const u8, port: u16, token: []const u8, theme: ThemePreference, layout: Layout) bool {
+pub fn saveFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8, host: []const u8, port: u16, token: []const u8, theme: ThemePreference, theme_id: []const u8, layout: Layout) bool {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     const theme_str = switch (theme) {
@@ -110,7 +119,7 @@ pub fn saveFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8, host: []const
         .light => "light",
         .dark => "dark",
     };
-    std.json.Stringify.value(Written{ .host = host, .port = port, .token = token, .theme = theme_str, .layout = @tagName(layout) }, .{}, &aw.writer) catch return false;
+    std.json.Stringify.value(Written{ .host = host, .port = port, .token = token, .theme = theme_str, .theme_id = theme_id, .layout = @tagName(layout) }, .{}, &aw.writer) catch return false;
     var file = std.Io.Dir.cwd().createFile(io, p, .{ .truncate = true }) catch return false;
     defer file.close(io);
     file.writeStreamingAll(io, aw.written()) catch return false;
@@ -129,7 +138,7 @@ test "what was saved is what is read back" {
     // Nothing saved yet: nothing read.
     try testing.expect(loadFile(testing.io, testing.allocator, p) == null);
 
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "192.168.1.20", 4790, "0123456789abcdef0123456789abcdef", .system, .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, "192.168.1.20", 4790, "0123456789abcdef0123456789abcdef", .system, "", .tabs));
     const s = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s.deinit(testing.allocator);
     try testing.expectEqualStrings("192.168.1.20", s.host);
@@ -140,7 +149,7 @@ test "what was saved is what is read back" {
     try testing.expectEqual(Layout.tabs, s.layout);
 
     // Saving again replaces it, rather than appending.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "mac.local", 4789, "ffffffffffffffffffffffffffffffff", .dark, .sidebar));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, "mac.local", 4789, "ffffffffffffffffffffffffffffffff", .dark, "", .sidebar));
     const t = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer t.deinit(testing.allocator);
     try testing.expectEqualStrings("mac.local", t.host);
@@ -190,19 +199,19 @@ test "theme preference is saved and loaded" {
     const p = dir ++ "/theme.json";
 
     // Default theme is system.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .system, .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .system, "", .tabs));
     const s1 = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s1.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.system, s1.theme);
 
     // Light theme.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .light, .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .light, "", .tabs));
     const s2 = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s2.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.light, s2.theme);
 
     // Dark theme.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .dark, .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .dark, "", .tabs));
     const s3 = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s3.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.dark, s3.theme);
