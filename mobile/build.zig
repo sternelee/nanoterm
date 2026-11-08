@@ -31,6 +31,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
     });
+    // The desktop's palette, so the phone wears the same theme.
+    const theme = b.createModule(.{
+        .root_source_file = b.path("../src/theme.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+    });
 
     const exe = b.addExecutable(.{
         .name = "nanoterm",
@@ -42,6 +49,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nanoui", .module = dep.module("nanoui") },
                 .{ .name = "markdown", .module = markdown },
                 .{ .name = "highlight", .module = highlight },
+                .{ .name = "theme", .module = theme },
             },
         }),
     });

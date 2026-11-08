@@ -19,6 +19,8 @@ const fdwatch = nanoui.fdwatch;
 const settings = @import("settings.zig");
 const md = @import("markdown");
 const highlight = @import("highlight");
+/// The desktop's palette: the phone wears the same theme.
+const theme = @import("theme");
 
 comptime {
     // A phone's app: iOS (and, later, Android). The desktop has nanoterm
@@ -2799,12 +2801,15 @@ pub fn main(init: std.process.Init) !void {
     const app = try nanoui.App.create(init, .{ .name = "nanoterm" });
     defer app.destroy();
 
-    // Determine theme override based on preference.
-    const theme_override: ?ui.Theme = switch (p.theme_pref) {
-        .system => null, // Follow system appearance.
-        .light => ui.Theme.light,
-        .dark => ui.Theme.dark_theme,
+    // The desktop's palette, chosen by preference (system appearance when
+    // it is the system's), so the phone looks like the workstation.
+    const appearance: theme.Appearance = switch (p.theme_pref) {
+        .system => if (nanoui.isDark()) .dark else .light,
+        .light => .light,
+        .dark => .dark,
     };
+    theme.apply(appearance);
+    const theme_override: ?ui.Theme = theme.ui();
 
     p.window = try app.newWindow(.{
         .title = "nanoterm",
