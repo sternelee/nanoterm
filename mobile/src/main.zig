@@ -619,6 +619,13 @@ fn spin(c: *ui.Context) []const u8 {
     return spinner[i];
 }
 
+/// A pulsing dot for connection status indicators.
+fn pulse(c: *ui.Context) []const u8 {
+    c.frameIn(1.0 / 2.0);
+    const phase = @mod(c.time * 2, 1.0);
+    return if (phase < 0.5) "●" else "○";
+}
+
 /// More text on the item a turn's last step grew: only one that grows
 /// the same way has a place for it, and only where the phone's copy ends.
 fn appendText(it: *Item, was_len: usize, more: []const u8, gpa: std.mem.Allocator) bool {
@@ -877,6 +884,7 @@ pub const Phone = struct {
     swipe_tracking: bool = false,
     pull_distance: f32 = 0,
     pull_refreshing: bool = false,
+    feed_loading: bool = false,
     /// Notifications: temporary messages shown to the user.
     notifications: std.ArrayList(Notification) = .empty,
     status: Status = .connecting,
@@ -1131,6 +1139,7 @@ pub const Phone = struct {
         if (std.mem.eql(u8, e.kind, "welcome")) {
             p.tabs = e.sessions.len;
             if (p.session == 0 and e.sessions.len > 0) p.session = e.sessions[0];
+            p.feed_loading = false;
             for (e.sessions) |id| {
                 var found = false;
                 for (p.sessions.items) |s| {
@@ -1714,6 +1723,7 @@ pub const Phone = struct {
         p.open();
         if (p.status == .live) {
             p.screen = .feed;
+            // Note: haptic feedback will be added via the leaf API in the view when drawing
             p.notify(.success, "Connected to {s}", .{p.where[0..p.where_len]});
         } else if (p.status == .down) {
             // Connection failed: show the error on the connect screen.
@@ -1828,74 +1838,92 @@ pub const Phone = struct {
         // The same title strip as the feed's: where this is, and whether
         // the link is up.
         {
-            const bar = ui.div(c).row().wFull().h(44).gap(8).itemsCenter().px(16);
+            const bar = ui.div(c).row().wFull().h(48).gap(10).itemsCenter().px(16);
             defer bar.end();
             if (p.status == .live) {
                 ui.key(c, "back");
-                if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "chevron.left" }).clicked) p.screen = .feed;
-            } else ui.icon(c, "terminal.fill", .{ .size = 12, .color = c.theme.accent });
-            ui.text(c, "Connect", .{ .size = 13, .weight = .semibold });
+                if (ui.button(c, "", .{ .variant = .ghost, .size = 12, .icon = "chevron.left" }).clicked) p.screen = .feed;
+            } else ui.icon(c, "terminal.fill", .{ .size = 13, .color = c.theme.accent });
+            ui.text(c, "Connect", .{ .size = 14, .weight = .semibold });
             ui.spacer(c);
             const dot = switch (p.status) {
                 .live => c.theme.success,
                 .connecting => c.theme.accent,
                 .down => c.theme.danger,
             };
-            _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = dot }, .none, null);
-            ui.text(c, p.status.label(), .{ .size = 11.5, .color = c.theme.muted });
+            if (p.status == .connecting) {
+                ui.text(c, pulse(c), .{ .size = 16, .color = dot, .mono = true });
+            } else {
+                _ = c.leaf(.{ .width = .{ .px = 8 }, .height = .{ .px = 8 }, .radius = 4, .background = dot }, .none, null);
+            }
+            ui.text(c, p.status.label(), .{ .size = 12, .color = c.theme.muted });
         }
         ui.divider(c);
         ui.scroll(c, .{
             .width = .fill,
             .grow = 1,
-            .padding = .{ .top = 16, .bottom = 20, .left = 16, .right = 16 },
-            .gap = 18,
+            .padding = .{ .top = 20, .bottom = 24, .left = 16, .right = 16 },
+            .gap = 20,
         });
         {
-            ui.text(c, "Workstation", .{ .size = 12, .weight = .semibold, .color = c.theme.muted });
-            const box = ui.div(c).column().wFull().p(14).gap(10).bg(c.theme.surface).rounded(10).border(c.theme.border);
+            ui.text(c, "Workstation", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
+            const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);
             defer box.end();
-            ui.text(c, "The relay on the machine running nanoterm prints the address and a token.", .{ .size = 12, .color = c.theme.muted, .wrap = true });
+            ui.text(c, "The relay on the machine running nanoterm prints the address and a token.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
             _ = p.field(c, "Host", "127.0.0.1 or workstation name", &p.host_input, false);
             _ = p.field(c, "Port", "4789", &p.port_input, false);
             const token = p.field(c, "Token", "the 32 characters from relay", &p.token_input, false);
             if (ui.button(c, if (p.status == .connecting) "Connecting…" else "Connect", .{
-                .size = 13,
+                .size = 14,
                 .variant = .primary,
                 .width = .fill,
             }).clicked or token.submitted) p.connect();
             if (p.status == .live) {
-                if (ui.button(c, "Back to the tabs", .{ .size = 12, .variant = .ghost, .width = .fill }).clicked) p.screen = .feed;
-            }
-        }
-        if (p.connect_why_len > 0) {
-            const err = ui.div(c).row().wFull().gap(8).itemsStart().p(12).bg(c.theme.danger.alpha(0.12)).rounded(10).border(c.theme.danger.alpha(0.4));
-            defer err.end();
-            ui.icon(c, "exclamationmark.triangle", .{ .size = 12, .color = c.theme.danger });
-            ui.text(c, p.connect_why[0..p.connect_why_len], .{ .size = 12, .color = c.theme.danger, .wrap = true });
-        }
-        if (p.saved_connections.items.len > 0) {
-            ui.text(c, "Recent", .{ .size = 12, .weight = .semibold, .color = c.theme.muted });
-            const list = ui.div(c).column().wFull().gap(1).bg(c.theme.surface).rounded(10).border(c.theme.border).clip();
-            defer list.end();
-            for (p.saved_connections.items, 0..) |conn, i| {
-                ui.key(c, c.print("conn-{d}", .{i}));
-                var row = ui.div(c).row().wFull().gap(8).itemsCenter().px(12).py(9).hover(c.theme.surface_hover);
-                defer row.end();
-                if (row.clicked()) p.loadConnection(i);
-                ui.icon(c, "globe", .{ .size = 11, .color = c.theme.muted });
-                const text = ui.div(c).column().grow().gap(1);
-                defer text.end();
-                ui.text(c, conn.name, .{ .size = 12.5 });
-                ui.textf(c, .{ .size = 11, .color = c.theme.muted, .mono = true }, "{s}:{d}", .{ conn.host, conn.port });
-                if (ui.button(c, "Use", .{ .size = 11, .variant = .secondary }).clicked) p.loadConnection(i);
+                if (ui.button(c, "Back to the tabs", .{ .size = 13, .variant = .ghost, .width = .fill }).clicked) p.screen = .feed;
             }
         }
         {
-            ui.text(c, "Appearance", .{ .size = 12, .weight = .semibold, .color = c.theme.muted });
-            const box = ui.div(c).column().wFull().p(14).gap(10).bg(c.theme.surface).rounded(10).border(c.theme.border);
+            ui.text(c, "First time?", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
+            const box = ui.div(c).column().wFull().p(16).gap(10).bg(c.theme.surface).rounded(12).border(c.theme.border);
             defer box.end();
-            ui.text(c, "The phone follows the system's light or dark; a new choice applies when the app restarts.", .{ .size = 12, .color = c.theme.muted, .wrap = true });
+            const steps = [_][]const u8{
+                "1. On your workstation, run: nanoterm --relay",
+                "2. Copy the address and token it prints",
+                "3. Enter them above and tap Connect",
+            };
+            for (steps) |step| ui.text(c, step, .{ .size = 13, .color = c.theme.text, .wrap = true, .leading = 1.4 });
+        }
+        if (p.connect_why_len > 0) {
+            const err = ui.div(c).column().wFull().gap(8).p(16).bg(c.theme.danger.alpha(0.12)).rounded(12).border(c.theme.danger.alpha(0.4));
+            defer err.end();
+            const r = ui.div(c).row().gap(10).itemsCenter();
+            defer r.end();
+            ui.icon(c, "exclamationmark.triangle.fill", .{ .size = 18, .color = c.theme.danger });
+            ui.text(c, "Connection failed", .{ .size = 14, .weight = .semibold, .color = c.theme.danger });
+            ui.text(c, p.connect_why[0..p.connect_why_len], .{ .size = 13, .color = c.theme.danger, .wrap = true, .leading = 1.4 });
+        }
+        if (p.saved_connections.items.len > 0) {
+            ui.text(c, "Recent connections", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
+            const list = ui.div(c).column().wFull().gap(8).bg(c.theme.surface).rounded(12).border(c.theme.border).clip();
+            defer list.end();
+            for (p.saved_connections.items, 0..) |conn, i| {
+                ui.key(c, c.print("conn-{d}", .{i}));
+                var row = ui.div(c).row().wFull().gap(12).itemsCenter().px(16).py(14).hover(c.theme.surface_hover);
+                defer row.end();
+                if (row.clicked()) p.loadConnection(i);
+                ui.icon(c, "globe", .{ .size = 18, .color = c.theme.accent });
+                const text = ui.div(c).column().grow().gap(2);
+                defer text.end();
+                ui.text(c, conn.name, .{ .size = 14, .weight = .medium });
+                ui.textf(c, .{ .size = 12, .color = c.theme.muted, .mono = true }, "{s}:{d}", .{ conn.host, conn.port });
+                if (ui.button(c, "Connect", .{ .size = 13, .variant = .secondary }).clicked) p.loadConnection(i);
+            }
+        }
+        {
+            ui.text(c, "Appearance", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
+            const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);
+            defer box.end();
+            ui.text(c, "The phone follows the system's light or dark; a new choice applies when the app restarts.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
             const order = [_][]const u8{ "System", "Light", "Dark" };
             var picked: usize = switch (p.theme_pref) {
                 .system => 0,
@@ -1916,26 +1944,33 @@ pub const Phone = struct {
                     p.notify(.info, "Theme saved: it applies when the app restarts.", .{});
                 }
             }
-            ui.text(c, "Sessions", .{ .size = 12, .weight = .medium, .color = c.theme.muted });
+            ui.text(c, "Sessions", .{ .size = 13, .weight = .medium, .color = c.theme.muted });
             const layouts = [_][]const u8{ "Tabs", "Sidebar" };
             var picked_layout: usize = if (p.layout == .tabs) 0 else 1;
             if (ui.segmented(c, &layouts, &picked_layout)) p.setLayout(if (picked_layout == 0) .tabs else .sidebar);
             ui.text(c, if (p.layout == .tabs)
                 "A row of pills under the title, as the desktop's bottom bar."
             else
-                "A drawer from the left, as the desktop's sidebar: the button by the title opens it.", .{ .size = 11.5, .color = c.theme.muted, .wrap = true });
+                "A drawer from the left, as the desktop's sidebar: the button by the title opens it.", .{ .size = 12, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
         }
         {
-            ui.text(c, "Getting here", .{ .size = 12, .weight = .semibold, .color = c.theme.muted });
-            const box = ui.div(c).column().wFull().p(14).gap(6).bg(c.theme.surface).rounded(10).border(c.theme.border);
+            ui.text(c, "Connection methods", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
+            const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);
             defer box.end();
-            const tips = [_][]const u8{
-                "Same Wi-Fi: the workstation's local address.",
-                "USB: adb reverse tcp:4789 tcp:4789, then 127.0.0.1.",
-                "Tailscale: the address Tailscale gave it.",
-                "The token is printed when nanoterm starts with --relay.",
+            const methods = [_]struct { icon: []const u8, title: []const u8, desc: []const u8 }{
+                .{ .icon = "wifi", .title = "Same Wi-Fi", .desc = "Use the workstation's local IP address" },
+                .{ .icon = "cable", .title = "USB (ADB)", .desc = "Run: adb reverse tcp:4789 tcp:4789, then use 127.0.0.1" },
+                .{ .icon = "globe", .title = "Tailscale", .desc = "Use the Tailscale IP address of your workstation" },
             };
-            for (tips) |tip| ui.text(c, tip, .{ .size = 11.5, .color = c.theme.muted, .wrap = true });
+            for (methods) |m| {
+                const row = ui.div(c).row().gap(12).itemsStart();
+                defer row.end();
+                ui.icon(c, m.icon, .{ .size = 20, .color = c.theme.accent });
+                const col = ui.div(c).column().grow().gap(2);
+                defer col.end();
+                ui.text(c, m.title, .{ .size = 13, .weight = .semibold });
+                ui.text(c, m.desc, .{ .size = 12, .color = c.theme.muted, .wrap = true, .leading = 1.3 });
+            }
         }
         ui.end(c);
         ui.end(c);
@@ -1944,11 +1979,11 @@ pub const Phone = struct {
     /// A label and its field: what the connect screen is made of.
     fn field(p: *Phone, c: *ui.Context, label: []const u8, hint: []const u8, buffer: *ui.TextBuffer, password: bool) ui.TextFieldResult {
         _ = p;
-        ui.text(c, label, .{ .size = 12, .weight = .medium, .color = c.theme.muted });
+        ui.text(c, label, .{ .size = 13, .weight = .medium, .color = c.theme.muted });
         return ui.textField(c, buffer, .{
             .placeholder = hint,
             .width = .fill,
-            .size = 15,
+            .size = 16,
             .password = password,
             .select_all_on_focus = true,
         });
@@ -1974,30 +2009,31 @@ pub const Phone = struct {
     /// The prompt, the agent, and what it did in order: the desktop's turn,
     /// at a phone's width.
     fn renderTurn(p: *Phone, c: *ui.Context, t: *Turn) void {
-        const d = ui.div(c).column().wFull().px(10).py(10).gap(10);
+        const d = ui.div(c).column().wFull().px(12).py(12).gap(12)
+            .bg(c.theme.surface).rounded(12).border(c.theme.border);
         defer d.end();
         {
-            const r = ui.div(c).row().wFull().gap(10).itemsStart();
+            const r = ui.div(c).row().wFull().gap(12).itemsStart();
             defer r.end();
             avatar(c, "person.fill", c.theme.accent);
-            const q = ui.div(c).column().grow().pt(1);
+            const q = ui.div(c).column().grow().pt(2);
             defer q.end();
             const asked = if (t.title.items.len > 0) t.title.items else t.prompt.items;
-            ui.text(c, if (asked.len > 0) asked else "…", .{ .size = 14, .weight = .semibold, .wrap = true, .leading = 1.3 });
+            ui.text(c, if (asked.len > 0) asked else "…", .{ .size = 15, .weight = .semibold, .wrap = true, .leading = 1.4 });
         }
         {
-            const h = ui.div(c).row().wFull().gap(10).itemsCenter();
+            const h = ui.div(c).row().wFull().gap(10).itemsCenter().pt(2);
             defer h.end();
             avatar(c, "sparkles", agentTone(c));
-            ui.text(c, if (t.agent.items.len > 0) t.agent.items else "Agent", .{ .size = 12, .weight = .semibold, .color = agentTone(c) });
+            ui.text(c, if (t.agent.items.len > 0) t.agent.items else "Agent", .{ .size = 13, .weight = .semibold, .color = agentTone(c) });
             ui.spacer(c);
             if (!t.done) {
-                ui.text(c, spin(c), .{ .size = 12, .color = agentTone(c), .mono = true });
+                ui.text(c, spin(c), .{ .size = 13, .color = agentTone(c), .mono = true });
             } else if (t.started > 0 and t.ended > t.started) {
-                ui.text(c, duration(c, t.ended - t.started), .{ .size = 11, .color = c.theme.muted, .mono = true });
+                ui.text(c, duration(c, t.ended - t.started), .{ .size = 12, .color = c.theme.muted, .mono = true });
             }
         }
-        const body = ui.div(c).column().wFull().pl(26).gap(10);
+        const body = ui.div(c).column().wFull().pl(30).gap(12).pt(4);
         defer body.end();
         const items = t.items.items;
         const reply = replyStart(items);
@@ -2062,26 +2098,26 @@ pub const Phone = struct {
         if (text.len == 0 and !live) return;
         const bit: u64 = if (ordinal < 64) @as(u64, 1) << @intCast(ordinal) else 0;
         const expanded = t.open_groups & bit != 0;
-        const col = ui.div(c).column().wFull().gap(10);
+        const col = ui.div(c).column().wFull().gap(12);
         defer col.end();
         ui.key(c, c.print("fold-{d}", .{ordinal}));
         {
-            const it = ui.pressable(c, .{ .direction = .row, .gap = 8, .align_items = .center, .padding = .{ .top = 2, .bottom = 2 }, .control = true }, null);
+            const it = ui.pressable(c, .{ .direction = .row, .gap = 10, .align_items = .center, .padding = .{ .top = 4, .bottom = 4 }, .control = true }, null);
             defer ui.end(c);
             if (it.clicked) {
                 t.open_groups ^= bit;
                 c.changed = true;
             }
             const color = if (it.hovered) c.theme.text else c.theme.muted;
-            if (live) ui.text(c, spin(c), .{ .size = 12, .color = agentTone(c), .mono = true });
-            ui.text(c, if (text.len > 0) text else "Working", .{ .size = 13, .color = color, .wrap = true });
-            ui.icon(c, if (expanded) "chevron.down" else "chevron.right", .{ .size = 8.5, .weight = .semibold, .color = if (it.hovered) c.theme.muted else faintTone(c) });
+            if (live) ui.text(c, spin(c), .{ .size = 13, .color = agentTone(c), .mono = true });
+            ui.text(c, if (text.len > 0) text else "Working", .{ .size = 14, .color = color, .wrap = true });
+            ui.icon(c, if (expanded) "chevron.down" else "chevron.right", .{ .size = 9, .weight = .semibold, .color = if (it.hovered) c.theme.muted else faintTone(c) });
         }
         if (!expanded) return;
-        const r = ui.div(c).row().wFull().gap(14).itemsStretch().pl(3);
+        const r = ui.div(c).row().wFull().gap(16).itemsStretch().pl(4);
         defer r.end();
         _ = c.leaf(.{ .width = .{ .px = 1 }, .background = c.theme.border }, .none, null);
-        const steps = ui.div(c).column().grow().gap(10);
+        const steps = ui.div(c).column().grow().gap(12);
         defer steps.end();
         for (items, from..) |*it, k| {
             if (!shownItem(t, it)) continue;
@@ -2091,18 +2127,18 @@ pub const Phone = struct {
     }
 
     fn tool(p: *Phone, c: *ui.Context, t: *Turn, tl: *const Item.Tool) void {
-        const col = ui.div(c).column().wFull().gap(6);
+        const col = ui.div(c).column().wFull().gap(8);
         defer col.end();
         {
-            const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+            const r = ui.div(c).row().wFull().gap(10).itemsCenter();
             defer r.end();
-            ui.icon(c, toolIcon(tl.kind.items), .{ .size = 11, .frame = 14, .color = c.theme.muted });
-            ui.text(c, if (tl.title.items.len > 0) tl.title.items else tl.kind.items, .{ .size = 13, .wrap = true });
+            ui.icon(c, toolIcon(tl.kind.items), .{ .size = 12, .frame = 16, .color = c.theme.muted });
+            ui.text(c, if (tl.title.items.len > 0) tl.title.items else tl.kind.items, .{ .size = 14, .wrap = true });
             ui.spacer(c);
             switch (tl.status) {
-                .pending, .in_progress => ui.text(c, spin(c), .{ .size = 12, .color = c.theme.accent, .mono = true }),
-                .completed => ui.icon(c, "checkmark", .{ .size = 10, .weight = .bold, .color = c.theme.success }),
-                .failed => ui.icon(c, "xmark", .{ .size = 10, .weight = .bold, .color = c.theme.danger }),
+                .pending, .in_progress => ui.text(c, spin(c), .{ .size = 13, .color = c.theme.accent, .mono = true }),
+                .completed => ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = c.theme.success }),
+                .failed => ui.icon(c, "xmark", .{ .size = 11, .weight = .bold, .color = c.theme.danger }),
             }
         }
         if (tl.block) |id| {
@@ -2110,31 +2146,31 @@ pub const Phone = struct {
         } else if (tl.detail.items.len > 0 and tl.status != .in_progress) {
             const d = tl.detail.items;
             const shown = if (d.len > 400) c.print("{s}…", .{d[0..400]}) else d;
-            ui.text(c, shown, .{ .size = 11.5, .mono = true, .color = faintTone(c), .wrap = true });
+            ui.text(c, shown, .{ .size = 12, .mono = true, .color = faintTone(c), .wrap = true });
         }
     }
 
     fn permission(p: *Phone, c: *ui.Context, perm: *const Item.Permission) void {
-        const box = ui.div(c).column().wFull().p(12).gap(10)
-            .bg(c.theme.background).rounded(8)
+        const box = ui.div(c).column().wFull().p(14).gap(12)
+            .bg(c.theme.surface).rounded(10)
             .border(if (perm.chosen == null) warningTone(c) else c.theme.border);
         defer box.end();
         {
-            const r = ui.div(c).row().gap(8).itemsCenter();
+            const r = ui.div(c).row().gap(10).itemsCenter();
             defer r.end();
-            ui.icon(c, "hand.raised", .{ .size = 12, .color = warningTone(c) });
-            ui.text(c, perm.title.items, .{ .size = 13, .weight = .semibold, .wrap = true });
+            ui.icon(c, "hand.raised", .{ .size = 13, .color = warningTone(c) });
+            ui.text(c, perm.title.items, .{ .size = 14, .weight = .semibold, .wrap = true });
         }
         if (perm.chosen) |i| {
             const name = if (i < perm.options.items.len) perm.options.items[i].name.items else "";
-            ui.text(c, c.print("Answered: {s}", .{name}), .{ .size = 12, .color = c.theme.muted });
+            ui.text(c, c.print("Answered: {s}", .{name}), .{ .size = 13, .color = c.theme.muted });
             return;
         }
-        const r = ui.div(c).row().wFull().gap(8);
+        const r = ui.div(c).row().wFull().gap(10).pt(4);
         defer r.end();
         for (perm.options.items, 0..) |o, i| {
             const allow = std.mem.startsWith(u8, o.id.items, "allow");
-            const variant: ui.ButtonOptions = .{ .variant = if (allow and i == 0) .primary else if (allow) .secondary else .ghost, .size = 12.5 };
+            const variant: ui.ButtonOptions = .{ .variant = if (allow and i == 0) .primary else if (allow) .secondary else .ghost, .size = 13 };
             if (ui.button(c, o.name.items, variant).clicked) p.answerRelay(perm.rpc.items, i);
         }
     }
@@ -2143,36 +2179,36 @@ pub const Phone = struct {
     /// (its tail, the rest behind a button), and how it ended.
     fn renderBlock(p: *Phone, c: *ui.Context, b: *Block, nested: bool) void {
         _ = p;
-        const d = ui.div(c).column().wFull().px(if (nested) 10 else 12).py(8).gap(6)
-            .bg(c.theme.background).rounded(8).border(c.theme.border);
+        const d = ui.div(c).column().wFull().px(if (nested) 12 else 14).py(10).gap(8)
+            .bg(c.theme.surface).rounded(10).border(c.theme.border);
         defer d.end();
         const bar = if (b.state == .running) c.theme.accent else if (b.failed()) c.theme.danger else c.theme.border;
-        _ = c.leaf(.{ .absolute = true, .width = .{ .px = 3 }, .height = .fill, .radius = 1.5, .background = bar, .offset = .{ .x = if (nested) -8 else -10 } }, .none, null);
+        _ = c.leaf(.{ .absolute = true, .width = .{ .px = 3 }, .height = .fill, .radius = 1.5, .background = bar, .offset = .{ .x = if (nested) -10 else -12 } }, .none, null);
         {
-            const r = ui.div(c).row().wFull().gap(6).itemsCenter();
+            const r = ui.div(c).row().wFull().gap(8).itemsCenter();
             defer r.end();
-            if (b.cwd.items.len > 0) ui.text(c, b.cwd.items, .{ .size = 11.5, .mono = true, .color = cwdTone(c), .truncate = .middle });
+            if (b.cwd.items.len > 0) ui.text(c, b.cwd.items, .{ .size = 12, .mono = true, .color = cwdTone(c), .truncate = .middle });
             if (b.branch.items.len > 0) {
-                ui.icon(c, "arrow.triangle.branch", .{ .size = 10.5, .color = c.theme.success });
-                ui.text(c, b.branch.items, .{ .size = 11.5, .mono = true, .color = c.theme.success });
+                ui.icon(c, "arrow.triangle.branch", .{ .size = 11, .color = c.theme.success });
+                ui.text(c, b.branch.items, .{ .size = 12, .mono = true, .color = c.theme.success });
             }
             if (b.is_agent) ui.badge(c, "Agent", agentTone(c));
             ui.spacer(c);
             switch (b.state) {
-                .running => ui.text(c, spin(c), .{ .size = 12, .color = c.theme.accent, .mono = true }),
+                .running => ui.text(c, spin(c), .{ .size = 13, .color = c.theme.accent, .mono = true }),
                 .done => {
                     const ok = !b.failed();
-                    ui.icon(c, if (ok) "checkmark" else "xmark", .{ .size = 10, .weight = .bold, .color = if (ok) c.theme.success else c.theme.danger });
-                    if (!ok) ui.text(c, c.print("{d}", .{b.exit orelse 0}), .{ .size = 11, .mono = true, .color = c.theme.danger });
-                    if (b.started > 0 and b.ended > b.started) ui.text(c, duration(c, b.ended - b.started), .{ .size = 11, .color = c.theme.muted, .mono = true });
+                    ui.icon(c, if (ok) "checkmark" else "xmark", .{ .size = 11, .weight = .bold, .color = if (ok) c.theme.success else c.theme.danger });
+                    if (!ok) ui.text(c, c.print("{d}", .{b.exit orelse 0}), .{ .size = 12, .mono = true, .color = c.theme.danger });
+                    if (b.started > 0 and b.ended > b.started) ui.text(c, duration(c, b.ended - b.started), .{ .size = 12, .color = c.theme.muted, .mono = true });
                 },
             }
         }
         {
-            const r = ui.div(c).row().wFull().gap(6).itemsStart();
+            const r = ui.div(c).row().wFull().gap(8).itemsStart();
             defer r.end();
-            ui.text(c, if (b.is_agent) "⚡" else "❯", .{ .size = 13, .weight = .bold, .color = if (b.is_agent) agentTone(c) else c.theme.accent, .mono = true });
-            ui.richText(c, b.command.items, &.{}, .{ .size = 13, .weight = .semibold, .mono = true, .wrap = true, .color = c.theme.text });
+            ui.text(c, if (b.is_agent) "⚡" else "❯", .{ .size = 14, .weight = .bold, .color = if (b.is_agent) agentTone(c) else c.theme.accent, .mono = true });
+            ui.richText(c, b.command.items, &.{}, .{ .size = 14, .weight = .semibold, .mono = true, .wrap = true, .color = c.theme.text });
         }
         const all = b.output.items;
         if (all.len == 0) return;
@@ -2238,6 +2274,10 @@ pub const Phone = struct {
 
                     if (new_idx != current_idx) {
                         p.session = p.sessions.items[new_idx].id;
+                        // Trigger haptic feedback on tab switch
+                        if (builtin.os.tag == .ios) {
+                            _ = c.leaf(.{ .haptic = .light }, .none, null);
+                        }
                         p.notify(.info, "swiped to tab {d}", .{p.session});
                     }
                 }
@@ -2257,6 +2297,10 @@ pub const Phone = struct {
             // Pull down far enough triggers refresh.
             if (p.pull_distance > 120 and !p.pull_refreshing) {
                 p.pull_refreshing = true;
+                // Trigger haptic feedback on refresh
+                if (builtin.os.tag == .ios) {
+                    _ = c.leaf(.{ .haptic = .medium }, .none, null);
+                }
                 p.refresh();
                 p.pull_distance = 0;
             }
@@ -2272,9 +2316,12 @@ pub const Phone = struct {
     pub fn refresh(p: *Phone) void {
         if (p.status != .live) {
             p.pull_refreshing = false;
+            p.feed_loading = false;
             return;
         }
-        p.write("{\"op\":\"list\"}\n");
+        p.feed_loading = true;
+        const cmd = [_]u8{ '{', '"', 'o', 'p', '"', ':', '"', 'l', 'i', 's', 't', '"', '}', '\n' };
+        p.write(&cmd);
         p.pull_refreshing = false;
     }
 
@@ -2461,11 +2508,12 @@ pub const Phone = struct {
         // Pull-to-refresh indicator: shown when pulling down from top.
         if (p.pull_distance > 20) {
             const progress = @min(p.pull_distance / 120.0, 1.0);
-            ui.row(c, .{ .width = .fill, .justify = .center, .padding = .{ .top = 8, .bottom = 4 } });
+            ui.row(c, .{ .width = .fill, .justify = .center, .padding = .{ .top = 12, .bottom = 8 } });
             if (progress >= 1.0) {
-                ui.text(c, "↓ Release to refresh", .{ .size = 12, .color = c.theme.accent });
+                ui.text(c, spin(c), .{ .size = 14, .color = c.theme.accent, .mono = true });
+                ui.text(c, " Release to refresh", .{ .size = 13, .color = c.theme.accent });
             } else {
-                ui.text(c, "↓ Pull to refresh", .{ .size = 12, .color = c.theme.muted });
+                ui.text(c, "↓ Pull to refresh", .{ .size = 13, .color = c.theme.muted });
             }
             ui.end(c);
         }
@@ -2473,18 +2521,18 @@ pub const Phone = struct {
         // The title strip, as the desktop's: what this is, the tab it
         // shows, and whether the link is up — one line, not a stack.
         {
-            const bar = ui.div(c).row().wFull().h(44).gap(8).itemsCenter().px(16);
+            const bar = ui.div(c).row().wFull().h(48).gap(10).itemsCenter().px(16);
             defer bar.end();
-            ui.icon(c, "terminal.fill", .{ .size = 12, .color = c.theme.accent });
-            ui.text(c, "nanoterm", .{ .size = 13, .weight = .semibold });
+            ui.icon(c, "terminal.fill", .{ .size = 13, .color = c.theme.accent });
+            ui.text(c, "nanoterm", .{ .size = 14, .weight = .semibold });
             var title: []const u8 = "";
             for (p.sessions.items) |tab| {
                 if (tab.id == p.session and tab.title.len > 0) title = tab.title;
             }
             if (title.len > 0) {
-                const t = ui.div(c).row().maxW(150).clip();
+                const t = ui.div(c).row().maxW(160).clip();
                 defer t.end();
-                ui.text(c, title, .{ .size = 12, .color = c.theme.muted, .mono = true, .truncate = .middle });
+                ui.text(c, title, .{ .size = 13, .color = c.theme.muted, .mono = true, .truncate = .middle });
             }
             ui.spacer(c);
             const dot = switch (p.status) {
@@ -2492,22 +2540,26 @@ pub const Phone = struct {
                 .connecting => c.theme.accent,
                 .down => c.theme.danger,
             };
-            _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = dot }, .none, null);
+            if (p.status == .connecting) {
+                ui.text(c, pulse(c), .{ .size = 16, .color = dot, .mono = true });
+            } else {
+                _ = c.leaf(.{ .width = .{ .px = 8 }, .height = .{ .px = 8 }, .radius = 4, .background = dot }, .none, null);
+            }
             if (p.running.items.len > 0) {
                 ui.key(c, "stop");
-                if (ui.button(c, "", .{ .variant = .danger, .size = 11, .icon = "stop.circle" }).clicked) p.interrupt();
+                if (ui.button(c, "", .{ .variant = .danger, .size = 12, .icon = "stop.circle" }).clicked) p.interrupt();
             } else if (p.status != .live) {
-                if (ui.button(c, "Reconnect", .{ .size = 12, .variant = .secondary }).clicked) p.toConnect();
+                if (ui.button(c, "Reconnect", .{ .size = 13, .variant = .secondary }).clicked) p.toConnect();
             }
             if (p.feed.items.len > 0) {
                 ui.key(c, "clear");
-                if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "trash" }).clicked) p.clearFeed();
+                if (ui.button(c, "", .{ .variant = .ghost, .size = 12, .icon = "trash" }).clicked) p.clearFeed();
             }
             // The switcher's shape: a row of pills, or the desktop's
             // sidebar in a drawer.
             ui.key(c, "layout");
             const layout_icon = if (p.layout == .sidebar) "sidebar.left" else "rectangle.split.2x1";
-            if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = layout_icon }).clicked) {
+            if (ui.button(c, "", .{ .variant = .ghost, .size = 12, .icon = layout_icon }).clicked) {
                 if (p.layout == .tabs) {
                     p.setLayout(.sidebar);
                     p.drawer_open = true;
@@ -2518,7 +2570,7 @@ pub const Phone = struct {
                 }
             }
             ui.key(c, "settings");
-            if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "slider.horizontal.3" }).clicked) p.toConnect();
+            if (ui.button(c, "", .{ .variant = .ghost, .size = 12, .icon = "slider.horizontal.3" }).clicked) p.toConnect();
         }
         // Ghostty's tab bar, as on the desktop: a pill per tab, the one
         // shown lit; they scroll sideways when there are many. The sidebar
@@ -2527,9 +2579,9 @@ pub const Phone = struct {
             _ = c.open(.{
                 .direction = .row,
                 .width = .fill,
-                .height = .{ .px = 36 },
-                .gap = 6,
-                .padding = .{ .left = 12, .right = 12, .bottom = 8 },
+                .height = .{ .px = 40 },
+                .gap = 8,
+                .padding = .{ .left = 14, .right = 14, .bottom = 10 },
                 .scroll_x = true,
                 .clip = true,
             }, "tabs");
@@ -2537,12 +2589,12 @@ pub const Phone = struct {
             for (p.sessions.items) |tab| {
                 const active = tab.id == p.session;
                 ui.key(c, c.print("tab-{d}", .{tab.id}));
-                var pill = ui.div(c).row().gap(6).itemsCenter().px(10).py(4).rounded(7).maxW(180).clip();
+                var pill = ui.div(c).row().gap(8).itemsCenter().px(12).py(6).rounded(8).maxW(190).clip();
                 pill = if (active) pill.bg(c.theme.surface_hover) else pill.hover(c.theme.surface_hover);
                 defer pill.end();
                 if (pill.clicked() and !active) p.session = tab.id;
                 const label = if (tab.title.len > 0) tab.title else c.print("tab {d}", .{tab.id});
-                ui.text(c, label, .{ .size = 12, .weight = if (active) .semibold else .regular, .color = if (active) c.theme.text else c.theme.muted });
+                ui.text(c, label, .{ .size = 13, .weight = if (active) .semibold else .regular, .color = if (active) c.theme.text else c.theme.muted });
                 const busy = for (p.running.items) |k| {
                     if (k == tab.id or (k & turn_bit) == tab.id) break true;
                 } else false;
@@ -2561,11 +2613,25 @@ pub const Phone = struct {
         ui.scroll(c, .{
             .width = .fill,
             .grow = 1,
-            .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 },
-            .gap = 8,
+            .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 },
+            .gap = 12,
             .follow_end = true,
             .background = c.theme.surface,
         });
+        // Loading skeleton: shown while refreshing the feed.
+        if (p.feed_loading) {
+            const skel = ui.div(c).column().wFull().gap(12);
+            defer skel.end();
+            for (0..3) |_| {
+                const row = ui.div(c).row().wFull().gap(12).itemsCenter();
+                defer row.end();
+                _ = c.leaf(.{ .width = .{ .px = 32 }, .height = .{ .px = 32 }, .radius = 8, .background = c.theme.surface_hover }, .none, null);
+                const col = ui.div(c).column().grow().gap(8);
+                defer col.end();
+                _ = c.leaf(.{ .width = .{ .px = 120 }, .height = .{ .px = 14 }, .radius = 6, .background = c.theme.surface_hover }, .none, null);
+                _ = c.leaf(.{ .width = .{ .px = 80 }, .height = .{ .px = 12 }, .radius = 6, .background = c.theme.surface_hover }, .none, null);
+            }
+        }
         var shown_here: usize = 0;
         for (p.feed.items, 0..) |*f, i| {
             const session = f.session();
@@ -2581,17 +2647,17 @@ pub const Phone = struct {
         if (shown_here == 0) {
             // The desktop's welcome, smaller: what this is, and a few
             // things to try — a tap puts one in the input.
-            const outer = ui.div(c).column().wFull().itemsCenter().pt(40).px(24).gap(14);
+            const outer = ui.div(c).column().wFull().itemsCenter().pt(48).px(24).gap(16);
             defer outer.end();
-            const head = ui.div(c).row().gap(10).itemsCenter();
+            const head = ui.div(c).row().gap(12).itemsCenter();
             defer head.end();
-            ui.icon(c, "terminal.fill", .{ .size = 24, .color = c.theme.accent });
-            ui.text(c, "nanoterm", .{ .size = 24, .weight = .bold });
+            ui.icon(c, "terminal.fill", .{ .size = 28, .color = c.theme.accent });
+            ui.text(c, "nanoterm", .{ .size = 26, .weight = .bold });
             ui.text(c, "Commands and questions in one input. As the workstation draws a command's block or the agent's turn, so this does.", .{
-                .size = 13,
+                .size = 14,
                 .color = c.theme.muted,
                 .wrap = true,
-                .leading = 1.4,
+                .leading = 1.5,
             });
             const tries = [_]struct { text: []const u8, agent: bool }{
                 .{ .text = "git status", .agent = false },
@@ -2600,80 +2666,80 @@ pub const Phone = struct {
             };
             for (tries, 0..) |t, i| {
                 ui.key(c, c.print("try-{d}", .{i}));
-                const chip = ui.div(c).row().gap(7).itemsCenter().px(12).py(7).rounded(8).border(c.theme.border).hover(c.theme.surface_hover).control();
+                const chip = ui.div(c).row().gap(8).itemsCenter().px(14).py(8).rounded(10).border(c.theme.border).hover(c.theme.surface_hover).control();
                 defer chip.end();
                 if (chip.clicked()) {
                     p.input.set(t.text);
                     p.mode = if (t.agent) 1 else 0;
                 }
-                ui.icon(c, if (t.agent) "sparkles" else "chevron.right", .{ .size = 11, .color = c.theme.accent });
-                ui.text(c, t.text, .{ .size = 12.5, .mono = !t.agent });
+                ui.icon(c, if (t.agent) "sparkles" else "chevron.right", .{ .size = 12, .color = c.theme.accent });
+                ui.text(c, t.text, .{ .size = 13, .mono = !t.agent });
             }
         }
         ui.end(c);
         // The input, as the desktop's composer: a rounded pill holding
         // the text, a chip for where Return sends it, and the send button
         // (a stop square while something runs and the box is empty).
-        ui.column(c, .{ .width = .fill, .padding = .{ .left = 12, .right = 12, .top = 6, .bottom = 10 }, .gap = 6, .background = c.theme.background });
+        ui.column(c, .{ .width = .fill, .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 12 }, .gap = 8, .background = c.theme.background });
         {
-            const pill = ui.div(c).column().wFull().gap(8).px(14).pt(10).pb(8).rounded(18).bg(c.theme.surface).border(c.theme.border);
+            const pill = ui.div(c).column().wFull().gap(10).px(16).pt(12).pb(10).rounded(20).bg(c.theme.surface).border(c.theme.border);
             defer pill.end();
             const typed = ui.textField(c, &p.input, .{
                 .placeholder = if (p.mode == 0) "Run a command" else "Ask the agent anything",
                 .width = .fill,
                 .bare = true,
-                .size = 13.5,
+                .size = 14.5,
                 .select_all_on_focus = false,
             });
-            const actions = ui.div(c).row().wFull().gap(6).itemsCenter();
+            const actions = ui.div(c).row().wFull().gap(8).itemsCenter();
             defer actions.end();
             {
                 const agent = p.mode == 1;
                 const color = c.theme.accent;
                 ui.key(c, "mode-pill");
-                const d = ui.div(c).row().gap(5).itemsCenter().px(10).py(4).roundedFull().bg(color.alpha(0.12)).hover(color.alpha(0.2)).control();
+                const d = ui.div(c).row().gap(6).itemsCenter().px(12).py(5).roundedFull().bg(color.alpha(0.12)).hover(color.alpha(0.2)).control();
                 defer d.end();
                 if (d.clicked()) p.mode = 1 - p.mode;
-                if (agent) ui.icon(c, "sparkles", .{ .size = 10, .color = color }) else ui.text(c, "❯", .{ .size = 12, .weight = .bold, .color = color, .mono = true });
-                ui.text(c, if (agent) "Agent" else "shell", .{ .size = 11, .weight = .semibold, .color = color });
+                if (agent) ui.icon(c, "sparkles", .{ .size = 11, .color = color }) else ui.text(c, "❯", .{ .size = 13, .weight = .bold, .color = color, .mono = true });
+                ui.text(c, if (agent) "Agent" else "shell", .{ .size = 12, .weight = .semibold, .color = color });
             }
             // The tab's agent and model, one tap to change either.
             if (p.currentTab()) |tab| {
                 if (tab.agent.len > 0 or tab.model.len > 0) {
                     ui.key(c, "model-chip");
-                    const chip = ui.div(c).row().gap(5).itemsCenter().px(8).py(4).roundedFull().hover(c.theme.text.alpha(0.06)).control();
+                    const chip = ui.div(c).row().gap(6).itemsCenter().px(10).py(5).roundedFull().hover(c.theme.text.alpha(0.06)).control();
                     defer chip.end();
                     if (chip.clicked()) p.openPicker();
-                    _ = c.leaf(.{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .radius = 3, .background = agentDot(c, tab.agent_status) }, .none, null);
-                    ui.text(c, if (tab.agent.len > 0) tab.agent else "Agent", .{ .size = 10.5, .weight = .semibold, .color = c.theme.text });
+                    _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = agentDot(c, tab.agent_status) }, .none, null);
+                    ui.text(c, if (tab.agent.len > 0) tab.agent else "Agent", .{ .size = 12, .weight = .semibold, .color = c.theme.text });
                     if (tab.model.len > 0) {
-                        const m = ui.div(c).row().maxW(104).clip();
+                        const m = ui.div(c).row().maxW(110).clip();
                         defer m.end();
-                        ui.text(c, tab.model, .{ .size = 10.5, .mono = true, .color = c.theme.muted, .truncate = .middle });
+                        ui.text(c, tab.model, .{ .size = 12, .mono = true, .color = c.theme.muted, .truncate = .middle });
                     }
-                    ui.icon(c, "chevron.up.chevron.down", .{ .size = 8, .color = c.theme.muted });
+                    ui.icon(c, "chevron.up.chevron.down", .{ .size = 9, .color = c.theme.muted });
                 }
             }
             ui.spacer(c);
             if (p.history.items.len > 0) {
                 ui.key(c, "history-back");
-                if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "chevron.up" }).clicked) p.historyRecall(-1);
+                if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "chevron.up" }).clicked) p.historyRecall(-1);
                 ui.key(c, "history-forward");
-                if (ui.button(c, "", .{ .variant = .ghost, .size = 10, .icon = "chevron.down" }).clicked) p.historyRecall(1);
+                if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "chevron.down" }).clicked) p.historyRecall(1);
             }
             const has_text = p.input.text().len > 0;
             const running = p.running.items.len > 0;
             const can_send = has_text and p.session != 0 and p.status == .live;
             ui.key(c, "send");
-            var send = ui.div(c).row().size(30, 30).roundedFull().center().bg(c.theme.text);
+            var send = ui.div(c).row().size(34, 34).roundedFull().center().bg(c.theme.text);
             if (!can_send and !running) send = send.opacity(0.35);
             defer send.end();
             if (send.clicked()) {
                 if (running and !has_text) p.interrupt() else if (can_send) p.submit();
             }
             if (running and !has_text) {
-                _ = c.leaf(.{ .width = .{ .px = 11 }, .height = .{ .px = 11 }, .radius = 3, .background = c.theme.background }, .none, null);
-            } else ui.icon(c, "arrow.up", .{ .size = 13, .weight = .bold, .color = c.theme.background });
+                _ = c.leaf(.{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .radius = 3.5, .background = c.theme.background }, .none, null);
+            } else ui.icon(c, "arrow.up", .{ .size = 14, .weight = .bold, .color = c.theme.background });
             if (typed.submitted) p.submit();
         }
         ui.end(c);
