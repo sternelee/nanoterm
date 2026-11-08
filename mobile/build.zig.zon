@@ -6,8 +6,8 @@
     .dependencies = .{
         // The same nanoui nanoterm builds against, by the same commit.
         .nanoui = .{
-            .url = "git+https://github.com/justrach/nanoui#219f77acfe29d6cb521a388f7ed4a0d9c413007f",
-            .hash = "nanoui-0.11.0-we0KMbSAIwBQo1wV-FcCvOJNSg2AaUavAcvX24QjPJ7r",
+            .url = "git+https://github.com/justrach/nanoui#v0.13.0",
+            .hash = "nanoui-0.13.0-we0KMd1-MQBzJq1VU59oWYKF3KHhSYPj8_qjVe2icq_e",
         },
     },
     .paths = .{
