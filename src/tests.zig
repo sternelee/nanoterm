@@ -10,6 +10,7 @@ const proc = @import("proc.zig");
 
 test {
     _ = @import("vt.zig");
+    _ = @import("agent_claude.zig");
     _ = @import("tests_vt.zig");
     _ = @import("binds.zig");
     _ = @import("assist.zig");
