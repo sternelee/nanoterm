@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "quirc.h"
@@ -33,6 +34,46 @@
 
 // Zig's side of a decode: it copies the string and stops the scan.
 extern void nanoterm_qr_found(const char *payload, int len);
+
+// The latest camera frame as RGBA, for a viewfinder on the Zig side: the Y
+// plane (QR codes are read from luma) copied down to at most this wide, kept
+// in a buffer qr_preview_get() hands back under a lock.
+#define PREVIEW_MAX_W 480
+static pthread_mutex_t pv_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char *pv_buf;
+static size_t pv_cap;
+static int pv_w, pv_h;
+static unsigned int pv_ver;
+
+static void publish_preview(const unsigned char *y, int w, int h, int stride) {
+    if (w <= 0 || h <= 0) return;
+    int tw = w > PREVIEW_MAX_W ? PREVIEW_MAX_W : w;
+    int th = (int)(((long)h * tw) / w);
+    if (th < 1) th = 1;
+    size_t need = (size_t)tw * (size_t)th * 4u;
+    pthread_mutex_lock(&pv_mutex);
+    if (need != pv_cap) {
+        unsigned char *nb = realloc(pv_buf, need);
+        if (nb) { pv_buf = nb; pv_cap = need; } else { need = 0; }
+    }
+    if (need != 0 && pv_buf) {
+        int sx = (int)(((long)w << 16) / tw);
+        int sy = (int)(((long)h << 16) / th);
+        for (int yy = 0; yy < th; yy++) {
+            const unsigned char *src = y + (size_t)((yy * sy) >> 16) * stride;
+            unsigned char *dst = pv_buf + (size_t)yy * tw * 4u;
+            for (int xx = 0; xx < tw; xx++) {
+                unsigned char v = src[(xx * sx) >> 16];
+                dst[0] = v; dst[1] = v; dst[2] = v; dst[3] = 255;
+                dst += 4;
+            }
+        }
+        pv_w = tw;
+        pv_h = th;
+        pv_ver++;
+    }
+    pthread_mutex_unlock(&pv_mutex);
+}
 
 static ACameraManager *g_mgr;
 static ACameraDevice *g_dev;
@@ -63,6 +104,7 @@ static void image_available(void *ctx, AImageReader *reader) {
         int32_t ylen = 0, stride = 0;
         if (AImage_getPlaneData(img, 0, &y, &ylen) == AMEDIA_OK && y != NULL &&
             AImage_getPlaneRowStride(img, 0, &stride) == AMEDIA_OK) {
+            publish_preview(y, w, h, stride);
             if (w != g_qw || h != g_qh) {
                 if (quirc_resize(g_qr, w, h) == 0) {
                     g_qw = w;
@@ -212,6 +254,25 @@ int qr_scan_start(void) {
 
 int qr_scan_frames(void) {
     return atomic_load(&g_frame_count);
+}
+
+// Copies the latest RGBA frame into dst (cap bytes). Returns 0 and fills the
+// out params when there is one that fits; -1 otherwise.
+int qr_preview_get(unsigned char *dst, int cap, int *ow, int *oh, unsigned int *over) {
+    int r = -1;
+    pthread_mutex_lock(&pv_mutex);
+    if (pv_buf && pv_w > 0 && pv_h > 0) {
+        size_t need = (size_t)pv_w * (size_t)pv_h * 4u;
+        if (dst && (size_t)cap >= need) {
+            memcpy(dst, pv_buf, need);
+            if (ow) *ow = pv_w;
+            if (oh) *oh = pv_h;
+            if (over) *over = pv_ver;
+            r = 0;
+        }
+    }
+    pthread_mutex_unlock(&pv_mutex);
+    return r;
 }
 
 void qr_scan_stop(void) {
