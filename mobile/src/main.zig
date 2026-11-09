@@ -20,8 +20,19 @@ const settings = @import("settings.zig");
 const md = @import("markdown");
 const highlight = @import("highlight");
 const relayLink = @import("relayLink.zig");
+const scan = @import("scan.zig");
 /// The desktop's palette: the phone wears the same theme.
 const theme = @import("theme");
+
+/// The phone a scan's status goes to, and a notice function that reaches it:
+/// scan.setNotify takes the latter once, in main.
+var scan_phone: ?*Phone = null;
+fn scanNotice(msg: []const u8) void {
+    if (scan_phone) |p| {
+        p.notify(.info, "{s}", .{msg});
+        p.draw();
+    }
+}
 
 comptime {
     // A phone's app: iOS (and, later, Android). The desktop has nanoterm
@@ -1803,6 +1814,21 @@ pub const Phone = struct {
         return true;
     }
 
+    /// Scan a QR code into the fields (Android), or say it is not here yet.
+    pub fn startScan(p: *Phone) void {
+        if (!scan.supported()) {
+            p.notify(.info, "Camera scanning is Android-only for now: paste the address and token.", .{});
+            p.draw();
+            return;
+        }
+        if (scan.start()) {
+            p.notify(.info, "Scanning: point the camera at the desktop's relay QR code.", .{});
+        } else {
+            p.notify(.err, "Could not start the camera.", .{});
+        }
+        p.draw();
+    }
+
     /// Save a connection to the recent history, keeping last 5.
     fn saveConnection(p: *Phone, host: []const u8, port: u16, token: []const u8) void {
         // Check if already exists, update last_used.
@@ -1949,6 +1975,9 @@ pub const Phone = struct {
                 .variant = .primary,
                 .width = .fill,
             }).clicked or token.submitted) p.connect();
+            if (scan.supported()) {
+                if (ui.button(c, "Scan QR code", .{ .size = 13, .variant = .secondary, .width = .fill, .icon = "qrcode.viewfinder" }).clicked) p.startScan();
+            }
             if (p.status == .live) {
                 if (ui.button(c, "Back to the tabs", .{ .size = 13, .variant = .ghost, .width = .fill }).clicked) p.screen = .feed;
             }
@@ -2566,6 +2595,11 @@ pub const Phone = struct {
         // Hand nanoui the theme each frame so a pick in Settings shows at
         // once, the way the desktop's view does.
         c.theme_chosen = currentTheme(p);
+        // A scan that decoded since last frame fills the fields here, on the
+        // UI thread where the view runs.
+        if (scan.poll()) |text| {
+            if (!p.applyScannedLink(text)) p.notify(.err, "Scanned code is not a relay link.", .{});
+        }
         if (p.screen == .connect) return p.connectView(c);
 
         // Gesture detection: horizontal swipe to switch tabs, pull down to refresh.
@@ -2872,6 +2906,8 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const p = try Phone.create(init, args);
     defer p.destroy();
+    scan_phone = p;
+    scan.setNotify(scanNotice);
 
     const app = try nanoui.App.create(init, .{ .name = "nanoterm" });
     defer app.destroy();

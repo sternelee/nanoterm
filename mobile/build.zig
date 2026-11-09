@@ -10,12 +10,11 @@
 //! (`mobile/dev.sh run` does that, and finds the package.) On a desktop the
 //! same program builds as a plain window, which is how it is tried out.
 const std = @import("std");
-const nanoui = @import("nanoui");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const dep = b.dependency("nanoui", .{ .target = target, .optimize = optimize });
+    const dep = b.dependency("nanoui_fork", .{ .target = target, .optimize = optimize });
 
     // The desktop's Markdown parser and syntax colors, so agent text on
     // the phone is read exactly as it is at the workstation.
@@ -83,7 +82,27 @@ pub fn build(b: *std.Build) void {
             .nanoui = dep.module("nanoui"),
         });
         if (android.Sdk.find(b)) |sdk| _ = android.linkNdk(b, lib, sdk);
-        const opts: android.Options = .{ .name = "nanoterm", .id = "com.justrach.nanoterm", .version = "0.1", .icon = b.path("android/ic_launcher.png") };
+        // The QR scanner: NDK camera2 + quirc, compiled into the app's library.
+        lib.root_module.addIncludePath(b.path("src/android/quirc"));
+        lib.root_module.addCSourceFiles(.{
+            .files = &.{
+                "src/android/scan_camera.c",
+                "src/android/quirc/quirc.c",
+                "src/android/quirc/decode.c",
+                "src/android/quirc/identify.c",
+                "src/android/quirc/version_db.c",
+            },
+            .flags = &.{"-std=c11"},
+        });
+        lib.root_module.linkSystemLibrary("camera2ndk", .{});
+        lib.root_module.linkSystemLibrary("mediandk", .{});
+        const opts: android.Options = .{
+            .name = "nanoterm",
+            .id = "com.justrach.nanoterm",
+            .version = "0.1",
+            .icon = b.path("android/ic_launcher.png"),
+            .permissions = &.{ "android.permission.INTERNET", "android.permission.CAMERA" },
+        };
         const apk = android.apk(b, lib, opts);
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(apk, .prefix, "android/nanoterm.apk").step);
         const run_android = android.runOnDevice(b, apk, opts, b.path("."));

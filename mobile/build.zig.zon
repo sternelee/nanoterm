@@ -4,10 +4,16 @@
     .fingerprint = 0x733dbed852eeefca,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        // The same nanoui nanoterm builds against, by the same commit.
+        // Upstream nanoui, for its build.zig helpers (`@import("nanoui")`:
+        // android.apk, ios.app). Same version as the fork below.
         .nanoui = .{
             .url = "git+https://github.com/justrach/nanoui#v0.13.0",
             .hash = "nanoui-0.13.0-we0KMd1-MQBzJq1VU59oWYKF3KHhSYPj8_qjVe2icq_e",
+        },
+        // The source module: a local fork that exposes the Android activity
+        // (camera permission, UI-thread work) the phone needs.
+        .nanoui_fork = .{
+            .path = "../../nanoui",
         },
     },
     .paths = .{
