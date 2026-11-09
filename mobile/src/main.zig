@@ -3035,14 +3035,15 @@ pub const Phone = struct {
         p.sidebar(c);
         p.pickerPanel(c);
 
-        // Notifications overlay: shown at the bottom, above everything.
+        // Notifications: toasts floating over the top of the view, stacked
+        // newest-last, so they never take room from the page. `fixed` keeps
+        // them out of the layout; a high layer draws them over the feed,
+        // the composer and the drawers.
         p.pruneNotifications();
         if (p.notifications.items.len > 0) {
-            ui.column(c, .{
-                .width = .fill,
-                .gap = 6,
-                .padding = .{ .left = 16, .right = 16, .bottom = 16 },
-            });
+            const top = c.safe_area.top + 8;
+            const stack = ui.div(c).fixed().offset(12, top).w(c.size.w - 24).layer(10).column().gap(6);
+            defer stack.end();
             for (p.notifications.items, 0..) |*n, i| {
                 const bg_color = switch (n.kind) {
                     .info => c.theme.accent,
@@ -3075,7 +3076,6 @@ pub const Phone = struct {
                 }
                 ui.end(c);
             }
-            ui.end(c);
         }
     }
 };
