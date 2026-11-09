@@ -913,6 +913,19 @@ pub const Phone = struct {
     swipe_start_x: f32 = 0,
     swipe_start_y: f32 = 0,
     swipe_tracking: bool = false,
+    /// A finger held on a text field: the long press that pastes the
+    /// clipboard, since the phone's own keyboard offers none. Armed on a
+    /// press within the field, pasted when the hold outlasts the slop.
+    long_press_armed: bool = false,
+    long_press_start: f64 = 0,
+    long_press_point: ui.Point = .{ .x = 0, .y = 0 },
+    long_press_field: ?*ui.TextBuffer = null,
+    long_press_append: bool = false,
+    /// The finger's down state last frame, and whether it just went down
+    /// this frame: the press edge, kept by us so a rebuild (which spends
+    /// nanoui's own `pressed`) still arms the hold.
+    long_press_down_prev: bool = false,
+    press_began: bool = false,
     pull_distance: f32 = 0,
     pull_refreshing: bool = false,
     feed_loading: bool = false,
@@ -2049,13 +2062,15 @@ pub const Phone = struct {
                 if (ui.button(c, "Paste", .{ .variant = .ghost, .size = 11, .icon = "doc.on.doc" }).clicked) p.pasteReplace(c, buffer);
             }
         }
-        return ui.textField(c, buffer, .{
+        const result = ui.textField(c, buffer, .{
             .placeholder = hint,
             .width = .fill,
             .size = 16,
             .password = password,
             .select_all_on_focus = true,
         });
+        if (pasteable) p.watchLongPress(c, c.rects.get(buffer.last_id), buffer, false);
+        return result;
     }
 
     /// Reads the clipboard into `buffer`, replacing what it held: the
@@ -2086,6 +2101,59 @@ pub const Phone = struct {
             buffer.want_caret = buffer.text().len;
         }
         p.draw();
+    }
+
+    /// Watches a text field for a long press — a finger held on it — and
+    /// pastes the clipboard when one lands. `rect` is where the field was
+    /// laid out last frame. The phone's keyboard has no paste of its own,
+    /// so this is the quickest way to get text in: touch and hold the box.
+    /// `append` keeps what was typed (the composer); otherwise the pasted
+    /// text replaces the field's one value (a token, an address).
+    fn watchLongPress(p: *Phone, c: *ui.Context, rect: ?ui.Rect, buffer: *ui.TextBuffer, append: bool) void {
+        const slop: f32 = 10;
+        const hold_s: f64 = 0.45;
+        // A finger that just went down over the field arms the hold.
+        if (p.press_began) {
+            if (rect) |r| {
+                if (r.contains(c.input.mouse)) {
+                    p.long_press_armed = true;
+                    p.long_press_start = c.time;
+                    p.long_press_point = c.input.mouse;
+                    p.long_press_field = buffer;
+                    p.long_press_append = append;
+                    // Wake again when the hold would have lasted long enough.
+                    c.frameIn(@floatCast(hold_s));
+                }
+            }
+            return;
+        }
+        // Finger up (or a release we missed): the hold is off.
+        if (!c.input.down) {
+            if (p.long_press_field == buffer) p.long_press_armed = false;
+            return;
+        }
+        if (!p.long_press_armed or p.long_press_field != buffer) return;
+        // A finger that moved off the press is a drag, not a hold.
+        if (@abs(c.input.mouse.x - p.long_press_point.x) > slop or @abs(c.input.mouse.y - p.long_press_point.y) > slop) {
+            p.long_press_armed = false;
+            return;
+        }
+        if (!c.input.down) {
+            p.long_press_armed = false;
+            return;
+        }
+        // Held, still down, still on the field. Paste once long enough;
+        // until then keep a wake scheduled, so the hold ends even if no
+        // other frame comes while the finger rests.
+        const held = c.time - p.long_press_start;
+        if (held < hold_s) {
+            c.frameIn(@floatCast(hold_s - held));
+            return;
+        }
+        p.long_press_armed = false;
+        // The keyboard may have shifted the field up under a still finger:
+        // the hold is what counts now, not where the box has moved to.
+        if (append) p.pasteAppend(c, buffer) else p.pasteReplace(c, buffer);
     }
 
     /// One thing in the feed, drawn as the desktop draws it.
@@ -2591,6 +2659,10 @@ pub const Phone = struct {
         // Hand nanoui the theme each frame so a pick in Settings shows at
         // once, the way the desktop's view does.
         c.theme_chosen = currentTheme(p);
+        // Our own press edge: nanoui's `pressed` is spent by a rebuild, and
+        // the long press has to survive the one a focused field triggers.
+        p.press_began = c.input.down and !p.long_press_down_prev;
+        p.long_press_down_prev = c.input.down;
         if (p.screen == .connect) return p.connectView(c);
 
         // Gesture detection: horizontal swipe to switch tabs, pull down to refresh.
@@ -2789,6 +2861,11 @@ pub const Phone = struct {
                 .size = 14.5,
                 .select_all_on_focus = false,
             });
+            // A generous target: the whole text band of the pill, not just
+            // the glyph line, so holding anywhere in the box pastes.
+            const field_rect = c.rects.get(p.input.last_id);
+            const hit = if (field_rect) |r| ui.Rect{ .x = r.x, .y = r.y - 10, .w = r.w, .h = r.h + 20 } else null;
+            p.watchLongPress(c, hit, &p.input, true);
             const actions = ui.div(c).row().wFull().gap(8).itemsCenter();
             defer actions.end();
             {
