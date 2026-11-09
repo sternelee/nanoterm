@@ -15,7 +15,11 @@ const nanoui = @import("nanoui");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const dep = b.dependency("nanoui", .{ .target = target, .optimize = optimize });
+    // The nanoui the phone is built against: the local fork with Android
+    // IME text support. The URL dependency below is still imported for its
+    // build helpers (`@import("nanoui").android` / `.ios`), byte-identical
+    // to the fork's own tools.
+    const fork = b.dependency("nanoui_fork", .{ .target = target, .optimize = optimize });
 
     // The desktop's Markdown parser and syntax colors, so agent text on
     // the phone is read exactly as it is at the workstation.
@@ -23,20 +27,20 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("../src/markdown.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+        .imports = &.{.{ .name = "nanoui", .module = fork.module("nanoui") }},
     });
     const highlight = b.createModule(.{
         .root_source_file = b.path("../src/highlight.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+        .imports = &.{.{ .name = "nanoui", .module = fork.module("nanoui") }},
     });
     // The desktop's palette, so the phone wears the same theme.
     const theme = b.createModule(.{
         .root_source_file = b.path("../src/theme.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "nanoui", .module = dep.module("nanoui") }},
+        .imports = &.{.{ .name = "nanoui", .module = fork.module("nanoui") }},
     });
 
     const exe = b.addExecutable(.{
@@ -46,7 +50,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "nanoui", .module = dep.module("nanoui") },
+                .{ .name = "nanoui", .module = fork.module("nanoui") },
                 .{ .name = "markdown", .module = markdown },
                 .{ .name = "highlight", .module = highlight },
                 .{ .name = "theme", .module = theme },
@@ -80,7 +84,7 @@ pub fn build(b: *std.Build) void {
         const lib = android.library(b, .{
             .name = "nanoterm",
             .root_module = exe.root_module,
-            .nanoui = dep.module("nanoui"),
+            .nanoui = fork.module("nanoui"),
         });
         if (android.Sdk.find(b)) |sdk| _ = android.linkNdk(b, lib, sdk);
         const opts: android.Options = .{ .name = "nanoterm", .id = "com.justrach.nanoterm", .version = "0.1", .icon = b.path("android/ic_launcher.png") };
