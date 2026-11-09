@@ -1821,11 +1821,9 @@ pub const Phone = struct {
             p.draw();
             return;
         }
-        if (scan.start()) {
-            p.notify(.info, "Scanning: point the camera at the desktop's relay QR code.", .{});
-        } else {
-            p.notify(.err, "Could not start the camera.", .{});
-        }
+        // The scan module asks for the camera and reports its own progress
+        // (asked, scanning, no frames); the view shows it while scan.active.
+        _ = scan.start();
         p.draw();
     }
 
@@ -1962,6 +1960,21 @@ pub const Phone = struct {
             .padding = .{ .top = 20, .bottom = 24, .left = 16, .right = 16 },
             .gap = 20,
         });
+        if (scan.busy()) {
+            const scan_box = ui.div(c).column().wFull().p(16).gap(10).bg(c.theme.accent.alpha(0.12)).rounded(12).border(c.theme.accent);
+            defer scan_box.end();
+            {
+                const row = ui.div(c).row().gap(8).itemsCenter();
+                defer row.end();
+                // The spinner asks for the next frame, so poll keeps running.
+                ui.text(c, spin(c), .{ .size = 14, .color = c.theme.accent, .mono = true });
+                ui.text(c, "Scanning… point the camera at the desktop's QR code.", .{ .size = 13.5, .weight = .semibold, .color = c.theme.accent, .wrap = true, .leading = 1.3 });
+            }
+            if (ui.button(c, "Cancel", .{ .size = 13, .variant = .secondary }).clicked) {
+                scan.stop();
+                p.draw();
+            }
+        }
         {
             ui.text(c, "Workstation", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
             const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);

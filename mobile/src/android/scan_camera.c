@@ -48,12 +48,14 @@ static pthread_t g_thread;
 static atomic_int g_running = 0;
 static int g_thread_live = 0;
 static int g_qw = 0, g_qh = 0;
+static atomic_int g_frame_count = 0;
 
 static void image_available(void *ctx, AImageReader *reader) {
     (void)ctx;
     if (!atomic_load(&g_running)) return;
     AImage *img = NULL;
     if (AImageReader_acquireNextImage(reader, &img) != AMEDIA_OK || img == NULL) return;
+    atomic_fetch_add(&g_frame_count, 1);
 
     int32_t w = 0, h = 0;
     if (AImage_getWidth(img, &w) == AMEDIA_OK && AImage_getHeight(img, &h) == AMEDIA_OK && w > 0 && h > 0) {
@@ -198,6 +200,7 @@ done:
 
 int qr_scan_start(void) {
     if (atomic_load(&g_running)) return 0;
+    atomic_store(&g_frame_count, 0);
     atomic_store(&g_running, 1);
     if (pthread_create(&g_thread, NULL, worker, NULL) != 0) {
         atomic_store(&g_running, 0);
@@ -205,6 +208,10 @@ int qr_scan_start(void) {
     }
     g_thread_live = 1;
     return 0;
+}
+
+int qr_scan_frames(void) {
+    return atomic_load(&g_frame_count);
 }
 
 void qr_scan_stop(void) {

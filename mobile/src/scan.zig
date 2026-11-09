@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 pub const impl = if (builtin.abi.isAndroid()) @import("scan_android.zig") else @import("scan_none.zig");
 
 pub const supported = impl.supported;
+pub const busy = impl.busy;
 pub const start = impl.start;
 pub const stop = impl.stop;
 pub const poll = impl.poll;
