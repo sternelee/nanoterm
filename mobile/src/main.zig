@@ -322,10 +322,14 @@ fn themeRow(c: *ui.Context, p: *Phone, id: []const u8, name: []const u8, desc: [
         .border(if (selected) c.theme.accent else c.theme.border);
     defer row.end();
     if (row.clicked()) p.setTheme(id);
-    const col = ui.div(c).column().grow().gap(1);
-    defer col.end();
-    ui.text(c, name, .{ .size = 13, .weight = if (selected) .semibold else .medium, .color = c.theme.text });
-    ui.text(c, desc, .{ .size = 11, .color = c.theme.muted, .wrap = true, .leading = 1.3 });
+    {
+        // The name and note take the row's width; the block closes before
+        // the check below, so the check is a row child and sits at the end.
+        const col = ui.div(c).column().grow().gap(1);
+        defer col.end();
+        ui.text(c, name, .{ .size = 13, .weight = if (selected) .semibold else .medium, .color = c.theme.text });
+        ui.text(c, desc, .{ .size = 11, .color = c.theme.muted, .wrap = true, .leading = 1.3 });
+    }
     if (selected) ui.icon(c, "checkmark", .{ .size = 13, .color = c.theme.accent });
 }
 
@@ -2759,9 +2763,10 @@ pub const Phone = struct {
     }
 
     pub fn view(p: *Phone, c: *ui.Context) void {
-        // Hand nanoui the theme each frame so a pick in Settings shows at
-        // once, the way the desktop's view does.
-        c.theme_chosen = currentTheme(p);
+        // The theme to draw with, picked on the phone. nanoui's phone
+        // surfaces ignore `theme_chosen` (only the Windows one reads it), so
+        // set `c.theme` here, as the desktop's view does: a pick shows at once.
+        c.theme = currentTheme(p);
         // Our own press edge: nanoui's `pressed` is spent by a rebuild, and
         // the long press has to survive the one a focused field triggers.
         p.press_began = c.input.down and !p.long_press_down_prev;
