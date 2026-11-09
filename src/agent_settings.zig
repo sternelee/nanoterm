@@ -733,6 +733,17 @@ pub const Store = struct {
         self.fetchNextModels();
     }
 
+    /// The picker opening, before it settles into `showModels` each frame:
+    /// providers that answered with nothing are asked again, since the state
+    /// behind them may have changed — a sign-in finished, a server came back.
+    /// One that listed its models is left alone, so a reopen costs no request.
+    pub fn retryModels(self: *Store) void {
+        for (self.providers.items) |*provider| {
+            if (provider.models.items.len == 0) provider.models_tried = false;
+        }
+        self.showModels();
+    }
+
     /// A provider's token, from the variable its definition names.
     fn providerToken(self: *Store, provider: Provider) ?[]const u8 {
         if (provider.auth_env.len == 0) return null;
@@ -1527,4 +1538,165 @@ test "a provider that cannot be listed says so, and only about itself" {
     store.finishModelsQuery();
     try std.testing.expect(store.modelsNote("magpie") == null);
     try std.testing.expectEqualStrings("not signed in", store.modelsNote("codex").?.text);
+}
+
+/// A loopback answer to the model-catalog requests, so a test hears fx's real
+/// Gateway path without a network or a real credential.
+const FakeModelCatalog = struct {
+    io_backend: std.Io.Threaded = .init_single_threaded,
+    server: std.Io.net.Server = undefined,
+    thread: ?std.Thread = null,
+    body: []const u8,
+    served: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn start(self: *FakeModelCatalog) !void {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        self.server = try address.listen(self.io(), .{ .reuse_address = true });
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+    }
+
+    fn io(self: *FakeModelCatalog) std.Io {
+        return self.io_backend.io();
+    }
+
+    fn port(self: *FakeModelCatalog) u16 {
+        return self.server.socket.address.getPort();
+    }
+
+    fn serve(self: *FakeModelCatalog) void {
+        const zio = self.io();
+        while (true) {
+            var stream = self.server.accept(zio) catch return;
+            const answered = self.answer(zio, &stream);
+            stream.close(zio);
+            if (!answered) return;
+            self.served.store(true, .release);
+        }
+    }
+
+    fn answer(self: *FakeModelCatalog, zio: std.Io, stream: *std.Io.net.Stream) bool {
+        var socket_buffer: [4096]u8 = undefined;
+        var reader = stream.reader(zio, &socket_buffer);
+        var head: [16 * 1024]u8 = undefined;
+        var len: usize = 0;
+        while (len < head.len) {
+            head[len] = reader.interface.takeByte() catch return false;
+            len += 1;
+            if (std.mem.endsWith(u8, head[0..len], "\r\n\r\n")) break;
+        }
+        var write_buffer: [4096]u8 = undefined;
+        var writer = stream.writer(zio, &write_buffer);
+        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n") catch return false;
+        writer.interface.writeAll(self.body) catch return false;
+        writer.interface.flush() catch return false;
+        return true;
+    }
+
+    fn deinit(self: *FakeModelCatalog) void {
+        if (self.thread) |thread| {
+            // Wake a waiting accept, so a test that never reached the network
+            // still ends.
+            var address = std.Io.net.IpAddress{ .ip4 = .loopback(self.port()) };
+            if (address.connect(self.io(), .{ .mode = .stream })) |wake| {
+                var stream = wake;
+                stream.close(self.io());
+            } else |_| {}
+            thread.join();
+            self.thread = null;
+        }
+        self.server.deinit(self.io());
+    }
+};
+
+test "a signed-in Gateway's models reach the picker" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-gateway-models";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/.fx/settings.json", .data = "{\"provider\":\"gateway\",\"model\":\"anthropic/claude-sonnet-4\"}" });
+
+    var gateway: FakeModelCatalog = .{ .body =
+        \\{"data":[{"id":"anthropic/claude-sonnet-4","type":"language","tags":["tool-use"],"context_window":200000},{"id":"openai/gpt-5","type":"language","tags":["tool-use"],"context_window":256000}]}
+    };
+    try gateway.start();
+    defer gateway.deinit();
+
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("FX_DISABLE_KEYCHAIN", "1");
+    try env.put("AI_GATEWAY_API_KEY", "test-key");
+    const url = try std.fmt.allocPrint(gpa, "http://127.0.0.1:{d}/v1/models", .{gateway.port()});
+    defer gpa.free(url);
+    try env.put("FX_TEST_GATEWAY_MODELS_URL", url);
+    engine.shared_io.setIo(io);
+    engine.shared_io.setEnvironMap(&env);
+    defer engine.shared_io.resetEnvironForTest();
+
+    // What the picker's worker asks fx: the Gateway's own catalog, read with
+    // the credential the profile signed in with.
+    var list = try engine.listProviderModels(gpa, .gateway, null);
+    defer list.deinit(gpa);
+    try std.testing.expect(gateway.served.load(.acquire));
+    try std.testing.expect(list.note == null);
+    try std.testing.expectEqual(@as(usize, 2), list.ids.len);
+    // The picker view orders the catalog itself; both ids are listed.
+    try std.testing.expect(hasId(list.ids, "anthropic/claude-sonnet-4"));
+    try std.testing.expect(hasId(list.ids, "openai/gpt-5"));
+
+    // The store runs that same call off the UI thread and publishes the list
+    // on the Gateway row the picker lists.
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    try std.testing.expectEqualStrings("gateway", store.providers.items[0].name);
+    store.startModelsQuery(store.providers.items[0]);
+    var waited: usize = 0;
+    while (!store.modelsQueryDone()) : (waited += 1) {
+        if (waited > 2000) return error.TimedOut;
+        std.Io.Threaded.global_single_threaded.io().sleep(.fromMilliseconds(5), .awake) catch {};
+    }
+    store.finishModelsQuery();
+    try std.testing.expect(store.modelsNote("gateway") == null);
+    try std.testing.expectEqual(@as(usize, 2), store.providers.items[0].models.items.len);
+    try std.testing.expect(hasId(store.providers.items[0].models.items, "anthropic/claude-sonnet-4"));
+    try std.testing.expect(hasId(store.providers.items[0].models.items, "openai/gpt-5"));
+
+    // Choosing one writes fx's own preference, as the picker's row does.
+    store.chooseProviderModel("gateway", "openai/gpt-5");
+    try std.testing.expect(!store.failed);
+    try std.testing.expectEqualStrings("openai/gpt-5", store.currentModel());
+}
+
+test "reopening the picker asks a provider that answered with nothing again" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-models-retry";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    const gateway = &store.providers.items[0];
+    try std.testing.expectEqualStrings("gateway", gateway.name);
+    // An attempt made before signing in left nothing to list.
+    gateway.models_tried = true;
+
+    store.retryModels();
+    try std.testing.expect(!gateway.models_tried);
+
+    // One that listed its models is not asked again: a reopen costs no
+    // request.
+    try gateway.models.append(gpa, try gpa.dupe(u8, "anthropic/claude-sonnet-4"));
+    gateway.models_tried = true;
+    store.retryModels();
+    try std.testing.expect(gateway.models_tried);
+}
+
+fn hasId(ids: anytype, id: []const u8) bool {
+    for (ids) |candidate| if (std.mem.eql(u8, candidate, id)) return true;
+    return false;
 }

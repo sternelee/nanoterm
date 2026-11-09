@@ -96,6 +96,66 @@ test "the smart input, through the real view" {
     try std.testing.expectEqual(ws_mod.Overlay.none, w.overlay);
 }
 
+test "the Gateway's models reach the picker, and the chosen one is fx's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-picker-models";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+    // What a signed-in Gateway leaves in fx's profile.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = home ++ "/.fx/settings.json",
+        .data = "{\"provider\":\"gateway\",\"model\":\"anthropic/claude-sonnet-4\"}",
+    });
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("FX_DISABLE_KEYCHAIN", "1");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    // What fx listed for the Gateway, as the store's worker publishes it.
+    // showModels() does not fetch under test, so the rows are handed them.
+    const store = shared.agent_store.?;
+    const gateway = &store.providers.items[0];
+    try std.testing.expectEqualStrings("gateway", gateway.name);
+    for ([_][]const u8{ "anthropic/claude-sonnet-4", "openai/gpt-5" }) |id| {
+        try gateway.models.append(gpa, try gpa.dupe(u8, id));
+    }
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+
+    // ⌘⇧M lists the Gateway's own models under its name.
+    try std.testing.expect(t.shortcut(binds.shortcut("Cmd+Shift+M")));
+    t.settle(1);
+    try std.testing.expect(t.hasText("AI Gateway"));
+    try std.testing.expect(t.hasText("anthropic/claude-sonnet-4"));
+    try std.testing.expect(t.hasText("openai/gpt-5"));
+    try t.screenshot("/tmp/nanoterm-view-gateway-models.png");
+
+    // Choosing one closes the picker, hands it to the session, and saves it
+    // where fx reads its preference.
+    try t.clickText("openai/gpt-5");
+    try std.testing.expectEqual(ws_mod.Overlay.none, w.overlay);
+    try std.testing.expectEqualStrings("openai/gpt-5", s.model_choice.?);
+    try std.testing.expectEqualStrings("gateway", store.selected_provider);
+    try std.testing.expectEqualStrings("openai/gpt-5", store.currentModel());
+    const settings = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(64 * 1024));
+    defer gpa.free(settings);
+    try std.testing.expect(std.mem.indexOf(u8, settings, "\"openai/gpt-5\"") != null);
+}
+
 const agent_mod = @import("agent.zig");
 
 const answer =

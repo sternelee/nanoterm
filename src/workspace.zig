@@ -111,7 +111,12 @@ pub const Workspace = struct {
         if (w.overlay == .models) w.shared.prefs.refresh(w.shared.env);
         w.query.clear();
         w.pick = 0;
-        if (w.overlay == .models) @import("assist.zig").prepareModels(w.focused());
+        if (w.overlay == .models) {
+            @import("assist.zig").prepareModels(w.focused());
+            // A listing that came back empty is looked at again: the picker
+            // may be opening because the provider was signed in since.
+            if (w.shared.agent_store) |store| store.retryModels();
+        }
     }
 
     /// Settings (⌘,): the agents are looked for again as it opens, and
