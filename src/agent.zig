@@ -180,6 +180,8 @@ pub const Agent = struct {
     /// Claude Code, driven through its own streaming CLI (agent_claude.zig),
     /// not its ACP adapter; only used when `which == .claude`.
     claude: ?*agent_claude.Client = null,
+    /// A claude session id to resume, if this pane had one before.
+    resume_id: ?[]u8 = null,
     native: ?*native_agent.Runtime = null,
     native_turn: ?*Turn = null,
     /// Pi speaks its own RPC, not ACP; only used when `which == .pi`.
@@ -253,6 +255,7 @@ pub const Agent = struct {
         a.client.deinit();
         a.pi_client.deinit();
         if (a.pi_wanted) |w| a.gpa.free(w);
+        if (a.resume_id) |r| a.gpa.free(r);
         if (a.pending_model) |m| a.gpa.free(m);
         freePiModel(a.gpa, a.pi_model);
         for (a.pi_models.items) |m| {
@@ -362,6 +365,12 @@ pub const Agent = struct {
         }, a, onInitialized);
     }
 
+    /// A claude session id to resume on the next start (a pane that had one).
+    pub fn setResume(a: *Agent, id: []const u8) void {
+        if (a.resume_id) |r| a.gpa.free(r);
+        a.resume_id = a.gpa.dupe(u8, id) catch null;
+    }
+
     /// Starts Claude Code as its own streaming CLI — the tool a shell runs,
     /// not its ACP adapter — so agent mode is the agent's real capability
     /// shown as Chat. Permission mode is default, with the control channel
@@ -385,6 +394,7 @@ pub const Agent = struct {
             "stdio",
         }) catch return error.OutOfMemory;
         if (a.pending_model) |m| items.appendSlice(al, &.{ "--model", m }) catch return error.OutOfMemory;
+        if (a.resume_id) |r| items.appendSlice(al, &.{ "--resume", r }) catch return error.OutOfMemory;
         const argv = try proc.cStrings(al, items.items);
         // The SDK entrypoint tells claude a host reads its control channel, so
         // it asks us (can_use_tool) instead of denying a tool on its own.

@@ -199,6 +199,8 @@ pub const Session = struct {
     home: []const u8,
     shell: shell_mod.Shell,
     agent: ?*agent_mod.Agent = null,
+    /// Claude's session id, kept so a new Agent for this pane resumes it.
+    claude_session: std.ArrayList(u8) = .empty,
     which: agent_mod.Which = .agent,
     /// Every block made, owned here; the timeline and turns point to them.
     all_blocks: std.ArrayList(*blocks.Block) = .empty,
@@ -323,6 +325,7 @@ pub const Session = struct {
         if (a.model_choice) |m| a.gpa.free(m);
         a.branch_for.deinit(a.gpa);
         a.queue.deinit(a.gpa);
+        a.claude_session.deinit(a.gpa);
     }
 
     fn startShell(a: *Session, start_dir: []const u8) !void {
@@ -349,6 +352,17 @@ pub const Session = struct {
 
     pub fn changed(ctx: *anyopaque) void {
         const a: *Session = @ptrCast(@alignCast(ctx));
+        // Keep claude's session id, so a new Agent for this pane resumes it.
+        if (a.which == .claude) {
+            if (a.agent) |ag| {
+                if (ag.session) |sid| {
+                    if (!std.mem.eql(u8, a.claude_session.items, sid)) {
+                        a.claude_session.clearRetainingCapacity();
+                        a.claude_session.appendSlice(a.gpa, sid) catch {};
+                    }
+                }
+            }
+        }
         a.pump();
         // A phone watching this tab hears of it, at most once a frame.
         if (a.shared.relay) |h| h.touched(a);
@@ -645,7 +659,9 @@ pub const Session = struct {
             };
         } else if (a.which == .claude) {
             // Claude Code runs its own CLI (agent_claude), not an adapter:
-            // no launcher argv is needed, only the environment.
+            // no launcher argv is needed, only the environment. A session id
+            // kept from a previous Agent of this pane resumes it.
+            if (a.claude_session.items.len > 0) ag.setResume(a.claude_session.items);
             const empty = proc.cStrings(a.arena, &.{}) catch return ag;
             ag.start(empty, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
         } else {
