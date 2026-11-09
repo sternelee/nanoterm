@@ -84,6 +84,8 @@ pub const Permission = struct {
     title: []u8,
     options: []Option,
     chosen: ?usize = null,
+    /// Claude: the tool input, echoed back with an allow.
+    input_json: ?[]u8 = null,
 };
 
 /// A visual the agent showed (`show_visual`), live in its turn.
@@ -304,6 +306,7 @@ pub const Agent = struct {
             .permission => |p| {
                 gpa.free(p.rpc_id);
                 gpa.free(p.title);
+                if (p.input_json) |j| gpa.free(j);
                 for (p.options) |o| {
                     gpa.free(o.id);
                     gpa.free(o.name);
@@ -361,9 +364,10 @@ pub const Agent = struct {
 
     /// Starts Claude Code as its own streaming CLI — the tool a shell runs,
     /// not its ACP adapter — so agent mode is the agent's real capability
-    /// shown as Chat. Tools run without a prompt (edits and the usual dev
-    /// tools are allowed); permission cards come later.
-    fn startClaude(a: *Agent, envp: [*:null]const ?[*:0]const u8, cwd_z: [*:0]const u8) !void {
+    /// shown as Chat. Permission mode is default, with the control channel
+    /// open (`CLAUDE_CODE_ENTRYPOINT`, `--permission-prompt-tool stdio`) so a
+    /// tool claude would use becomes a card we answer, not an auto-deny.
+    fn startClaude(a: *Agent, _: [*:null]const ?[*:0]const u8, cwd_z: [*:0]const u8) !void {
         var arena: std.heap.ArenaAllocator = .init(a.gpa);
         defer arena.deinit();
         const al = arena.allocator();
@@ -373,19 +377,25 @@ pub const Agent = struct {
         };
         var items: std.ArrayList([]const u8) = .empty;
         items.appendSlice(al, &.{
-            bin,                                                "-p",
-            "--input-format",                                   "stream-json",
-            "--output-format",                                  "stream-json",
-            "--verbose",                                        "--permission-mode",
-            "acceptEdits",                                      "--allowedTools",
-            "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite,Task,NotebookEdit",
+            bin,                 "-p",
+            "--input-format",    "stream-json",
+            "--output-format",   "stream-json",
+            "--verbose",         "--permission-mode",
+            "default",           "--permission-prompt-tool",
+            "stdio",
         }) catch return error.OutOfMemory;
         if (a.pending_model) |m| items.appendSlice(al, &.{ "--model", m }) catch return error.OutOfMemory;
         const argv = try proc.cStrings(al, items.items);
+        // The SDK entrypoint tells claude a host reads its control channel, so
+        // it asks us (can_use_tool) instead of denying a tool on its own.
+        var env: std.ArrayList([]const u8) = .empty;
+        env.appendSlice(al, a.env) catch return error.OutOfMemory;
+        env.append(al, "CLAUDE_CODE_ENTRYPOINT=sdk-ts") catch return error.OutOfMemory;
+        const envp2 = try proc.cStrings(al, env.items);
         const c = try a.gpa.create(agent_claude.Client);
         errdefer a.gpa.destroy(c);
         c.* = .init(a.gpa, .{ .ctx = a, .message = onClaudeMessage, .exited = onClaudeExit });
-        c.start(argv, envp, cwd_z) catch |err| {
+        c.start(argv, envp2, cwd_z) catch |err| {
             a.fail("could not start claude: {s}", .{@errorName(err)});
             return err;
         };
@@ -416,6 +426,14 @@ pub const Agent = struct {
                     a.session = a.gpa.dupe(u8, sid) catch null;
                 }
                 a.status = .ready;
+                // Open the control channel, so claude asks us (can_use_tool)
+                // for a tool it would otherwise deny on its own.
+                if (a.claude) |c| {
+                    var aw: std.Io.Writer.Allocating = .init(a.gpa);
+                    defer aw.deinit();
+                    aw.writer.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-init\",\"request\":{\"subtype\":\"initialize\"}}\n") catch {};
+                    c.sendRaw(aw.written());
+                }
                 if (a.queued) |q| {
                     a.queued = null;
                     defer a.gpa.free(q);
@@ -427,6 +445,38 @@ pub const Agent = struct {
         if (std.mem.eql(u8, ty, "assistant")) return a.claudeAssistant(v);
         if (std.mem.eql(u8, ty, "user")) return a.claudeToolResults(v);
         if (std.mem.eql(u8, ty, "result")) return a.claudeResult(v);
+        if (std.mem.eql(u8, ty, "control_request")) return a.claudePermission(v);
+    }
+
+    /// A tool claude asks to use: a permission card in the turn.
+    fn claudePermission(a: *Agent, v: std.json.Value) void {
+        const req = agent_claude.obj(v, "request") orelse return;
+        if (!std.mem.eql(u8, agent_claude.str(req, "subtype") orelse "", "can_use_tool")) return;
+        const rid = agent_claude.str(v, "request_id") orelse return;
+        const name = agent_claude.str(req, "tool_name") orelse "tool";
+        const input = agent_claude.obj(req, "input") orelse .null;
+        const t = a.current() orelse return;
+        // The row says what it would run.
+        var title: std.ArrayList(u8) = .empty;
+        title.appendSlice(a.gpa, "Allow ") catch return;
+        title.appendSlice(a.gpa, name) catch return;
+        if (agent_claude.str(input, "command")) |cmd| {
+            title.appendSlice(a.gpa, ": ") catch return;
+            title.appendSlice(a.gpa, cmd[0..@min(cmd.len, 120)]) catch return;
+        } else if (agent_claude.str(input, "file_path")) |p| {
+            title.appendSlice(a.gpa, ": ") catch return;
+            title.appendSlice(a.gpa, std.fs.path.basename(p)) catch return;
+        }
+        const input_json = std.json.Stringify.valueAlloc(a.gpa, input, .{}) catch null;
+        const opts = a.gpa.alloc(Option, 2) catch return;
+        opts[0] = .{ .id = a.gpa.dupe(u8, "allow") catch return, .name = a.gpa.dupe(u8, "Allow") catch return, .kind = a.gpa.dupe(u8, "allow_once") catch return };
+        opts[1] = .{ .id = a.gpa.dupe(u8, "deny") catch return, .name = a.gpa.dupe(u8, "Deny") catch return, .kind = a.gpa.dupe(u8, "reject_once") catch return };
+        a.addItem(t, .{ .permission = .{
+            .rpc_id = a.gpa.dupe(u8, rid) catch return,
+            .title = title.toOwnedSlice(a.gpa) catch return,
+            .options = opts,
+            .input_json = input_json,
+        } });
     }
 
     /// An assistant message: text, thinking, and the tools it called.
@@ -452,6 +502,8 @@ pub const Agent = struct {
         if (tool(t, id) != null) return;
         const name = agent_claude.str(blk, "name") orelse "tool";
         const input = agent_claude.obj(blk, "input") orelse .null;
+        // Claude's todo list is the turn's plan, not a tool row.
+        if (std.mem.eql(u8, name, "TodoWrite")) return a.claudePlan(t, input);
         var tl: Tool = .{
             .id = a.gpa.dupe(u8, id) catch return,
             .kind = a.gpa.dupe(u8, claudeKind(name)) catch return,
@@ -475,6 +527,34 @@ pub const Agent = struct {
             }
         }
         a.addItem(t, .{ .tool = tl });
+    }
+
+    /// Claude's TodoWrite list becomes the turn's plan (replaced as it changes).
+    fn claudePlan(a: *Agent, t: *Turn, input: std.json.Value) void {
+        const todos = agent_claude.obj(input, "todos") orelse return;
+        if (todos != .array) return;
+        var list: std.ArrayList(PlanEntry) = .empty;
+        for (todos.array.items) |e| {
+            const text = agent_claude.str(e, "content") orelse continue;
+            const status = agent_claude.str(e, "status") orelse "pending";
+            list.append(a.gpa, .{
+                .text = a.gpa.dupe(u8, text) catch continue,
+                .status = a.gpa.dupe(u8, status) catch continue,
+            }) catch {};
+        }
+        for (t.items.items) |*it| switch (it.*) {
+            .plan => |*p| {
+                for (p.items) |e| {
+                    a.gpa.free(e.text);
+                    a.gpa.free(e.status);
+                }
+                p.deinit(a.gpa);
+                p.* = list;
+                return;
+            },
+            else => {},
+        };
+        a.addItem(t, .{ .plan = list });
     }
 
     /// A user message: the tool results the assistant's calls produced.
@@ -1139,8 +1219,13 @@ pub const Agent = struct {
     /// Stops the turn running. A turn left waiting by `send` (native's
     /// one-at-a-time queue) still goes after it, unchanged.
     pub fn cancel(a: *Agent) void {
-        // Claude's interrupt control is not wired yet: leave it running.
-        if (a.claude != null) return;
+        if (a.claude) |c| {
+            var aw: std.Io.Writer.Allocating = .init(a.gpa);
+            defer aw.deinit();
+            aw.writer.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-interrupt\",\"request\":{\"subtype\":\"interrupt\"}}\n") catch return;
+            c.sendRaw(aw.written());
+            return;
+        }
         if (a.which == .pi) return a.pi_client.commandNoReply("abort", .{});
         if (a.native) |native| return native.cancel();
         const s = a.session orelse return;
@@ -1185,8 +1270,33 @@ pub const Agent = struct {
     pub fn answer(a: *Agent, p: *Permission, index: usize) void {
         if (p.chosen != null or index >= p.options.len) return;
         p.chosen = index;
-        a.client.respond(p.rpc_id, .{ .outcome = .{ .outcome = "selected", .optionId = p.options[index].id } });
+        if (a.claude) |c| {
+            a.claudeRespond(c, p, index);
+        } else {
+            a.client.respond(p.rpc_id, .{ .outcome = .{ .outcome = "selected", .optionId = p.options[index].id } });
+        }
         a.app.changed(a.app.ctx);
+    }
+
+    /// Answers claude's `can_use_tool` with a control_response.
+    fn claudeRespond(a: *Agent, c: *agent_claude.Client, p: *Permission, index: usize) void {
+        const allow = std.mem.eql(u8, p.options[index].id, "allow");
+        var aw: std.Io.Writer.Allocating = .init(a.gpa);
+        defer aw.deinit();
+        const w = &aw.writer;
+        w.writeAll("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":") catch return;
+        std.json.Stringify.encodeJsonString(p.rpc_id, .{}, w) catch return;
+        if (allow) {
+            w.writeAll(",\"response\":{\"behavior\":\"allow\"") catch return;
+            if (p.input_json) |j| {
+                w.writeAll(",\"updatedInput\":") catch return;
+                w.writeAll(j) catch return;
+            }
+            w.writeAll("}}}\n") catch return;
+        } else {
+            w.writeAll(",\"response\":{\"behavior\":\"deny\",\"message\":\"Declined in nanoterm\",\"interrupt\":false}}}\n") catch return;
+        }
+        c.sendRaw(aw.written());
     }
 
     fn onExited(ctx: *anyopaque, code: i32) void {
