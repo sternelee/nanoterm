@@ -1925,9 +1925,9 @@ pub const Phone = struct {
             const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);
             defer box.end();
             ui.text(c, "The relay on the machine running nanoterm prints the address and a token.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
-            _ = p.field(c, "Host", "127.0.0.1 or workstation name", &p.host_input, false);
-            _ = p.field(c, "Port", "4789", &p.port_input, false);
-            const token = p.field(c, "Token", "the 32 characters from relay", &p.token_input, false);
+            _ = p.field(c, "Host", "127.0.0.1 or workstation name", &p.host_input, false, true);
+            _ = p.field(c, "Port", "4789", &p.port_input, false, false);
+            const token = p.field(c, "Token", "the 32 characters from relay", &p.token_input, false, true);
             if (ui.button(c, if (p.status == .connecting) "Connecting…" else "Connect", .{
                 .size = 14,
                 .variant = .primary,
@@ -2034,10 +2034,21 @@ pub const Phone = struct {
         ui.end(c);
     }
 
-    /// A label and its field: what the connect screen is made of.
-    fn field(p: *Phone, c: *ui.Context, label: []const u8, hint: []const u8, buffer: *ui.TextBuffer, password: bool) ui.TextFieldResult {
-        _ = p;
-        ui.text(c, label, .{ .size = 13, .weight = .medium, .color = c.theme.muted });
+    /// A label and its field: what the connect screen is made of. Android's
+    /// on-screen keyboard has no paste (nanoui types through a hidden
+    /// TYPE_NULL EditText, which offers no edit menu), so a field that takes
+    /// a pasted value carries its own Paste button.
+    fn field(p: *Phone, c: *ui.Context, label: []const u8, hint: []const u8, buffer: *ui.TextBuffer, password: bool, pasteable: bool) ui.TextFieldResult {
+        {
+            const head = ui.div(c).row().wFull().itemsCenter().gap(8);
+            defer head.end();
+            ui.text(c, label, .{ .size = 13, .weight = .medium, .color = c.theme.muted });
+            ui.spacer(c);
+            if (pasteable) {
+                ui.key(c, c.print("paste-{s}", .{label}));
+                if (ui.button(c, "Paste", .{ .variant = .ghost, .size = 11, .icon = "doc.on.doc" }).clicked) p.pasteReplace(c, buffer);
+            }
+        }
         return ui.textField(c, buffer, .{
             .placeholder = hint,
             .width = .fill,
@@ -2045,6 +2056,36 @@ pub const Phone = struct {
             .password = password,
             .select_all_on_focus = true,
         });
+    }
+
+    /// Reads the clipboard into `buffer`, replacing what it held: the
+    /// connect screen's fields each hold one value. Line breaks become
+    /// spaces, the fields being one line.
+    fn pasteReplace(p: *Phone, c: *ui.Context, buffer: *ui.TextBuffer) void {
+        const text = (nanoui.clipboard.readText(c.gpa) catch return) orelse return;
+        defer c.gpa.free(text);
+        for (text) |*ch| if (ch.* == '\n' or ch.* == '\r') {
+            ch.* = ' ';
+        };
+        buffer.set(text);
+        p.draw();
+    }
+
+    /// Reads the clipboard into `buffer` after what it held: the composer
+    /// keeps what was typed, and the pasted text goes at its end.
+    fn pasteAppend(p: *Phone, c: *ui.Context, buffer: *ui.TextBuffer) void {
+        const text = (nanoui.clipboard.readText(c.gpa) catch return) orelse return;
+        defer c.gpa.free(text);
+        for (text) |*ch| if (ch.* == '\n' or ch.* == '\r') {
+            ch.* = ' ';
+        };
+        if (buffer.text().len == 0) {
+            buffer.set(text);
+        } else {
+            _ = buffer.insert(buffer.text().len, text);
+            buffer.want_caret = buffer.text().len;
+        }
+        p.draw();
     }
 
     /// One thing in the feed, drawn as the desktop draws it.
@@ -2778,6 +2819,8 @@ pub const Phone = struct {
                 }
             }
             ui.spacer(c);
+            ui.key(c, "paste");
+            if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "doc.on.doc" }).clicked) p.pasteAppend(c, &p.input);
             if (p.history.items.len > 0) {
                 ui.key(c, "history-back");
                 if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "chevron.up" }).clicked) p.historyRecall(-1);
