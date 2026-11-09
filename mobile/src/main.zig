@@ -861,12 +861,27 @@ const Notification = struct {
     }
 };
 
+/// A connection being dialed off the UI thread. The worker writes `stream`
+/// or `err` and then turns `state` (0 pending, 1 connected, 2 failed); the
+/// UI thread polls it and installs the result.
+const Dial = struct {
+    state: std.atomic.Value(u8) = .init(0),
+    stream: std.Io.net.Stream = undefined,
+    err: [64]u8 = @splat(0),
+    err_len: usize = 0,
+};
+
 pub const Phone = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     window: ?*nanoui.Window = null,
     stream: ?std.Io.net.Stream = null,
     watch: ?fdwatch.Watch = null,
+    /// A dial running off the UI thread: std's connect has no timeout, so a
+    /// connect to an unreachable relay would freeze the app. The worker
+    /// fills `dial`; the UI thread installs it once `state` turns.
+    dial: ?*Dial = null,
+    dial_thread: ?std.Thread = null,
     in: std.ArrayList(u8) = .empty,
     /// What the relay sent, in order: turns, commands, and notices.
     feed: std.ArrayList(Feed) = .empty,
@@ -1011,6 +1026,17 @@ pub const Phone = struct {
 
     pub fn destroy(p: *Phone) void {
         p.close();
+        // A dial may still be running: let it finish detached rather than
+        // block the exit on a host that may never answer. Its Dial frees
+        // here once it has turned; one still dialing leaks with the exit.
+        if (p.dial_thread) |t| {
+            t.detach();
+            p.dial_thread = null;
+        }
+        if (p.dial) |d| {
+            if (d.state.load(.acquire) != 0) p.gpa.destroy(d);
+            p.dial = null;
+        }
         for (p.feed.items) |*f| f.deinit(p.gpa);
         p.feed.deinit(p.gpa);
         for (p.sessions.items) |*s| s.deinit(p.gpa);
@@ -1045,6 +1071,8 @@ pub const Phone = struct {
 
     /// The relay, and hello to it: the token, then whatever it holds.
     pub fn open(p: *Phone) void {
+        // One dial at a time: a second while one runs would race the socket.
+        if (p.dial_thread != null) return;
         p.close();
         if (!p.has_token) {
             p.fail("no token: --token, or NANOTERM_RELAY_TOKEN");
@@ -1056,12 +1084,62 @@ pub const Phone = struct {
             return;
         };
         addr.setPort(p.port);
-        // A tunnel to a workstation is a TCP connection like any other.
-        p.stream = std.Io.net.IpAddress.connect(&addr, p.io, .{ .mode = .stream }) catch |err| {
+        // A tunnel to a workstation is a TCP connection like any other. It
+        // is dialed on a thread of its own: std's connect has no timeout, so
+        // an unreachable host would otherwise freeze the UI thread — and the
+        // app — until the system gave up.
+        const d = p.gpa.create(Dial) catch {
+            p.fail("out of memory");
+            return;
+        };
+        d.* = .{};
+        p.dial = d;
+        p.status = .connecting;
+        p.dial_thread = std.Thread.spawn(.{}, dialWorker, .{ p.io, addr, d }) catch |err| {
+            p.gpa.destroy(d);
+            p.dial = null;
             p.fail(@errorName(err));
             return;
         };
+        nanoui.App.after(40, p, pollDial);
+    }
+
+    /// The worker: a blocking connect, off the UI thread. It touches only
+    /// `d`, never the Phone, so a late finish can't race the view.
+    fn dialWorker(io: std.Io, addr: std.Io.net.IpAddress, d: *Dial) void {
+        const stream = std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream }) catch |err| {
+            const name = @errorName(err);
+            d.err_len = @min(name.len, d.err.len);
+            @memcpy(d.err[0..d.err_len], name[0..d.err_len]);
+            d.state.store(2, .release);
+            return;
+        };
+        d.stream = stream;
+        d.state.store(1, .release);
+    }
+
+    /// Polls the dial from the UI thread until it turns.
+    fn pollDial(ctx: ?*anyopaque) callconv(.c) void {
+        const p: *Phone = @ptrCast(@alignCast(ctx.?));
+        const d = p.dial orelse return;
+        switch (d.state.load(.acquire)) {
+            0 => nanoui.App.after(40, p, pollDial),
+            1 => p.dialDone(),
+            else => p.dialFail(),
+        }
+    }
+
+    /// The dial connected: take its socket on the UI thread.
+    fn dialDone(p: *Phone) void {
+        const d = p.dial orelse return;
+        p.dial = null;
+        if (p.dial_thread) |t| {
+            t.join();
+            p.dial_thread = null;
+        }
+        p.stream = d.stream;
         const fd = p.stream.?.socket.handle;
+        p.gpa.destroy(d);
         p.watch = fdwatch.readable(fd, p, onReadable) catch |err| {
             p.fail(@errorName(err));
             return;
@@ -1071,6 +1149,37 @@ pub const Phone = struct {
         const hello = std.fmt.bufPrint(&buf, "{{\"op\":\"hello\",\"token\":\"{s}\"}}\n", .{p.token}) catch return;
         p.write(hello);
         p.push("connected to {s}", .{p.where[0..p.where_len]});
+        p.screen = .feed;
+        p.notify(.success, "Connected to {s}", .{p.where[0..p.where_len]});
+        p.draw();
+    }
+
+    /// The dial failed: say why, on the UI thread.
+    fn dialFail(p: *Phone) void {
+        const d = p.dial orelse return;
+        const why = d.err[0..d.err_len];
+        p.fail(why);
+        if (p.screen == .connect) p.connectFail(why);
+        p.dial = null;
+        if (p.dial_thread) |t| {
+            t.join();
+            p.dial_thread = null;
+        }
+        p.gpa.destroy(d);
+    }
+
+    /// Waits for a dial to finish and takes its result. Tests and an exit
+    /// use it; the running app polls instead, so the UI never waits.
+    pub fn dialWait(p: *Phone) void {
+        if (p.dial_thread) |t| {
+            t.join();
+            p.dial_thread = null;
+        }
+        if (p.dial) |d| switch (d.state.load(.acquire)) {
+            1 => p.dialDone(),
+            2 => p.dialFail(),
+            else => {},
+        };
     }
 
     pub fn fail(p: *Phone, why: []const u8) void {
@@ -1788,16 +1897,10 @@ pub const Phone = struct {
         p.saveConnection(host, port, token);
         p.connect_why_len = 0;
         p.status = .connecting;
+        // Stay on the connect screen (a spinner) until the dial turns; a
+        // success moves to the feed, a failure fills connect_why there.
+        p.screen = .connect;
         p.open();
-        if (p.status == .live) {
-            p.screen = .feed;
-            // Note: haptic feedback will be added via the leaf API in the view when drawing
-            p.notify(.success, "Connected to {s}", .{p.where[0..p.where_len]});
-        } else if (p.status == .down) {
-            // Connection failed: show the error on the connect screen.
-            p.screen = .connect;
-            p.connectFail(p.why[0..p.why_len]);
-        }
     }
 
     /// Save a connection to the recent history, keeping last 5.

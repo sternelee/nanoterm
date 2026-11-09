@@ -199,10 +199,11 @@ test "Connect validates, saves, and opens when the fields are right" {
     p.host_input.set("127.0.0.1");
     p.port_input.set("59999");
     p.token_input.set("0123456789abcdef0123456789abcdef");
-    // Use a port that's not listening, so open() fails and status is .down:
-    // the fields were still taken, and the file was written. The connection
-    // failure is now shown to the user via connectFail().
+    // Use a port that's not listening, so the dial fails and status is
+    // .down: the fields were still taken, and the file was written. The
+    // connect is dialed off the UI thread; wait for it, as the test would.
     p.connect();
+    p.dialWait();
     try std.testing.expectEqualStrings("127.0.0.1", p.host[0..p.host_len]);
     try std.testing.expectEqual(@as(u16, 59999), p.port);
     try std.testing.expect(p.has_token);
