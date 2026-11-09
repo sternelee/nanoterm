@@ -3,6 +3,8 @@
 //! plans, permission questions, and command blocks.
 const std = @import("std");
 const acp = @import("acp.zig");
+const agent_claude = @import("agent_claude.zig");
+const proc = @import("proc.zig");
 const pi_mod = @import("pi.zig");
 const blocks = @import("blocks.zig");
 const host = @import("agent_host.zig");
@@ -38,6 +40,19 @@ pub const Which = enum {
 };
 
 pub const Status = enum { off, starting, ready, working, failed };
+
+/// Claude's tool names, as the row's kind (the buckets view_fold draws).
+fn claudeKind(name: []const u8) []const u8 {
+    const eq = std.mem.eql;
+    if (eq(u8, name, "Bash")) return "execute";
+    if (eq(u8, name, "Read")) return "read";
+    if (eq(u8, name, "Edit") or eq(u8, name, "Write") or eq(u8, name, "MultiEdit") or eq(u8, name, "NotebookEdit")) return "edit";
+    if (eq(u8, name, "Grep") or eq(u8, name, "Glob") or eq(u8, name, "WebSearch")) return "search";
+    if (eq(u8, name, "WebFetch")) return "fetch";
+    if (eq(u8, name, "Task")) return "think";
+    return "other";
+}
+
 pub const ToolStatus = enum { pending, in_progress, completed, failed };
 
 pub const Tool = struct {
@@ -160,6 +175,9 @@ pub const Agent = struct {
     app: App,
     which: Which,
     client: acp.Client,
+    /// Claude Code, driven through its own streaming CLI (agent_claude.zig),
+    /// not its ACP adapter; only used when `which == .claude`.
+    claude: ?*agent_claude.Client = null,
     native: ?*native_agent.Runtime = null,
     native_turn: ?*Turn = null,
     /// Pi speaks its own RPC, not ACP; only used when `which == .pi`.
@@ -225,6 +243,11 @@ pub const Agent = struct {
         if (a.on_destroy) |d| d.func(d.ctx, a);
         if (a.remote) |r| r.deinit(a.gpa);
         if (a.native) |native| native.deinit();
+        if (a.claude) |c| {
+            c.deinit();
+            a.gpa.destroy(c);
+            a.claude = null;
+        }
         a.client.deinit();
         a.pi_client.deinit();
         if (a.pi_wanted) |w| a.gpa.free(w);
@@ -303,6 +326,10 @@ pub const Agent = struct {
         a.status = .starting;
         const cwd_z = try a.gpa.dupeSentinel(u8, a.cwd, 0);
         defer a.gpa.free(cwd_z);
+        // Claude Code: its own streaming CLI, not its ACP adapter. The
+        // launcher gives an adapter argv for it (claude-agent-acp); when that
+        // is empty — as ensureAgent passes for claude — run the real CLI.
+        if (a.which == .claude and argv[0] == null) return a.startClaude(envp, cwd_z);
         if (a.which == .pi) {
             // `pi --mode rpc` opens its session itself; there is no handshake
             // to learn its capabilities from. Pi takes images in a prompt and
@@ -330,6 +357,172 @@ pub const Agent = struct {
             .clientCapabilities = .{ .fs = .{ .readTextFile = true, .writeTextFile = true }, .terminal = true },
             .clientInfo = .{ .name = "nanoterm", .version = "0.1.0" },
         }, a, onInitialized);
+    }
+
+    /// Starts Claude Code as its own streaming CLI — the tool a shell runs,
+    /// not its ACP adapter — so agent mode is the agent's real capability
+    /// shown as Chat. Tools run without a prompt (edits and the usual dev
+    /// tools are allowed); permission cards come later.
+    fn startClaude(a: *Agent, envp: [*:null]const ?[*:0]const u8, cwd_z: [*:0]const u8) !void {
+        var arena: std.heap.ArenaAllocator = .init(a.gpa);
+        defer arena.deinit();
+        const al = arena.allocator();
+        const bin = proc.which(al, a.io, a.envPath(), "claude") orelse {
+            a.fail("claude is not installed", .{});
+            return error.NotInstalled;
+        };
+        var items: std.ArrayList([]const u8) = .empty;
+        items.appendSlice(al, &.{
+            bin,                                                "-p",
+            "--input-format",                                   "stream-json",
+            "--output-format",                                  "stream-json",
+            "--verbose",                                        "--permission-mode",
+            "acceptEdits",                                      "--allowedTools",
+            "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,TodoWrite,Task,NotebookEdit",
+        }) catch return error.OutOfMemory;
+        if (a.pending_model) |m| items.appendSlice(al, &.{ "--model", m }) catch return error.OutOfMemory;
+        const argv = try proc.cStrings(al, items.items);
+        const c = try a.gpa.create(agent_claude.Client);
+        errdefer a.gpa.destroy(c);
+        c.* = .init(a.gpa, .{ .ctx = a, .message = onClaudeMessage, .exited = onClaudeExit });
+        c.start(argv, envp, cwd_z) catch |err| {
+            a.fail("could not start claude: {s}", .{@errorName(err)});
+            return err;
+        };
+        a.claude = c;
+    }
+
+    /// The app's PATH, from its environment ("KEY=value" lines).
+    fn envPath(a: *const Agent) []const u8 {
+        for (a.env) |kv| if (std.mem.startsWith(u8, kv, "PATH=")) return kv[5..];
+        return "/usr/bin:/bin:/usr/local/bin";
+    }
+
+    fn onClaudeExit(ctx: *anyopaque, code: i32) void {
+        const a: *Agent = @ptrCast(@alignCast(ctx));
+        if (a.session) |s| a.gpa.free(s);
+        a.session = null;
+        a.fail("claude exited (code {d})", .{code});
+    }
+
+    fn onClaudeMessage(ctx: *anyopaque, v: std.json.Value, _: std.mem.Allocator) void {
+        const a: *Agent = @ptrCast(@alignCast(ctx));
+        defer a.app.changed(a.app.ctx);
+        const ty = agent_claude.typeOf(v);
+        if (std.mem.eql(u8, ty, "system")) {
+            if (std.mem.eql(u8, agent_claude.subtypeOf(v), "init")) {
+                if (agent_claude.str(v, "session_id")) |sid| {
+                    if (a.session) |s| a.gpa.free(s);
+                    a.session = a.gpa.dupe(u8, sid) catch null;
+                }
+                a.status = .ready;
+                if (a.queued) |q| {
+                    a.queued = null;
+                    defer a.gpa.free(q);
+                    a.send(q, &.{});
+                }
+            }
+            return;
+        }
+        if (std.mem.eql(u8, ty, "assistant")) return a.claudeAssistant(v);
+        if (std.mem.eql(u8, ty, "user")) return a.claudeToolResults(v);
+        if (std.mem.eql(u8, ty, "result")) return a.claudeResult(v);
+    }
+
+    /// An assistant message: text, thinking, and the tools it called.
+    fn claudeAssistant(a: *Agent, v: std.json.Value) void {
+        const t = a.current() orelse return;
+        const msg = agent_claude.obj(v, "message") orelse return;
+        const content = agent_claude.obj(msg, "content") orelse return;
+        if (content != .array) return;
+        for (content.array.items) |blk| {
+            const kind = agent_claude.typeOf(blk);
+            if (std.mem.eql(u8, kind, "text")) {
+                if (agent_claude.str(blk, "text")) |s| a.appendChunk(t, false, s);
+            } else if (std.mem.eql(u8, kind, "thinking")) {
+                if (agent_claude.str(blk, "thinking")) |s| a.appendChunk(t, true, s);
+            } else if (std.mem.eql(u8, kind, "tool_use")) {
+                a.claudeToolUse(t, blk);
+            }
+        }
+    }
+
+    fn claudeToolUse(a: *Agent, t: *Turn, blk: std.json.Value) void {
+        const id = agent_claude.str(blk, "id") orelse return;
+        if (tool(t, id) != null) return;
+        const name = agent_claude.str(blk, "name") orelse "tool";
+        const input = agent_claude.obj(blk, "input") orelse .null;
+        var tl: Tool = .{
+            .id = a.gpa.dupe(u8, id) catch return,
+            .kind = a.gpa.dupe(u8, claudeKind(name)) catch return,
+        };
+        tl.status = .in_progress;
+        // A one-line title: the tool, and the command or path it is about.
+        if (std.mem.eql(u8, name, "Bash")) {
+            if (agent_claude.str(input, "command")) |cmd| {
+                tl.command.appendSlice(a.gpa, cmd) catch {};
+                tl.title.appendSlice(a.gpa, "Ran ") catch {};
+                tl.title.appendSlice(a.gpa, cmd) catch {};
+            } else tl.title.appendSlice(a.gpa, name) catch {};
+        } else {
+            tl.title.appendSlice(a.gpa, name) catch {};
+            if (agent_claude.str(input, "file_path")) |p| {
+                tl.title.appendSlice(a.gpa, " ") catch {};
+                tl.title.appendSlice(a.gpa, std.fs.path.basename(p)) catch {};
+            } else if (agent_claude.str(input, "description")) |d| {
+                tl.title.appendSlice(a.gpa, " · ") catch {};
+                tl.title.appendSlice(a.gpa, d) catch {};
+            }
+        }
+        a.addItem(t, .{ .tool = tl });
+    }
+
+    /// A user message: the tool results the assistant's calls produced.
+    fn claudeToolResults(a: *Agent, v: std.json.Value) void {
+        const t = a.current() orelse return;
+        const msg = agent_claude.obj(v, "message") orelse return;
+        const content = agent_claude.obj(msg, "content") orelse return;
+        if (content != .array) return;
+        for (content.array.items) |blk| {
+            if (!std.mem.eql(u8, agent_claude.typeOf(blk), "tool_result")) continue;
+            const id = agent_claude.str(blk, "tool_use_id") orelse continue;
+            const tl = tool(t, id) orelse continue;
+            var failed = false;
+            if (blk == .object) {
+                if (blk.object.get("is_error")) |e| failed = e == .bool and e.bool;
+            }
+            tl.status = if (failed) .failed else .completed;
+            tl.detail.clearRetainingCapacity();
+            claudeSummary(a, tl, agent_claude.obj(blk, "content") orelse .null);
+        }
+    }
+
+    /// The text of a tool result's content (a string, or text blocks).
+    fn claudeSummary(a: *Agent, tl: *Tool, content: std.json.Value) void {
+        switch (content) {
+            .string => |s| tl.detail.appendSlice(a.gpa, s[0..@min(s.len, 2000)]) catch {},
+            .array => |arr| for (arr.items) |c| {
+                if (std.mem.eql(u8, agent_claude.typeOf(c), "text")) {
+                    if (agent_claude.str(c, "text")) |s| {
+                        if (tl.detail.items.len > 0) tl.detail.appendSlice(a.gpa, "\n") catch {};
+                        tl.detail.appendSlice(a.gpa, s[0..@min(s.len, 2000)]) catch {};
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// A finished turn: the `result` line ends it.
+    fn claudeResult(a: *Agent, v: std.json.Value) void {
+        const t = a.current() orelse return;
+        if (!t.done) {
+            t.done = true;
+            t.ended = blocks.now();
+            if (a.app.finished) |f| f(a.app.ctx, t);
+        }
+        _ = v;
+        a.status = .ready;
     }
 
     pub fn startNative(a: *Agent, cwd: []const u8, model: ?[]const u8) !void {
@@ -472,6 +665,11 @@ pub const Agent = struct {
         // A prompt sent while Pi streams is a follow-up: it has to say so.
         const streaming = a.status == .working;
         a.status = .working;
+        if (a.claude) |c| {
+            if (a.current()) |t| t.sent = true;
+            c.sendText(text);
+            return;
+        }
         if (a.native) |native| {
             // agent runs one native turn at a time. Turns already own their text
             // and images, so leave newer ones pending until the answer ends.
@@ -941,6 +1139,8 @@ pub const Agent = struct {
     /// Stops the turn running. A turn left waiting by `send` (native's
     /// one-at-a-time queue) still goes after it, unchanged.
     pub fn cancel(a: *Agent) void {
+        // Claude's interrupt control is not wired yet: leave it running.
+        if (a.claude != null) return;
         if (a.which == .pi) return a.pi_client.commandNoReply("abort", .{});
         if (a.native) |native| return native.cancel();
         const s = a.session orelse return;

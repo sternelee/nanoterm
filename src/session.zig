@@ -643,6 +643,11 @@ pub const Session = struct {
                 ag.error_text = std.fmt.allocPrint(a.gpa, "could not start built-in Agent: {s}", .{@errorName(err)}) catch null;
                 return ag;
             };
+        } else if (a.which == .claude) {
+            // Claude Code runs its own CLI (agent_claude), not an adapter:
+            // no launcher argv is needed, only the environment.
+            const empty = proc.cStrings(a.arena, &.{}) catch return ag;
+            ag.start(empty, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
         } else {
             const argv = @import("agent_launch.zig").argv(a.arena, a.io, a.shared.env, a.which, a.model_choice) catch {
                 ag.status = .failed;
