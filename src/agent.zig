@@ -53,6 +53,26 @@ fn claudeKind(name: []const u8) []const u8 {
     return "other";
 }
 
+/// One stream-json user line: the text and any pictures as base64 images.
+fn writeClaudeUser(w: *std.Io.Writer, text: []const u8, images: []const Image) !void {
+    try w.writeAll("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":");
+    try std.json.Stringify.encodeJsonString(text, .{}, w);
+    try w.writeAll("}");
+    for (images) |im| {
+        if (im.data.len == 0) continue;
+        const enc = std.base64.standard.Encoder;
+        const buf = try std.heap.c_allocator.alloc(u8, enc.calcSize(im.data.len));
+        defer std.heap.c_allocator.free(buf);
+        const b64 = enc.encode(buf, im.data);
+        try w.writeAll(",{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":");
+        try std.json.Stringify.encodeJsonString(im.mime, .{}, w);
+        try w.writeAll(",\"data\":");
+        try std.json.Stringify.encodeJsonString(b64, .{}, w);
+        try w.writeAll("}}");
+    }
+    try w.writeAll("]}}\n");
+}
+
 pub const ToolStatus = enum { pending, in_progress, completed, failed };
 
 pub const Tool = struct {
@@ -634,23 +654,7 @@ pub const Agent = struct {
     fn claudeSend(a: *Agent, c: *agent_claude.Client, text: []const u8, images: []const Image) void {
         var aw: std.Io.Writer.Allocating = .init(a.gpa);
         defer aw.deinit();
-        const w = &aw.writer;
-        w.writeAll("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":") catch return;
-        std.json.Stringify.encodeJsonString(text, .{}, w) catch return;
-        w.writeAll("}") catch return;
-        for (images) |im| {
-            if (im.data.len == 0) continue;
-            const enc = std.base64.standard.Encoder;
-            const buf = a.gpa.alloc(u8, enc.calcSize(im.data.len)) catch continue;
-            defer a.gpa.free(buf);
-            const b64 = enc.encode(buf, im.data);
-            w.writeAll(",{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":") catch return;
-            std.json.Stringify.encodeJsonString(im.mime, .{}, w) catch return;
-            w.writeAll(",\"data\":") catch return;
-            std.json.Stringify.encodeJsonString(b64, .{}, w) catch return;
-            w.writeAll("}}") catch return;
-        }
-        w.writeAll("]}}\n") catch return;
+        writeClaudeUser(&aw.writer, text, images) catch return;
         c.sendRaw(aw.written());
     }
 
@@ -2041,4 +2045,42 @@ test "a fragment with no newline waits, and the turn's end takes it" {
     try std.testing.expectEqual(@as(usize, 1), final.items.len);
     try std.testing.expectEqualStrings("a diagnostic that never ended", final.items[0]);
     try std.testing.expectEqual(@as(usize, 0), pending.items.len);
+}
+
+test "claude's user line: text and a base64 image" {
+    const gpa = std.testing.allocator;
+    const png = [_]u8{ 137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3 };
+    var imgs = [_]Image{.{
+        .name = try gpa.dupe(u8, "a.png"),
+        .mime = "image/png",
+        .data = try gpa.dupe(u8, &png),
+        .path = try gpa.dupe(u8, ""),
+    }};
+    defer {
+        gpa.free(imgs[0].name);
+        gpa.free(imgs[0].data);
+        gpa.free(imgs[0].path);
+    }
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try writeClaudeUser(&aw.writer, "hi \"x\"", &imgs);
+    const v = try std.json.parseFromSlice(std.json.Value, gpa, aw.written(), .{});
+    defer v.deinit();
+    try std.testing.expectEqualStrings("user", acp.str(v.value, "type").?);
+    const msg = acp.obj(v.value, "message").?;
+    try std.testing.expectEqualStrings("user", acp.str(msg, "role").?);
+    const content = acp.obj(msg, "content").?;
+    try std.testing.expectEqual(@as(usize, 2), content.array.items.len);
+    try std.testing.expectEqualStrings("hi \"x\"", acp.str(content.array.items[0], "text").?);
+    const img = content.array.items[1];
+    try std.testing.expectEqualStrings("image", acp.str(img, "type").?);
+    const src = acp.obj(img, "source").?;
+    try std.testing.expectEqualStrings("base64", acp.str(src, "type").?);
+    try std.testing.expectEqualStrings("image/png", acp.str(src, "media_type").?);
+    const b64 = acp.str(src, "data").?;
+    const dec = std.base64.standard.Decoder;
+    const out = try gpa.alloc(u8, try dec.calcSizeForSlice(b64));
+    defer gpa.free(out);
+    try dec.decode(out, b64);
+    try std.testing.expectEqualSlices(u8, &png, out);
 }

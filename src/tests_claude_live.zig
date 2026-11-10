@@ -20,6 +20,22 @@ fn turnDone(a: *agent_mod.Agent) bool {
     const t = a.current() orelse return false;
     return t.done;
 }
+fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or hay.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        var ok = true;
+        for (needle, 0..) |ch, j| {
+            if (std.ascii.toLower(hay[i + j]) != std.ascii.toLower(ch)) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
 fn pendingPermission(a: *agent_mod.Agent) ?*agent_mod.Permission {
     const t = a.current() orelse return null;
     for (t.items.items) |*it| switch (it.*) {
@@ -48,12 +64,14 @@ fn envVal(comptime key: [:0]const u8, buf: *[1024]u8, out: *[]const u8) bool {
     return true;
 }
 
-/// A 1x1 red PNG.
+/// A 32x32 solid red PNG.
 const red_dot_png = [_]u8{
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-    1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 218, 99,
-    248, 207, 192, 0, 0, 3, 1, 1, 0, 247, 3, 65, 67, 0, 0, 0, 0, 73, 69, 78, 68,
-    174, 66, 96, 130,
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+    0, 0, 0, 32, 0, 0, 0, 32, 8, 2, 0, 0, 0, 252, 24, 237,
+    163, 0, 0, 0, 39, 73, 68, 65, 84, 120, 218, 237, 205, 177, 9, 0,
+    0, 8, 192, 176, 254, 255, 180, 94, 225, 32, 4, 178, 167, 169, 83, 9,
+    4, 2, 129, 64, 32, 16, 8, 4, 130, 47, 193, 2, 50, 195, 252, 46,
+    112, 253, 35, 61, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 };
 
 /// A tiny stdio MCP server: initialize, tools/list (one `ping`), tools/call
@@ -182,17 +200,19 @@ test "live: a claude turn through the Agent runs and answers" {
             .data = try gpa.dupe(u8, &red_dot_png),
             .path = try gpa.dupe(u8, ""),
         };
-        try ag.promptWith(null, "What is the color of this 1x1 image? Reply with one word.", imgs);
+        try ag.promptWith(null, "What is the color of this image? Reply with one word.", imgs);
         try pumpUntil(turnDone, ag);
-        var got = false;
-        for (ag.current().?.items.items) |it| switch (it) {
-            .text => |tx| {
-                if (tx.items.len > 0) got = true;
+        var said: []const u8 = "";
+        for (ag.current().?.items.items) |*it| switch (it.*) {
+            .text => |tx| if (tx.items.len > 0) {
+                said = tx.items;
             },
             else => {},
         };
-        try std.testing.expect(got);
-        std.debug.print("[live] image turn answered\n", .{});
+        try std.testing.expect(said.len > 0);
+        std.debug.print("[live] image answer: {s}\n", .{said});
+        // The image is red: naming it means the image reached the model.
+        try std.testing.expect(containsIgnoreCase(said, "red"));
     }
 
     // Resume: a second Agent continues the same claude session.
@@ -207,10 +227,19 @@ test "live: a claude turn through the Agent runs and answers" {
         ag2.mcp = .{ .name = "livemcp", .command = "/bin/true", .args = &.{} };
         ag2.setResume(sid_copy);
         try ag2.start(try proc.cStrings(al, &.{}), try proc.cStrings(al, list[0..n]));
-        try ag2.prompt("Reply with exactly the single word: resumed");
+        try ag2.prompt("What was the last single word you replied with? Reply with that word only.");
         try pumpUntil(turnDone, ag2);
-        std.debug.print("[live] resume session={s} (was {s})\n", .{ ag2.session orelse "?", sid });
+        var said2: []const u8 = "";
+        for (ag2.current().?.items.items) |*it| switch (it.*) {
+            .text => |tx| if (tx.items.len > 0) {
+                said2 = tx.items;
+            },
+            else => {},
+        };
+        std.debug.print("[live] resume session={s} (was {s}), answer: {s}\n", .{ ag2.session orelse "?", sid, said2 });
         try std.testing.expect(ag2.session != null);
+        // Resumed context: it recalls the last word from before the new Agent ("Red").
+        try std.testing.expect(containsIgnoreCase(said2, "red"));
     }
 
     // A real MCP server: its ping tool must actually be called (it writes a
