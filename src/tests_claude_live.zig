@@ -20,6 +20,14 @@ fn turnDone(a: *agent_mod.Agent) bool {
     const t = a.current() orelse return false;
     return t.done;
 }
+fn pendingPermission(a: *agent_mod.Agent) ?*agent_mod.Permission {
+    const t = a.current() orelse return null;
+    for (t.items.items) |*it| switch (it.*) {
+        .permission => |*p| if (p.chosen == null) return p,
+        else => {},
+    };
+    return null;
+}
 
 fn noopChanged(_: *anyopaque) void {}
 fn noBlock(_: *anyopaque, _: []const u8, _: []const u8) ?*blocks.Block {
@@ -111,4 +119,39 @@ test "live: a claude turn through the Agent runs and answers" {
     };
     try std.testing.expect(saw_text);
     std.debug.print("[live] OK: turn done with assistant text\n", .{});
+
+    // init populated the palette and the model menu.
+    try std.testing.expect(ag.config.commands.items.len > 0);
+    try std.testing.expect(ag.config.find("model") != null);
+    std.debug.print("[live] commands={d}, model menu={}\n", .{ ag.config.commands.items.len, ag.config.find("model") != null });
+
+    // Turn 2: a shell tool — the can_use_tool card must appear, and Allow it must run.
+    try ag.prompt("Use the shell to run exactly: echo hello-from-claude");
+    var waited: f64 = 0;
+    var allowed = false;
+    while (!turnDone(ag)) : (waited += 0.02) {
+        if (waited > 150) return error.TimeoutTools;
+        nanoui.runFor(0.02);
+        if (!allowed) {
+            if (pendingPermission(ag)) |p| {
+                std.debug.print("[live] permission card: {s}\n", .{p.title});
+                ag.answer(p, 0); // Allow
+                allowed = true;
+            }
+        }
+    }
+    const t2 = ag.current().?;
+    try std.testing.expect(t2.done);
+    var ran = false;
+    for (t2.items.items) |it| switch (it) {
+        .tool => |tl| {
+            if (tl.status != .pending and tl.status != .in_progress) ran = true;
+            std.debug.print("[live] tool {s} {s}: {s}\n", .{ tl.kind, tl.title.items, tl.detail.items });
+        },
+        else => {},
+    };
+    // The user's own settings may auto-allow a command, so a card is not
+    // guaranteed; either way the tool must have run to a terminal status.
+    try std.testing.expect(ran);
+    std.debug.print("[live] OK: tool ran (card={})\n", .{allowed});
 }
