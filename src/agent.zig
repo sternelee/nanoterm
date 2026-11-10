@@ -614,6 +614,30 @@ pub const Agent = struct {
         a.addItem(t, .{ .plan = list });
     }
 
+    /// A user turn as stream-json: the text, then any pictures as base64.
+    fn claudeSend(a: *Agent, c: *agent_claude.Client, text: []const u8, images: []const Image) void {
+        var aw: std.Io.Writer.Allocating = .init(a.gpa);
+        defer aw.deinit();
+        const w = &aw.writer;
+        w.writeAll("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":") catch return;
+        std.json.Stringify.encodeJsonString(text, .{}, w) catch return;
+        w.writeAll("}") catch return;
+        for (images) |im| {
+            if (im.data.len == 0) continue;
+            const enc = std.base64.standard.Encoder;
+            const buf = a.gpa.alloc(u8, enc.calcSize(im.data.len)) catch continue;
+            defer a.gpa.free(buf);
+            const b64 = enc.encode(buf, im.data);
+            w.writeAll(",{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":") catch return;
+            std.json.Stringify.encodeJsonString(im.mime, .{}, w) catch return;
+            w.writeAll(",\"data\":") catch return;
+            std.json.Stringify.encodeJsonString(b64, .{}, w) catch return;
+            w.writeAll("}}") catch return;
+        }
+        w.writeAll("]}}\n") catch return;
+        c.sendRaw(aw.written());
+    }
+
     /// A user message: the tool results the assistant's calls produced.
     fn claudeToolResults(a: *Agent, v: std.json.Value) void {
         const t = a.current() orelse return;
@@ -804,7 +828,7 @@ pub const Agent = struct {
         a.status = .working;
         if (a.claude) |c| {
             if (a.current()) |t| t.sent = true;
-            c.sendText(text);
+            a.claudeSend(c, text, images);
             return;
         }
         if (a.native) |native| {
