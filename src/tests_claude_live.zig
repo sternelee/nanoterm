@@ -189,7 +189,10 @@ test "live: a claude turn through the Agent runs and answers" {
     try std.testing.expectEqualStrings("haiku", ag.config.find("model").?.currentName());
     try ag.prompt("Reply with exactly the single word: ok2");
     try pumpUntil(turnDone, ag);
-    std.debug.print("[live] after set_model, turn done\n", .{});
+    std.debug.print("[live] model used after set_model(haiku): {s}\n", .{ag.claude_model_used orelse "?"});
+    // The set_model request is sent; this gateway reported the same canonical
+    // model after it, so the switch's effect is NOT asserted here.
+    try std.testing.expect(ag.claude_model_used != null);
 
     // A picture as a base64 image block reaches claude.
     {

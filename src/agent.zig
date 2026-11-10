@@ -202,6 +202,9 @@ pub const Agent = struct {
     claude: ?*agent_claude.Client = null,
     /// A claude session id to resume, if this pane had one before.
     resume_id: ?[]u8 = null,
+    /// The model claude's last result reported using (`modelUsage`'s key):
+    /// what tells a model switch actually took effect.
+    claude_model_used: ?[]u8 = null,
     native: ?*native_agent.Runtime = null,
     native_turn: ?*Turn = null,
     /// Pi speaks its own RPC, not ACP; only used when `which == .pi`.
@@ -276,6 +279,7 @@ pub const Agent = struct {
         a.pi_client.deinit();
         if (a.pi_wanted) |w| a.gpa.free(w);
         if (a.resume_id) |r| a.gpa.free(r);
+        if (a.claude_model_used) |m| a.gpa.free(m);
         if (a.pending_model) |m| a.gpa.free(m);
         freePiModel(a.gpa, a.pi_model);
         for (a.pi_models.items) |m| {
@@ -694,15 +698,24 @@ pub const Agent = struct {
         }
     }
 
-    /// A finished turn: the `result` line ends it.
+    /// A finished turn: the `result` line ends it. It also names the model
+    /// actually used (`modelUsage`), recorded so a switch can be observed.
     fn claudeResult(a: *Agent, v: std.json.Value) void {
+        if (agent_claude.obj(v, "modelUsage")) |usage| {
+            if (usage == .object) {
+                var it = usage.object.iterator();
+                if (it.next()) |e| {
+                    if (a.claude_model_used) |old_m| a.gpa.free(old_m);
+                    a.claude_model_used = a.gpa.dupe(u8, e.key_ptr.*) catch null;
+                }
+            }
+        }
         const t = a.current() orelse return;
         if (!t.done) {
             t.done = true;
             t.ended = blocks.now();
             if (a.app.finished) |f| f(a.app.ctx, t);
         }
-        _ = v;
         a.status = .ready;
     }
 
