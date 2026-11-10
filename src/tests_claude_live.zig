@@ -48,6 +48,14 @@ fn envVal(comptime key: [:0]const u8, buf: *[1024]u8, out: *[]const u8) bool {
     return true;
 }
 
+/// A 1x1 red PNG.
+const red_dot_png = [_]u8{
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+    1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 218, 99,
+    248, 207, 192, 0, 0, 3, 1, 1, 0, 247, 3, 65, 67, 0, 0, 0, 0, 73, 69, 78, 68,
+    174, 66, 96, 130,
+};
+
 test "live: a claude turn through the Agent runs and answers" {
     if (std.c.getenv("NANOTERM_LIVE_CLAUDE") == null) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -154,4 +162,58 @@ test "live: a claude turn through the Agent runs and answers" {
     // guaranteed; either way the tool must have run to a terminal status.
     try std.testing.expect(ran);
     std.debug.print("[live] OK: tool ran (card={})\n", .{allowed});
+
+    // The model menu, then a running set_model.
+    {
+        const mo = ag.config.find("model").?;
+        try std.testing.expect(mo.choices.len >= 2);
+        std.debug.print("[live] model choices:", .{});
+        for (mo.choices) |ch| std.debug.print(" {s}", .{ch.value});
+        std.debug.print("\n", .{});
+    }
+    ag.setOption("model", "haiku");
+    try std.testing.expectEqualStrings("haiku", ag.config.find("model").?.currentName());
+    try ag.prompt("Reply with exactly the single word: ok2");
+    try pumpUntil(turnDone, ag);
+    std.debug.print("[live] after set_model, turn done\n", .{});
+
+    // A picture as a base64 image block reaches claude.
+    {
+        const imgs = try gpa.alloc(agent_mod.Image, 1);
+        imgs[0] = .{
+            .name = try gpa.dupe(u8, "dot.png"),
+            .mime = "image/png",
+            .data = try gpa.dupe(u8, &red_dot_png),
+            .path = try gpa.dupe(u8, ""),
+        };
+        try ag.promptWith(null, "What is the color of this 1x1 image? Reply with one word.", imgs);
+        try pumpUntil(turnDone, ag);
+        var got = false;
+        for (ag.current().?.items.items) |it| switch (it) {
+            .text => |tx| {
+                if (tx.items.len > 0) got = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(got);
+        std.debug.print("[live] image turn answered\n", .{});
+    }
+
+    // Resume: a second Agent continues the same claude session.
+    {
+        const sid = ag.session orelse return error.NoSession;
+        const sid_copy = try gpa.dupe(u8, sid);
+        defer gpa.free(sid_copy);
+        const ag2 = try agent_mod.Agent.create(gpa, io, app, .claude, home);
+        defer ag2.destroy();
+        ag2.env = list[0..n];
+        // Validates that --mcp-config (the visual server shape) is accepted.
+        ag2.mcp = .{ .name = "livemcp", .command = "/bin/true", .args = &.{} };
+        ag2.setResume(sid_copy);
+        try ag2.start(try proc.cStrings(al, &.{}), try proc.cStrings(al, list[0..n]));
+        try ag2.prompt("Reply with exactly the single word: resumed");
+        try pumpUntil(turnDone, ag2);
+        std.debug.print("[live] resume session={s} (was {s})\n", .{ ag2.session orelse "?", sid });
+        try std.testing.expect(ag2.session != null);
+    }
 }
