@@ -56,6 +56,32 @@ const red_dot_png = [_]u8{
     174, 66, 96, 130,
 };
 
+/// A tiny stdio MCP server: initialize, tools/list (one `ping`), tools/call
+/// (writes the marker it was given, answers "pong-mcp").
+const mcp_server =
+    \\#!/usr/bin/env python3
+    \\import json, sys
+    \\marker = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mcp-called"
+    \\def send(o):
+    \\    sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
+    \\for line in sys.stdin:
+    \\    line = line.strip()
+    \\    if not line: continue
+    \\    try: m = json.loads(line)
+    \\    except Exception: continue
+    \\    mid, method = m.get("id"), m.get("method")
+    \\    if method == "initialize":
+    \\        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"livemcp","version":"1"}}})
+    \\    elif method == "tools/list":
+    \\        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[{"name":"ping","description":"Return pong-mcp","inputSchema":{"type":"object","properties":{}}}]}})
+    \\    elif method == "tools/call":
+    \\        open(marker, "w").write("called")
+    \\        send({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":"pong-mcp"}],"isError":False}})
+    \\    elif mid is not None:
+    \\        send({"jsonrpc":"2.0","id":mid,"result":{}})
+    \\
+;
+
 test "live: a claude turn through the Agent runs and answers" {
     if (std.c.getenv("NANOTERM_LIVE_CLAUDE") == null) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -133,36 +159,6 @@ test "live: a claude turn through the Agent runs and answers" {
     try std.testing.expect(ag.config.find("model") != null);
     std.debug.print("[live] commands={d}, model menu={}\n", .{ ag.config.commands.items.len, ag.config.find("model") != null });
 
-    // Turn 2: a shell tool — the can_use_tool card must appear, and Allow it must run.
-    try ag.prompt("Use the shell to run exactly: echo hello-from-claude");
-    var waited: f64 = 0;
-    var allowed = false;
-    while (!turnDone(ag)) : (waited += 0.02) {
-        if (waited > 150) return error.TimeoutTools;
-        nanoui.runFor(0.02);
-        if (!allowed) {
-            if (pendingPermission(ag)) |p| {
-                std.debug.print("[live] permission card: {s}\n", .{p.title});
-                ag.answer(p, 0); // Allow
-                allowed = true;
-            }
-        }
-    }
-    const t2 = ag.current().?;
-    try std.testing.expect(t2.done);
-    var ran = false;
-    for (t2.items.items) |it| switch (it) {
-        .tool => |tl| {
-            if (tl.status != .pending and tl.status != .in_progress) ran = true;
-            std.debug.print("[live] tool {s} {s}: {s}\n", .{ tl.kind, tl.title.items, tl.detail.items });
-        },
-        else => {},
-    };
-    // The user's own settings may auto-allow a command, so a card is not
-    // guaranteed; either way the tool must have run to a terminal status.
-    try std.testing.expect(ran);
-    std.debug.print("[live] OK: tool ran (card={})\n", .{allowed});
-
     // The model menu, then a running set_model.
     {
         const mo = ag.config.find("model").?;
@@ -215,5 +211,34 @@ test "live: a claude turn through the Agent runs and answers" {
         try pumpUntil(turnDone, ag2);
         std.debug.print("[live] resume session={s} (was {s})\n", .{ ag2.session orelse "?", sid });
         try std.testing.expect(ag2.session != null);
+    }
+
+    // A real MCP server: its ping tool must actually be called (it writes a
+    // marker), and claude's request for it must reach us as a card we allow.
+    {
+        const script = try std.fmt.allocPrint(gpa, "{s}/mcp.py", .{home});
+        const marker = try std.fmt.allocPrint(gpa, "{s}/mcp-called", .{home});
+        const ag3 = try agent_mod.Agent.create(gpa, io, app, .claude, home);
+        ag3.env = list[0..n];
+        ag3.mcp = .{ .name = "livemcp", .command = script, .args = &.{marker} };
+        defer ag3.destroy();
+        defer gpa.free(script);
+        defer gpa.free(marker);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = script, .data = mcp_server, .flags = .{ .permissions = .executable_file } });
+        try ag3.start(try proc.cStrings(al, &.{}), try proc.cStrings(al, list[0..n]));
+        try ag3.prompt("Use the livemcp MCP server's ping tool, then tell me exactly what it returned.");
+        var waited3: f64 = 0;
+        var answered = false;
+        while (!turnDone(ag3)) : (waited3 += 0.02) {
+            if (waited3 > 150) return error.TimeoutMcp;
+            nanoui.runFor(0.02);
+            if (pendingPermission(ag3)) |pm| {
+                std.debug.print("[live] mcp permission: {s}\n", .{pm.title});
+                ag3.answer(pm, 0);
+                answered = true;
+            }
+        }
+        std.Io.Dir.cwd().access(io, marker, .{}) catch return error.McpNotCalled;
+        std.debug.print("[live] OK: MCP tool called (card={})\n", .{answered});
     }
 }
