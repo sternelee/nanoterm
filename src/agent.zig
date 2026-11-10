@@ -395,6 +395,22 @@ pub const Agent = struct {
         }) catch return error.OutOfMemory;
         if (a.pending_model) |m| items.appendSlice(al, &.{ "--model", m }) catch return error.OutOfMemory;
         if (a.resume_id) |r| items.appendSlice(al, &.{ "--resume", r }) catch return error.OutOfMemory;
+        // nanoterm's own MCP server (show_visual), so claude can draw visuals.
+        if (a.mcp) |m| {
+            var aw: std.Io.Writer.Allocating = .init(al);
+            const w = &aw.writer;
+            w.writeAll("{\"mcpServers\":{") catch return error.OutOfMemory;
+            std.json.Stringify.encodeJsonString(m.name, .{}, w) catch return error.OutOfMemory;
+            w.writeAll(":{\"command\":") catch return error.OutOfMemory;
+            std.json.Stringify.encodeJsonString(m.command, .{}, w) catch return error.OutOfMemory;
+            w.writeAll(",\"args\":[") catch return error.OutOfMemory;
+            for (m.args, 0..) |arg, i| {
+                if (i > 0) w.writeAll(",") catch return error.OutOfMemory;
+                std.json.Stringify.encodeJsonString(arg, .{}, w) catch return error.OutOfMemory;
+            }
+            w.writeAll("]}}}") catch return error.OutOfMemory;
+            items.appendSlice(al, &.{ "--mcp-config", aw.written() }) catch return error.OutOfMemory;
+        }
         const argv = try proc.cStrings(al, items.items);
         // The SDK entrypoint tells claude a host reads its control channel, so
         // it asks us (can_use_tool) instead of denying a tool on its own.
