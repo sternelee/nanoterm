@@ -201,6 +201,8 @@ pub const Session = struct {
     agent: ?*agent_mod.Agent = null,
     /// Claude's session id, kept so a new Agent for this pane resumes it.
     claude_session: std.ArrayList(u8) = .empty,
+    /// Codex keeps its thread id instead; a new Agent resumes it.
+    codex_session: std.ArrayList(u8) = .empty,
     which: agent_mod.Which = .agent,
     /// Every block made, owned here; the timeline and turns point to them.
     all_blocks: std.ArrayList(*blocks.Block) = .empty,
@@ -326,6 +328,7 @@ pub const Session = struct {
         a.branch_for.deinit(a.gpa);
         a.queue.deinit(a.gpa);
         a.claude_session.deinit(a.gpa);
+        a.codex_session.deinit(a.gpa);
     }
 
     fn startShell(a: *Session, start_dir: []const u8) !void {
@@ -359,6 +362,16 @@ pub const Session = struct {
                     if (!std.mem.eql(u8, a.claude_session.items, sid)) {
                         a.claude_session.clearRetainingCapacity();
                         a.claude_session.appendSlice(a.gpa, sid) catch {};
+                    }
+                }
+            }
+        }
+        if (a.which == .codex) {
+            if (a.agent) |ag| {
+                if (ag.codex_thread) |tid| {
+                    if (!std.mem.eql(u8, a.codex_session.items, tid)) {
+                        a.codex_session.clearRetainingCapacity();
+                        a.codex_session.appendSlice(a.gpa, tid) catch {};
                     }
                 }
             }
@@ -657,6 +670,12 @@ pub const Session = struct {
                 ag.error_text = std.fmt.allocPrint(a.gpa, "could not start built-in Agent: {s}", .{@errorName(err)}) catch null;
                 return ag;
             };
+        } else if (a.which == .codex) {
+            // Codex runs its own `codex exec`, not an adapter: no argv needed.
+            // A thread kept from this pane's last Agent is resumed.
+            if (a.codex_session.items.len > 0) ag.setCodexThread(a.codex_session.items);
+            const empty = proc.cStrings(a.arena, &.{}) catch return ag;
+            ag.start(empty, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
         } else if (a.which == .claude) {
             // Claude Code runs its own CLI (agent_claude), not an adapter:
             // no launcher argv is needed, only the environment. A session id

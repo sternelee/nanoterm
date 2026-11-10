@@ -209,6 +209,11 @@ pub const Agent = struct {
     /// claude's slash commands that need its interactive terminal (init's
     /// `terminal_slash_commands`), which Chat cannot run.
     claude_terminal: std.ArrayList([]u8) = .empty,
+    /// Codex runs one `codex exec` per turn; these are the turns' processes
+    /// (each frees itself on the next send, outside its own callback) and the
+    /// thread id a next turn resumes.
+    codex_runs: std.ArrayList(*CodexRun) = .empty,
+    codex_thread: ?[]u8 = null,
     native: ?*native_agent.Runtime = null,
     native_turn: ?*Turn = null,
     /// Pi speaks its own RPC, not ACP; only used when `which == .pi`.
@@ -286,6 +291,13 @@ pub const Agent = struct {
         if (a.claude_model_used) |m| a.gpa.free(m);
         for (a.claude_terminal.items) |n| a.gpa.free(n);
         a.claude_terminal.deinit(a.gpa);
+        for (a.codex_runs.items) |r| {
+            r.c.deinit();
+            a.gpa.destroy(r.c);
+            a.gpa.destroy(r);
+        }
+        a.codex_runs.deinit(a.gpa);
+        if (a.codex_thread) |t| a.gpa.free(t);
         if (a.pending_model) |m| a.gpa.free(m);
         freePiModel(a.gpa, a.pi_model);
         for (a.pi_models.items) |m| {
@@ -366,6 +378,7 @@ pub const Agent = struct {
         // launcher gives an adapter argv for it (claude-agent-acp); when that
         // is empty — as ensureAgent passes for claude — run the real CLI.
         if (a.which == .claude and argv[0] == null) return a.startClaude(envp, cwd_z);
+        if (a.which == .codex) return a.startCodex();
         if (a.which == .pi) {
             // `pi --mode rpc` opens its session itself; there is no handshake
             // to learn its capabilities from. Pi takes images in a prompt and
@@ -533,6 +546,190 @@ pub const Agent = struct {
     fn terminalCommand(a: *Agent, name: []const u8) bool {
         for (a.claude_terminal.items) |n| if (std.mem.eql(u8, n, name)) return true;
         return false;
+    }
+
+    /// One `codex exec` turn: its process, and which turn it belongs to.
+    const CodexRun = struct {
+        a: *Agent,
+        c: *agent_claude.Client,
+        turn: ?*Turn,
+        dead: bool = false,
+    };
+
+    pub fn setCodexThread(a: *Agent, id: []const u8) void {
+        if (a.codex_thread) |t| a.gpa.free(t);
+        a.codex_thread = a.gpa.dupe(u8, id) catch null;
+    }
+
+    fn startCodex(a: *Agent) !void {
+        var arena: std.heap.ArenaAllocator = .init(a.gpa);
+        defer arena.deinit();
+        if (proc.which(arena.allocator(), a.io, a.envPath(), "codex") == null) {
+            a.fail("codex is not installed", .{});
+            return error.NotInstalled;
+        }
+        a.status = .ready;
+    }
+
+    /// Runs one `codex exec` (or `exec resume`) with this turn's prompt; codex
+    /// is single-shot, so each turn is a process that resumes the thread.
+    fn codexSend(a: *Agent, text: []const u8) void {
+        // Resume takes a thread's lock, so the last turn's process must be gone
+        // first; it exits as soon as its turn completes (tens of ms).
+        var waited: u64 = 0;
+        while (a.codexAlive() != null and waited < 3000) : (waited += 10) std.Io.sleep(a.io, .fromMilliseconds(10), .awake) catch break;
+        // Freed at destroy only: a client's exit callback can still be returning.
+        var arena: std.heap.ArenaAllocator = .init(a.gpa);
+        defer arena.deinit();
+        const al = arena.allocator();
+        const bin = proc.which(al, a.io, a.envPath(), "codex") orelse {
+            a.fail("codex is not installed", .{});
+            return;
+        };
+        var items: std.ArrayList([]const u8) = .empty;
+        items.appendSlice(al, &.{ bin, "exec" }) catch return;
+        if (a.codex_thread) |th| items.appendSlice(al, &.{ "resume", th }) catch return;
+        items.appendSlice(al, &.{ "--json", "--skip-git-repo-check" }) catch return;
+        if (a.codex_thread == null) {
+            items.appendSlice(al, &.{ "-C", a.cwd }) catch return;
+            items.appendSlice(al, &.{ "-s", "workspace-write" }) catch return;
+        }
+        if (a.pending_model) |m| items.appendSlice(al, &.{ "-m", m }) catch return;
+        items.append(al, text) catch return;
+        const argv = proc.cStrings(al, items.items) catch return;
+        const envp = proc.cStrings(al, a.env) catch return;
+        const cwd_z = a.gpa.dupeSentinel(u8, a.cwd, 0) catch return;
+        defer a.gpa.free(cwd_z);
+        const c = a.gpa.create(agent_claude.Client) catch return;
+        const run = a.gpa.create(CodexRun) catch {
+            a.gpa.destroy(c);
+            return;
+        };
+        run.* = .{ .a = a, .c = c, .turn = a.current() };
+        c.* = .init(a.gpa, .{ .ctx = run, .message = onCodexMessage, .exited = onCodexExit });
+        a.codex_runs.append(a.gpa, run) catch {};
+        c.start(argv, envp, cwd_z) catch |err| {
+            run.dead = true;
+            a.reapCodexRuns();
+            a.fail("could not start codex: {s}", .{@errorName(err)});
+            return;
+        };
+        c.process.closeInput(); // codex reads stdin; give it EOF
+        a.status = .working;
+    }
+
+    /// Frees the processes of turns that have exited (safe: their callbacks
+    /// have returned).
+    fn reapCodexRuns(a: *Agent) void {
+        var i: usize = 0;
+        while (i < a.codex_runs.items.len) {
+            const r = a.codex_runs.items[i];
+            if (r.dead) {
+                r.c.deinit();
+                a.gpa.destroy(r.c);
+                a.gpa.destroy(r);
+                _ = a.codex_runs.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
+    pub fn codexAlive(a: *Agent) ?*agent_claude.Client {
+        for (a.codex_runs.items) |r| if (!r.dead) return r.c;
+        return null;
+    }
+
+    fn onCodexExit(ctx: *anyopaque, code: i32) void {
+        const run: *CodexRun = @ptrCast(@alignCast(ctx));
+        const a = run.a;
+        run.dead = true; // freed by the next send, after this callback returns
+        const t = run.turn orelse a.current();
+        if (t != null and t == a.current() and !t.?.done) {
+            const why = std.mem.trim(u8, run.c.stderr.lastLine(), " \r\n");
+            if (why.len > 0) a.fail("codex exited (code {d}): {s}", .{ code, why }) else a.fail("codex exited (code {d})", .{code});
+        }
+        a.app.changed(a.app.ctx);
+    }
+
+    fn finishCodex(a: *Agent) void {
+        if (a.current()) |t| {
+            if (!t.done) {
+                t.done = true;
+                t.ended = blocks.now();
+                if (a.app.finished) |f| f(a.app.ctx, t);
+            }
+        }
+        a.status = .ready;
+        a.app.changed(a.app.ctx);
+    }
+
+    fn onCodexMessage(ctx: *anyopaque, v: std.json.Value, _: std.mem.Allocator) void {
+        const run: *CodexRun = @ptrCast(@alignCast(ctx));
+        const a = run.a;
+        defer a.app.changed(a.app.ctx);
+        const ty = agent_claude.typeOf(v);
+        if (std.mem.eql(u8, ty, "thread.started")) {
+            if (agent_claude.str(v, "thread_id")) |sid| {
+                if (a.codex_thread) |t| a.gpa.free(t);
+                a.codex_thread = a.gpa.dupe(u8, sid) catch null;
+                if (a.session) |s| a.gpa.free(s);
+                a.session = a.gpa.dupe(u8, sid) catch null;
+            }
+            return;
+        }
+        if (std.mem.eql(u8, ty, "turn.started")) {
+            a.status = .working;
+            return;
+        }
+        if (std.mem.eql(u8, ty, "turn.completed")) {
+            a.finishCodex();
+            return;
+        }
+        if (std.mem.eql(u8, ty, "item.started") or std.mem.eql(u8, ty, "item.completed")) {
+            const item = agent_claude.obj(v, "item") orelse return;
+            a.codexItem(item, std.mem.eql(u8, ty, "item.completed"));
+        }
+    }
+
+    fn codexItem(a: *Agent, item: std.json.Value, done: bool) void {
+        const t = a.current() orelse return;
+        const itype = agent_claude.str(item, "type") orelse "";
+        if (std.mem.eql(u8, itype, "agent_message")) {
+            if (done) if (agent_claude.str(item, "text")) |tx| a.appendChunk(t, false, tx);
+            return;
+        }
+        if (std.mem.eql(u8, itype, "reasoning")) {
+            if (done) if (agent_claude.str(item, "text")) |tx| a.appendChunk(t, true, tx);
+            return;
+        }
+        // A row for anything else: commands, file changes, mcp calls, todos.
+        // `item.started` makes it, `item.completed` fills it in.
+        const id = agent_claude.str(item, "id") orelse itype;
+        var tl = tool(t, id);
+        if (tl == null) {
+            a.addItem(t, .{ .tool = .{
+                .id = a.gpa.dupe(u8, id) catch return,
+                .kind = a.gpa.dupe(u8, itype) catch return,
+            } });
+            tl = tool(t, id);
+        }
+        const row = tl orelse return;
+        row.status = if (done) .completed else .in_progress;
+        const command = agent_claude.str(item, "command");
+        if (command) |cmd| {
+            row.command.clearRetainingCapacity();
+            row.command.appendSlice(a.gpa, cmd) catch {};
+        }
+        const title = command orelse agent_claude.str(item, "text") orelse agent_claude.str(item, "name") orelse itype;
+        row.title.clearRetainingCapacity();
+        row.title.appendSlice(a.gpa, title) catch {};
+        if (agent_claude.obj(item, "exit_code")) |ec| {
+            if (ec == .integer) row.exit_code = ec.integer;
+        }
+        if (agent_claude.str(item, "aggregated_output")) |out| {
+            row.detail.clearRetainingCapacity();
+            row.detail.appendSlice(a.gpa, out[0..@min(out.len, 2000)]) catch {};
+            row.truncated = out.len > 2000;
+        }
     }
 
     /// The app's PATH, from its environment ("KEY=value" lines).
@@ -947,7 +1144,7 @@ pub const Agent = struct {
             t.done = true;
             return;
         }
-        if (a.session == null and a.native == null and a.claude == null) {
+        if (a.session == null and a.native == null and a.claude == null and a.which != .codex) {
             if (a.queued) |q| a.gpa.free(q);
             a.queued = try a.gpa.dupe(u8, text);
             return;
@@ -959,6 +1156,11 @@ pub const Agent = struct {
         // A prompt sent while Pi streams is a follow-up: it has to say so.
         const streaming = a.status == .working;
         a.status = .working;
+        if (a.which == .codex) {
+            if (a.current()) |t| t.sent = true;
+            a.codexSend(text);
+            return;
+        }
         if (a.claude) |c| {
             // A command only claude's own terminal can run: say so, don't send.
             if (text.len > 0 and text[0] == '/') {
@@ -1212,6 +1414,12 @@ pub const Agent = struct {
     /// Selects a native agent model, or an ACP config option.
     pub fn setOption(a: *Agent, id: []const u8, value: []const u8) void {
         if (a.which == .pi) return a.setPiOption(id, value);
+        if (a.which == .codex) {
+            a.config.setCurrent(id, value);
+            if (std.mem.eql(u8, id, "model")) a.setPendingModel(value);
+            a.app.changed(a.app.ctx);
+            return;
+        }
         if (a.claude != null) {
             a.config.setCurrent(id, value);
             if (std.mem.eql(u8, id, "model")) {
@@ -1460,6 +1668,10 @@ pub const Agent = struct {
     /// Stops the turn running. A turn left waiting by `send` (native's
     /// one-at-a-time queue) still goes after it, unchanged.
     pub fn cancel(a: *Agent) void {
+        if (a.codexAlive()) |c| {
+            c.process.signal(proc.SIGINT);
+            return;
+        }
         if (a.claude) |c| {
             var aw: std.Io.Writer.Allocating = .init(a.gpa);
             defer aw.deinit();
