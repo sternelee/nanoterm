@@ -426,6 +426,14 @@ pub const Agent = struct {
             return err;
         };
         a.claude = c;
+        // Open the control channel now, so a tool in the first turn is asked
+        // about (can_use_tool) rather than auto-denied before init arrives.
+        {
+            var aw: std.Io.Writer.Allocating = .init(a.gpa);
+            defer aw.deinit();
+            aw.writer.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-init\",\"request\":{\"subtype\":\"initialize\"}}\n") catch {};
+            c.sendRaw(aw.written());
+        }
     }
 
     /// The app's PATH, from its environment ("KEY=value" lines).
@@ -451,7 +459,7 @@ pub const Agent = struct {
                     if (a.session) |s| a.gpa.free(s);
                     a.session = a.gpa.dupe(u8, sid) catch null;
                 }
-                a.status = .ready;
+                if (a.status == .starting) a.status = .ready;
                 // Claude's slash commands, for the palette.
                 if (agent_claude.obj(v, "slash_commands")) |cmds| {
                     if (cmds == .array) {
@@ -498,14 +506,6 @@ pub const Agent = struct {
                             .choices = choices,
                         }) catch {};
                     }
-                }
-                // Open the control channel, so claude asks us (can_use_tool)
-                // for a tool it would otherwise deny on its own.
-                if (a.claude) |c| {
-                    var aw: std.Io.Writer.Allocating = .init(a.gpa);
-                    defer aw.deinit();
-                    aw.writer.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-init\",\"request\":{\"subtype\":\"initialize\"}}\n") catch {};
-                    c.sendRaw(aw.written());
                 }
                 if (a.queued) |q| {
                     a.queued = null;
@@ -830,7 +830,7 @@ pub const Agent = struct {
             t.done = true;
             return;
         }
-        if (a.session == null and a.native == null) {
+        if (a.session == null and a.native == null and a.claude == null) {
             if (a.queued) |q| a.gpa.free(q);
             a.queued = try a.gpa.dupe(u8, text);
             return;
