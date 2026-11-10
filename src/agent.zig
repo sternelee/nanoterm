@@ -206,6 +206,9 @@ pub const Agent = struct {
     claude_model_used: ?[]u8 = null,
     /// claude acknowledged our set_model control request (subtype success).
     claude_model_set: bool = false,
+    /// claude's slash commands that need its interactive terminal (init's
+    /// `terminal_slash_commands`), which Chat cannot run.
+    claude_terminal: std.ArrayList([]u8) = .empty,
     native: ?*native_agent.Runtime = null,
     native_turn: ?*Turn = null,
     /// Pi speaks its own RPC, not ACP; only used when `which == .pi`.
@@ -281,6 +284,8 @@ pub const Agent = struct {
         if (a.pi_wanted) |w| a.gpa.free(w);
         if (a.resume_id) |r| a.gpa.free(r);
         if (a.claude_model_used) |m| a.gpa.free(m);
+        for (a.claude_terminal.items) |n| a.gpa.free(n);
+        a.claude_terminal.deinit(a.gpa);
         if (a.pending_model) |m| a.gpa.free(m);
         freePiModel(a.gpa, a.pi_model);
         for (a.pi_models.items) |m| {
@@ -524,6 +529,12 @@ pub const Agent = struct {
         }) catch {};
     }
 
+    /// Whether `name` is one of claude's terminal-only slash commands.
+    fn terminalCommand(a: *Agent, name: []const u8) bool {
+        for (a.claude_terminal.items) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+
     /// The app's PATH, from its environment ("KEY=value" lines).
     fn envPath(a: *const Agent) []const u8 {
         for (a.env) |kv| if (std.mem.startsWith(u8, kv, "PATH=")) return kv[5..];
@@ -548,6 +559,13 @@ pub const Agent = struct {
                     a.session = a.gpa.dupe(u8, sid) catch null;
                 }
                 if (a.status == .starting) a.status = .ready;
+                // Slash commands that need claude's own terminal.
+                a.claude_terminal.clearRetainingCapacity();
+                if (agent_claude.obj(v, "terminal_slash_commands")) |tc| {
+                    if (tc == .array) for (tc.array.items) |n| {
+                        if (n == .string) a.claude_terminal.append(a.gpa, a.gpa.dupe(u8, n.string) catch continue) catch {};
+                    };
+                }
                 // Claude's slash commands, for the palette.
                 if (agent_claude.obj(v, "slash_commands")) |cmds| {
                     if (cmds == .array) {
@@ -942,6 +960,22 @@ pub const Agent = struct {
         const streaming = a.status == .working;
         a.status = .working;
         if (a.claude) |c| {
+            // A command only claude's own terminal can run: say so, don't send.
+            if (text.len > 0 and text[0] == '/') {
+                const sp = std.mem.indexOfAny(u8, text, " \t") orelse text.len;
+                const name = text[1..sp];
+                if (a.terminalCommand(name)) {
+                    if (a.current()) |t| {
+                        t.sent = true;
+                        t.done = true;
+                        t.ended = blocks.now();
+                        a.addItem(t, .{ .note = std.fmt.allocPrint(a.gpa, "/{s} needs Claude's terminal; it is not available in Chat. Run claude and type it there.", .{name}) catch &.{} });
+                        a.status = .ready;
+                        if (a.app.finished) |f| f(a.app.ctx, t);
+                    }
+                    return;
+                }
+            }
             if (a.current()) |t| t.sent = true;
             a.claudeSend(c, text, images);
             return;

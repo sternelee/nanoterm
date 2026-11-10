@@ -272,6 +272,25 @@ test "live: a claude turn through the Agent runs and answers" {
         try std.testing.expect(containsIgnoreCase(said, "cost"));
     }
 
+    // A terminal-only command is refused with a clear note, not sent.
+    std.debug.print("[live] terminal cmds: {d}\n", .{ag.claude_terminal.items.len});
+    if (ag.claude_terminal.items.len > 0) {
+        const cmd = ag.claude_terminal.items[0];
+        var buf: [128]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "/{s}", .{cmd});
+        try ag.prompt(line);
+        try pumpUntil(turnDone, ag);
+        var noted = false;
+        for (ag.current().?.items.items) |it| switch (it) {
+            .note => |nt| {
+                if (containsIgnoreCase(nt, "needs Claude")) noted = true;
+            },
+            else => {},
+        };
+        std.debug.print("[live] /{s} terminal note: {}\n", .{ cmd, noted });
+        try std.testing.expect(noted);
+    }
+
     // A real MCP server: its ping tool must actually be called (it writes a
     // marker), and claude's request for it must reach us as a card we allow.
     {
