@@ -482,6 +482,47 @@ pub const Agent = struct {
             aw.writer.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-init\",\"request\":{\"subtype\":\"initialize\"}}\n") catch {};
             c.sendRaw(aw.written());
         }
+        // claude sends init only after the first message; seed the model menu
+        // now so the picker has rows instead of "Starting… to see its models".
+        // A model chosen before a restart is kept as the current one.
+        a.seedClaudeModelMenu(if (a.pending_model) |m| m else "");
+    }
+
+    /// Builds the model menu claude offers: the current model (when known)
+    /// and full model ids (aliases are canonicalized by a gateway). Called at
+    /// start (current unknown) and on init (current known), so the picker has
+    /// rows before the first message — claude sends init only after one.
+    fn seedClaudeModelMenu(a: *Agent, cur: []const u8) void {
+        var list: std.ArrayList(agent_config.Choice) = .empty;
+        if (cur.len > 0) list.append(a.gpa, .{
+            .value = a.gpa.dupe(u8, cur) catch "",
+            .name = a.gpa.dupe(u8, cur) catch "",
+            .description = a.gpa.dupe(u8, "current") catch "",
+        }) catch {};
+        for ([_][]const u8{ "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" }) |n| {
+            if (std.mem.eql(u8, n, cur)) continue;
+            list.append(a.gpa, .{
+                .value = a.gpa.dupe(u8, n) catch continue,
+                .name = a.gpa.dupe(u8, n) catch continue,
+                .description = a.gpa.dupe(u8, "") catch continue,
+            }) catch {};
+        }
+        const choices = list.toOwnedSlice(a.gpa) catch {
+            list.deinit(a.gpa);
+            return;
+        };
+        if (choices.len < 2) {
+            a.gpa.free(choices);
+            return;
+        }
+        a.config.clearOptions();
+        a.config.options.append(a.gpa, .{
+            .id = a.gpa.dupe(u8, "model") catch "",
+            .name = a.gpa.dupe(u8, "Model") catch "",
+            .category = a.gpa.dupe(u8, "model") catch "",
+            .current = a.gpa.dupe(u8, cur) catch "",
+            .choices = choices,
+        }) catch {};
     }
 
     /// The app's PATH, from its environment ("KEY=value" lines).
@@ -522,39 +563,7 @@ pub const Agent = struct {
                         }
                     }
                 }
-                // A model menu: claude names the current model, not the
-                // others, so offer the usual aliases and the current one.
-                {
-                    var list: std.ArrayList(agent_config.Choice) = .empty;
-                    const cur = agent_claude.str(v, "model") orelse "";
-                    if (cur.len > 0) list.append(a.gpa, .{
-                        .value = a.gpa.dupe(u8, cur) catch "",
-                        .name = a.gpa.dupe(u8, cur) catch "",
-                        .description = a.gpa.dupe(u8, "current") catch "",
-                    }) catch {};
-                    for ([_][]const u8{ "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" }) |n| {
-                        if (std.mem.eql(u8, n, cur)) continue;
-                        list.append(a.gpa, .{
-                            .value = a.gpa.dupe(u8, n) catch continue,
-                            .name = a.gpa.dupe(u8, n) catch continue,
-                            .description = a.gpa.dupe(u8, "") catch continue,
-                        }) catch {};
-                    }
-                    const choices = list.toOwnedSlice(a.gpa) catch {
-                        list.deinit(a.gpa);
-                        return;
-                    };
-                    if (choices.len >= 2) {
-                        a.config.clearOptions();
-                        a.config.options.append(a.gpa, .{
-                            .id = a.gpa.dupe(u8, "model") catch "",
-                            .name = a.gpa.dupe(u8, "Model") catch "",
-                            .category = a.gpa.dupe(u8, "model") catch "",
-                            .current = a.gpa.dupe(u8, if (cur.len > 0) cur else choices[0].value) catch "",
-                            .choices = choices,
-                        }) catch {};
-                    }
-                }
+                a.seedClaudeModelMenu(agent_claude.str(v, "model") orelse "");
                 if (a.queued) |q| {
                     a.queued = null;
                     defer a.gpa.free(q);

@@ -155,6 +155,10 @@ test "live: a claude turn through the Agent runs and answers" {
     defer arena_state.deinit();
     const al = arena_state.allocator();
     try ag.start(try proc.cStrings(al, &.{}), try proc.cStrings(al, list[0..n]));
+    // The model menu exists before the first message (init comes only after
+    // it), so the picker never sits on "Starting ... to see its models".
+    try std.testing.expect(ag.config.find("model") != null);
+    std.debug.print("[live] model menu before prompt: {}\n", .{ag.config.find("model") != null});
     try ag.prompt("Reply with exactly the single word: pong");
     try pumpUntil(turnDone, ag);
     std.debug.print("[live] session={s}\n", .{ag.session orelse "?"});
