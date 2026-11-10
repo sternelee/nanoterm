@@ -1010,6 +1010,16 @@ pub const Agent = struct {
         const copy = a.gpa.dupe(u8, value) catch return;
         if (a.pending_model) |old| a.gpa.free(old);
         a.pending_model = copy;
+        // A claude already running takes the model now, as a control request.
+        if (a.claude) |c| {
+            var aw: std.Io.Writer.Allocating = .init(a.gpa);
+            defer aw.deinit();
+            const w = &aw.writer;
+            w.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-model\",\"request\":{\"subtype\":\"set_model\",\"model\":") catch return;
+            std.json.Stringify.encodeJsonString(value, .{}, w) catch return;
+            w.writeAll("}}\n") catch return;
+            c.sendRaw(aw.written());
+        }
     }
 
     fn applyPendingModel(a: *Agent) void {
