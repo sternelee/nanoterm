@@ -190,8 +190,10 @@ test "live: a claude turn through the Agent runs and answers" {
     try ag.prompt("Reply with exactly the single word: ok2");
     try pumpUntil(turnDone, ag);
     std.debug.print("[live] model used after set_model(haiku): {s}\n", .{ag.claude_model_used orelse "?"});
-    // The set_model request is sent; this gateway reported the same canonical
-    // model after it, so the switch's effect is NOT asserted here.
+    // claude acknowledged the set_model request (control_response success).
+    try std.testing.expect(ag.claude_model_set);
+    // This gateway still reports the same canonical model, so the switch's
+    // EFFECT is not observable here; only the acceptance is asserted.
     try std.testing.expect(ag.claude_model_used != null);
 
     // A picture as a base64 image block reaches claude.

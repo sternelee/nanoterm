@@ -202,9 +202,10 @@ pub const Agent = struct {
     claude: ?*agent_claude.Client = null,
     /// A claude session id to resume, if this pane had one before.
     resume_id: ?[]u8 = null,
-    /// The model claude's last result reported using (`modelUsage`'s key):
-    /// what tells a model switch actually took effect.
+    /// The model claude's last result reported using (`modelUsage`'s key).
     claude_model_used: ?[]u8 = null,
+    /// claude acknowledged our set_model control request (subtype success).
+    claude_model_set: bool = false,
     native: ?*native_agent.Runtime = null,
     native_turn: ?*Turn = null,
     /// Pi speaks its own RPC, not ACP; only used when `which == .pi`.
@@ -542,6 +543,16 @@ pub const Agent = struct {
         if (std.mem.eql(u8, ty, "assistant")) return a.claudeAssistant(v);
         if (std.mem.eql(u8, ty, "user")) return a.claudeToolResults(v);
         if (std.mem.eql(u8, ty, "result")) return a.claudeResult(v);
+        if (std.mem.eql(u8, ty, "control_response")) {
+            if (agent_claude.obj(v, "response")) |r| {
+                if (agent_claude.str(r, "request_id")) |rid| {
+                    if (std.mem.eql(u8, rid, "nt-model") and std.mem.eql(u8, agent_claude.str(r, "subtype") orelse "", "success")) {
+                        a.claude_model_set = true;
+                    }
+                }
+            }
+            return;
+        }
         if (std.mem.eql(u8, ty, "control_request")) return a.claudePermission(v);
     }
 
