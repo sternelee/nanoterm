@@ -256,6 +256,22 @@ test "live: a claude turn through the Agent runs and answers" {
         try std.testing.expect(containsIgnoreCase(said2, "red"));
     }
 
+    // A slash command goes as plain user text; claude runs it and its output
+    // arrives in `result` (no assistant message) — shown as the turn's text.
+    try ag.prompt("/cost");
+    try pumpUntil(turnDone, ag);
+    {
+        var said: []const u8 = "";
+        for (ag.current().?.items.items) |it| switch (it) {
+            .text => |tx| if (tx.items.len > 0) {
+                said = tx.items;
+            },
+            else => {},
+        };
+        std.debug.print("[live] /cost output: {s}\n", .{said[0..@min(said.len, 60)]});
+        try std.testing.expect(containsIgnoreCase(said, "cost"));
+    }
+
     // A real MCP server: its ping tool must actually be called (it writes a
     // marker), and claude's request for it must reach us as a card we allow.
     {

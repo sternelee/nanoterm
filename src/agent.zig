@@ -763,6 +763,26 @@ pub const Agent = struct {
     /// A finished turn: the `result` line ends it. It also names the model
     /// actually used (`modelUsage`), recorded so a switch can be observed.
     fn claudeResult(a: *Agent, v: std.json.Value) void {
+        // A slash command (e.g. /cost) answers in `result`, with no assistant
+        // message; show its output as the turn's text when there is none.
+        if (a.current()) |t| {
+            var has_text = false;
+            for (t.items.items) |it| switch (it) {
+                .text => |tx| if (tx.items.len > 0) {
+                    has_text = true;
+                },
+                else => {},
+            };
+            if (!has_text) {
+                if (agent_claude.str(v, "result")) |said| {
+                    if (said.len > 0) {
+                        var line: std.ArrayList(u8) = .empty;
+                        line.appendSlice(a.gpa, said) catch {};
+                        a.addItem(t, .{ .text = line });
+                    }
+                }
+            }
+        }
         if (agent_claude.obj(v, "modelUsage")) |usage| {
             if (usage == .object) {
                 var it = usage.object.iterator();
