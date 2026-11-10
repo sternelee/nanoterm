@@ -482,45 +482,44 @@ pub const Agent = struct {
             aw.writer.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-init\",\"request\":{\"subtype\":\"initialize\"}}\n") catch {};
             c.sendRaw(aw.written());
         }
-        // claude sends init only after the first message; seed the model menu
-        // now so the picker has rows instead of "Starting… to see its models".
-        // A model chosen before a restart is kept as the current one.
-        a.seedClaudeModelMenu(if (a.pending_model) |m| m else "");
     }
 
-    /// Builds the model menu claude offers: the current model (when known)
-    /// and full model ids (aliases are canonicalized by a gateway). Called at
-    /// start (current unknown) and on init (current known), so the picker has
-    /// rows before the first message — claude sends init only after one.
-    fn seedClaudeModelMenu(a: *Agent, cur: []const u8) void {
+    /// Builds the model menu from claude's own list: the initialize
+    /// control_response carries `models` (ModelInfo: value, displayName,
+    /// description) — the same list `/model` shows. Capped at 7 (the picker
+    /// only renders 2–7 rows). `cur` is the model in play.
+    fn seedClaudeModels(a: *Agent, cur: []const u8, models: std.json.Value) void {
+        if (models != .array) return;
         var list: std.ArrayList(agent_config.Choice) = .empty;
-        if (cur.len > 0) list.append(a.gpa, .{
-            .value = a.gpa.dupe(u8, cur) catch "",
-            .name = a.gpa.dupe(u8, cur) catch "",
-            .description = a.gpa.dupe(u8, "current") catch "",
-        }) catch {};
-        for ([_][]const u8{ "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" }) |n| {
-            if (std.mem.eql(u8, n, cur)) continue;
+        for (models.array.items) |m| {
+            if (list.items.len >= 7) break;
+            const value = agent_claude.str(m, "value") orelse continue;
+            var name = agent_claude.str(m, "displayName") orelse value;
+            // A gateway may label several aliases with the same canonical id;
+            // show the alias instead so the rows are distinct.
+            if (name.len == 0 or std.mem.indexOf(u8, name, "group/auto") != null) name = value;
+            const desc = agent_claude.str(m, "description") orelse "";
             list.append(a.gpa, .{
-                .value = a.gpa.dupe(u8, n) catch continue,
-                .name = a.gpa.dupe(u8, n) catch continue,
-                .description = a.gpa.dupe(u8, "") catch continue,
+                .value = a.gpa.dupe(u8, value) catch continue,
+                .name = a.gpa.dupe(u8, name) catch continue,
+                .description = a.gpa.dupe(u8, desc) catch continue,
             }) catch {};
         }
         const choices = list.toOwnedSlice(a.gpa) catch {
             list.deinit(a.gpa);
             return;
         };
-        if (choices.len < 2) {
+        if (choices.len == 0) {
             a.gpa.free(choices);
             return;
         }
+        const cur_value = if (cur.len > 0) cur else choices[0].value;
         a.config.clearOptions();
         a.config.options.append(a.gpa, .{
             .id = a.gpa.dupe(u8, "model") catch "",
             .name = a.gpa.dupe(u8, "Model") catch "",
             .category = a.gpa.dupe(u8, "model") catch "",
-            .current = a.gpa.dupe(u8, cur) catch "",
+            .current = a.gpa.dupe(u8, cur_value) catch "",
             .choices = choices,
         }) catch {};
     }
@@ -563,7 +562,21 @@ pub const Agent = struct {
                         }
                     }
                 }
-                a.seedClaudeModelMenu(agent_claude.str(v, "model") orelse "");
+                // Reflect the model only when it is one the menu offers (a
+                // gateway may report a canonical id that is not a choice, and
+                // it must not clobber the model the user picked).
+                if (a.pending_model == null) {
+                    if (agent_claude.str(v, "model")) |m| {
+                        if (a.config.find("model")) |o| {
+                            for (o.choices) |ch| {
+                                if (std.mem.eql(u8, ch.value, m)) {
+                                    a.config.setCurrent("model", m);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 if (a.queued) |q| {
                     a.queued = null;
                     defer a.gpa.free(q);
@@ -578,8 +591,14 @@ pub const Agent = struct {
         if (std.mem.eql(u8, ty, "control_response")) {
             if (agent_claude.obj(v, "response")) |r| {
                 if (agent_claude.str(r, "request_id")) |rid| {
-                    if (std.mem.eql(u8, rid, "nt-model") and std.mem.eql(u8, agent_claude.str(r, "subtype") orelse "", "success")) {
-                        a.claude_model_set = true;
+                    const ok = std.mem.eql(u8, agent_claude.str(r, "subtype") orelse "", "success");
+                    if (std.mem.eql(u8, rid, "nt-model") and ok) a.claude_model_set = true;
+                    if (std.mem.eql(u8, rid, "nt-init") and ok) {
+                        if (agent_claude.obj(r, "response")) |inner| {
+                            if (agent_claude.obj(inner, "models")) |models| {
+                                a.seedClaudeModels(a.pending_model orelse "", models);
+                            }
+                        }
                     }
                 }
             }
