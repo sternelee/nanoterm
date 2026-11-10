@@ -390,6 +390,29 @@ pub const Agent = struct {
         }, a, onInitialized);
     }
 
+    /// Restarts claude with the model now in `pending_model`, resuming the
+    /// session it had, so a model switch takes effect where the control
+    /// set_model is ignored (a gateway that pins the model per process).
+    fn claudeRestart(a: *Agent) void {
+        if (a.claude == null) return;
+        if (a.session) |sid| {
+            if (a.resume_id) |r| a.gpa.free(r);
+            a.resume_id = a.gpa.dupe(u8, sid) catch null;
+        }
+        if (a.claude) |c| {
+            c.deinit();
+            a.gpa.destroy(c);
+            a.claude = null;
+        }
+        a.status = .starting;
+        var arena: std.heap.ArenaAllocator = .init(a.gpa);
+        defer arena.deinit();
+        const empty = proc.cStrings(arena.allocator(), &.{}) catch return;
+        const cwd_z = a.gpa.dupeSentinel(u8, a.cwd, 0) catch return;
+        defer a.gpa.free(cwd_z);
+        a.startClaude(empty, cwd_z) catch {};
+    }
+
     /// A claude session id to resume on the next start (a pane that had one).
     pub fn setResume(a: *Agent, id: []const u8) void {
         if (a.resume_id) |r| a.gpa.free(r);
@@ -509,7 +532,7 @@ pub const Agent = struct {
                         .name = a.gpa.dupe(u8, cur) catch "",
                         .description = a.gpa.dupe(u8, "current") catch "",
                     }) catch {};
-                    for ([_][]const u8{ "sonnet", "opus", "haiku" }) |n| {
+                    for ([_][]const u8{ "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5" }) |n| {
                         if (std.mem.eql(u8, n, cur)) continue;
                         list.append(a.gpa, .{
                             .value = a.gpa.dupe(u8, n) catch continue,
@@ -1108,8 +1131,13 @@ pub const Agent = struct {
     pub fn setOption(a: *Agent, id: []const u8, value: []const u8) void {
         if (a.which == .pi) return a.setPiOption(id, value);
         if (a.claude != null) {
-            if (std.mem.eql(u8, id, "model")) a.setPendingModel(value);
             a.config.setCurrent(id, value);
+            if (std.mem.eql(u8, id, "model")) {
+                // A gateway may ignore the control set_model; restart the CLI
+                // with --model, resuming the same session, so it takes effect.
+                a.setPendingModel(value);
+                a.claudeRestart();
+            }
             a.app.changed(a.app.ctx);
             return;
         }
@@ -1131,16 +1159,6 @@ pub const Agent = struct {
         const copy = a.gpa.dupe(u8, value) catch return;
         if (a.pending_model) |old| a.gpa.free(old);
         a.pending_model = copy;
-        // A claude already running takes the model now, as a control request.
-        if (a.claude) |c| {
-            var aw: std.Io.Writer.Allocating = .init(a.gpa);
-            defer aw.deinit();
-            const w = &aw.writer;
-            w.writeAll("{\"type\":\"control_request\",\"request_id\":\"nt-model\",\"request\":{\"subtype\":\"set_model\",\"model\":") catch return;
-            std.json.Stringify.encodeJsonString(value, .{}, w) catch return;
-            w.writeAll("}}\n") catch return;
-            c.sendRaw(aw.written());
-        }
     }
 
     fn applyPendingModel(a: *Agent) void {

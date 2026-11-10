@@ -185,16 +185,14 @@ test "live: a claude turn through the Agent runs and answers" {
         for (mo.choices) |ch| std.debug.print(" {s}", .{ch.value});
         std.debug.print("\n", .{});
     }
-    ag.setOption("model", "haiku");
-    try std.testing.expectEqualStrings("haiku", ag.config.find("model").?.currentName());
+    ag.setOption("model", "claude-sonnet-4-5");
+    try std.testing.expectEqualStrings("claude-sonnet-4-5", ag.config.find("model").?.currentName());
     try ag.prompt("Reply with exactly the single word: ok2");
     try pumpUntil(turnDone, ag);
-    std.debug.print("[live] model used after set_model(haiku): {s}\n", .{ag.claude_model_used orelse "?"});
-    // claude acknowledged the set_model request (control_response success).
-    try std.testing.expect(ag.claude_model_set);
-    // This gateway still reports the same canonical model, so the switch's
-    // EFFECT is not observable here; only the acceptance is asserted.
-    try std.testing.expect(ag.claude_model_used != null);
+    std.debug.print("[live] model used after switch(claude-sonnet-4-5): {s}\n", .{ag.claude_model_used orelse "?"});
+    // The switch restarts claude with --model + --resume; the result's
+    // modelUsage should now name the id, not the gateway's canonical model.
+    try std.testing.expect(containsIgnoreCase(ag.claude_model_used.?, "sonnet-4-5"));
 
     // A picture as a base64 image block reaches claude.
     {
