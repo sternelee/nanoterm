@@ -436,6 +436,53 @@ pub const Agent = struct {
                     a.session = a.gpa.dupe(u8, sid) catch null;
                 }
                 a.status = .ready;
+                // Claude's slash commands, for the palette.
+                if (agent_claude.obj(v, "slash_commands")) |cmds| {
+                    if (cmds == .array) {
+                        a.config.clearCommands();
+                        for (cmds.array.items) |cm| {
+                            if (cm != .string) continue;
+                            a.config.commands.append(a.gpa, .{
+                                .name = a.gpa.dupe(u8, cm.string) catch continue,
+                                .description = a.gpa.dupe(u8, "") catch continue,
+                                .hint = a.gpa.dupe(u8, "") catch continue,
+                            }) catch {};
+                        }
+                    }
+                }
+                // A model menu: claude names the current model, not the
+                // others, so offer the usual aliases and the current one.
+                {
+                    var list: std.ArrayList(agent_config.Choice) = .empty;
+                    const cur = agent_claude.str(v, "model") orelse "";
+                    if (cur.len > 0) list.append(a.gpa, .{
+                        .value = a.gpa.dupe(u8, cur) catch "",
+                        .name = a.gpa.dupe(u8, cur) catch "",
+                        .description = a.gpa.dupe(u8, "current") catch "",
+                    }) catch {};
+                    for ([_][]const u8{ "sonnet", "opus", "haiku" }) |n| {
+                        if (std.mem.eql(u8, n, cur)) continue;
+                        list.append(a.gpa, .{
+                            .value = a.gpa.dupe(u8, n) catch continue,
+                            .name = a.gpa.dupe(u8, n) catch continue,
+                            .description = a.gpa.dupe(u8, "") catch continue,
+                        }) catch {};
+                    }
+                    const choices = list.toOwnedSlice(a.gpa) catch {
+                        list.deinit(a.gpa);
+                        return;
+                    };
+                    if (choices.len >= 2) {
+                        a.config.clearOptions();
+                        a.config.options.append(a.gpa, .{
+                            .id = a.gpa.dupe(u8, "model") catch "",
+                            .name = a.gpa.dupe(u8, "Model") catch "",
+                            .category = a.gpa.dupe(u8, "model") catch "",
+                            .current = a.gpa.dupe(u8, if (cur.len > 0) cur else choices[0].value) catch "",
+                            .choices = choices,
+                        }) catch {};
+                    }
+                }
                 // Open the control channel, so claude asks us (can_use_tool)
                 // for a tool it would otherwise deny on its own.
                 if (a.claude) |c| {
@@ -992,6 +1039,12 @@ pub const Agent = struct {
     /// Selects a native agent model, or an ACP config option.
     pub fn setOption(a: *Agent, id: []const u8, value: []const u8) void {
         if (a.which == .pi) return a.setPiOption(id, value);
+        if (a.claude != null) {
+            if (std.mem.eql(u8, id, "model")) a.setPendingModel(value);
+            a.config.setCurrent(id, value);
+            a.app.changed(a.app.ctx);
+            return;
+        }
         if (a.native) |native| {
             if (std.mem.eql(u8, id, "model")) native.setModel(value) catch {};
             a.app.changed(a.app.ctx);
