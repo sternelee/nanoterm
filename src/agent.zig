@@ -256,6 +256,8 @@ pub const Agent = struct {
     /// Called when the agent goes, to stop routing visuals to it.
     on_destroy: ?struct { ctx: *anyopaque, func: *const fn (ctx: *anyopaque, a: *Agent) void } = null,
     msg_buf: [512]u8 = undefined,
+    harness_enabled: bool = false,
+    harness_bridge: ?*const @import("harness_bridge.zig").HarnessBridge = null,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, app: App, which: Which, cwd: []const u8) !*Agent {
         const a = try gpa.create(Agent);

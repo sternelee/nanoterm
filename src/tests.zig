@@ -76,6 +76,7 @@ test {
     _ = @import("view_sidebar.zig");
     _ = @import("tests_agent.zig");
     _ = @import("tests_stream.zig");
+    _ = @import("test_harness.zig");
 }
 
 /// Runs the main run loop (and so the dispatch sources) until `done`.

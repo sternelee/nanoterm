@@ -160,6 +160,7 @@ pub const Store = struct {
     dirs_cwd: []u8 = &.{},
     agents_files: std.ArrayList([]u8) = .empty,
     runtime_loaded: bool = false,
+    harness_enabled: bool = false,
     workspace_dir: ui.TextBuffer = .{},
 
     mcp_query_thread: ?std.Thread = null,

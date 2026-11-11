@@ -239,6 +239,17 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
             {
                 const b = box(c);
                 defer b.end();
+                ui.text(c, "Harness integration", .{ .size = 14, .weight = .semibold });
+                const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                defer r.end();
+                if (ui.toggle(c, "", &store.harness_enabled)) {
+                    // Toggle state saved when settings are persisted
+                }
+                ui.text(c, "Use harness-based agent adapters (experimental)", .{ .size = 12, .color = theme.muted });
+            }
+            {
+                const b = box(c);
+                defer b.end();
                 ui.text(c, "Additional workspaces", .{ .size = 14, .weight = .semibold });
                 ui.text(c, "Other directories this workspace's fx may work in.", .{ .size = 12, .color = theme.muted, .wrap = true });
                 for (store.dirs.items) |dir| {
