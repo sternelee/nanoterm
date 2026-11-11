@@ -15,9 +15,10 @@ const relay = @import("relay.zig");
 /// Whether anonymous usage analytics are shared: not asked yet, yes, no.
 pub const Analytics = enum { unset, on, off };
 
-/// The relay: off, or on for a phone on the same Wi-Fi, or on over
-/// Tailscale.
-pub const Relay = enum { off, lan, tailscale };
+/// The relay: off, or on for a phone on the same Wi-Fi, or over Tailscale,
+/// or over alma-relay (Cloudflare) so a phone outside this network reaches
+/// this machine's tabs through `https://relay.example.com/c/<token>/…`.
+pub const Relay = enum { off, lan, tailscale, cloud };
 
 pub const Prefs = struct {
     gpa: std.mem.Allocator,
@@ -52,6 +53,15 @@ pub const Prefs = struct {
     /// and on which port.
     relay: Relay = .off,
     relay_port: u16 = relay.default_port,
+    /// The alma-relay host this machine's agent dials (e.g. `relay.example.com`).
+    cloud_host: []const u8 = "",
+    /// The alma-relay port: usually 443 for `wss`.
+    cloud_port: u16 = 443,
+    /// The token this machine registers with alma-relay; kept here, never shown to the phone.
+    cloud_token: []const u8 = "",
+    /// Whether a `wss` relay's certificate is taken on trust instead of being
+    /// verified. Off by default: this is what the settings page warns about.
+    cloud_insecure: bool = false,
     installed: std.EnumArray(Which, bool) = .initFill(false),
     /// Anonymous usage analytics, sent only when `analytics` is on.
     telemetry: @import("analytics.zig").Client,
@@ -62,7 +72,27 @@ pub const Prefs = struct {
         p.path = std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "settings.json" }) catch "";
         const data = std.Io.Dir.cwd().readFileAlloc(io, p.path, gpa, .limited(64 * 1024)) catch return p;
         defer gpa.free(data);
-        const S = struct { agent: []const u8 = "agent", model: []const u8 = "", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1, relay: []const u8 = "off", relay_port: u16 = relay.default_port };
+        const S = struct {
+            agent: []const u8 = "agent",
+            model: []const u8 = "",
+            zoom: f32 = 1,
+            keys: []const u8 = "system",
+            agents: bool = true,
+            onboarded: bool = false,
+            analytics: []const u8 = "unset",
+            install_id: []const u8 = "",
+            font: []const u8 = "JetBrains Mono",
+            theme: []const u8 = "",
+            file_icons: bool = true,
+            motion_duration: f32 = 1,
+            motion_intensity: f32 = 1,
+            relay: []const u8 = "off",
+            relay_port: u16 = relay.default_port,
+            cloud_host: []const u8 = "",
+            cloud_port: u16 = 443,
+            cloud_token: []const u8 = "",
+            cloud_insecure: bool = false,
+        };
         const parsed = std.json.parseFromSlice(S, gpa, data, .{ .ignore_unknown_fields = true }) catch return p;
         defer parsed.deinit();
         const v = parsed.value;
@@ -80,6 +110,10 @@ pub const Prefs = struct {
         p.motion_intensity = std.math.clamp(v.motion_intensity, 0, 1.5);
         p.relay = std.meta.stringToEnum(Relay, v.relay) orelse .off;
         p.relay_port = if (v.relay_port == 0) relay.default_port else v.relay_port;
+        p.cloud_host = gpa.dupe(u8, v.cloud_host) catch "";
+        p.cloud_port = if (v.cloud_port == 0) 443 else v.cloud_port;
+        p.cloud_token = gpa.dupe(u8, v.cloud_token) catch "";
+        p.cloud_insecure = v.cloud_insecure;
         if (v.install_id.len == p.install_id.len) @memcpy(&p.install_id, v.install_id);
         return p;
     }
@@ -89,6 +123,8 @@ pub const Prefs = struct {
         if (p.model.len > 0) p.gpa.free(p.model);
         if (p.terminal_font.len > 0) p.gpa.free(p.terminal_font);
         if (p.theme.len > 0) p.gpa.free(p.theme);
+        if (p.cloud_host.len > 0) p.gpa.free(p.cloud_host);
+        if (p.cloud_token.len > 0) p.gpa.free(p.cloud_token);
     }
 
     /// Records an anonymous usage event, if the user shares analytics.
@@ -99,9 +135,18 @@ pub const Prefs = struct {
     fn save(p: *Prefs) void {
         if (p.path.len == 0) return;
         if (std.fs.path.dirname(p.path)) |dir| std.Io.Dir.cwd().createDirPath(p.io, dir) catch {};
-        var buf: [512]u8 = undefined;
-        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"model\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"relay\": \"{s}\",\n  \"relay_port\": {d}\n}}\n", .{ @tagName(p.agent), p.model, p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.relay), p.relay_port }) catch return;
-        std.Io.Dir.cwd().writeFile(p.io, .{ .sub_path = p.path, .data = json }) catch {};
+        // Sized from the content: a relay token or a long host must not
+        // silently keep the file from being written at all.
+        const json = std.fmt.allocPrint(p.gpa, "{{\n  \"agent\": \"{s}\",\n  \"model\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"relay\": \"{s}\",\n  \"relay_port\": {d},\n  \"cloud_host\": \"{s}\",\n  \"cloud_port\": {d},\n  \"cloud_token\": \"{s}\",\n  \"cloud_insecure\": {}\n}}\n", .{ @tagName(p.agent), p.model, p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.relay), p.relay_port, p.cloud_host, p.cloud_port, p.cloud_token, p.cloud_insecure }) catch return;
+        defer p.gpa.free(json);
+        // The file holds the relay's token: only the user who started nanoterm
+        // may read it.
+        const mode: std.Io.File.Permissions = if (@import("builtin").os.tag == .windows) .default_file else @fromBackingInt(@intCast(0o600));
+        std.Io.Dir.cwd().writeFile(p.io, .{
+            .sub_path = p.path,
+            .data = json,
+            .flags = .{ .permissions = mode },
+        }) catch {};
     }
 
     /// The agent new tabs start with.
@@ -197,11 +242,46 @@ pub const Prefs = struct {
         p.save();
     }
 
-    /// The relay for the phone: off, or on over the LAN or Tailscale.
+    /// The relay for the phone: off, on over the LAN or Tailscale, or over alma-relay (Cloudflare) so a phone outside this network reaches this machine's tabs through `https://relay.example.com/c/<token>/…`.
     pub fn setRelay(p: *Prefs, mode: Relay, port: u16) void {
         if (p.relay == mode and p.relay_port == port) return;
         p.relay = mode;
         p.relay_port = port;
+        p.save();
+    }
+
+    /// The alma-relay host this machine's agent dials (e.g. `relay.example.com`).
+    pub fn setCloudHost(p: *Prefs, host: []const u8) void {
+        const trimmed = std.mem.trim(u8, host, " \t\r\n");
+        if (std.mem.eql(u8, p.cloud_host, trimmed)) return;
+        const kept = if (trimmed.len > 0) p.gpa.dupe(u8, trimmed) catch return else "";
+        if (p.cloud_host.len > 0) p.gpa.free(p.cloud_host);
+        p.cloud_host = kept;
+        p.save();
+    }
+
+    /// The alma-relay port: usually 443 for `wss`.
+    pub fn setCloudPort(p: *Prefs, port: u16) void {
+        if (p.cloud_port == port) return;
+        p.cloud_port = port;
+        p.save();
+    }
+
+    /// The token this machine uses to register with alma-relay. It stays on this machine; the phone never sees it.
+    pub fn setCloudToken(p: *Prefs, token: []const u8) void {
+        const trimmed = std.mem.trim(u8, token, " \t\r\n");
+        if (std.mem.eql(u8, p.cloud_token, trimmed)) return;
+        const kept = if (trimmed.len > 0) p.gpa.dupe(u8, trimmed) catch return else "";
+        if (p.cloud_token.len > 0) p.gpa.free(p.cloud_token);
+        p.cloud_token = kept;
+        p.save();
+    }
+
+    /// Whether a `wss` relay's certificate is taken on trust rather than
+    /// verified against this machine's CA store.
+    pub fn setCloudInsecure(p: *Prefs, on: bool) void {
+        if (p.cloud_insecure == on) return;
+        p.cloud_insecure = on;
         p.save();
     }
 

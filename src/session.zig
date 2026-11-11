@@ -56,6 +56,11 @@ pub const Shared = struct {
     /// The phone's relay (--relay), when one was started: what it shows,
     /// and the commands it sends back.
     relay: ?*@import("relay.zig").Hub = null,
+    /// The alma-relay Cloudflare connection, when cloud relay is on.
+    cloud_relay: ?*@import("cloud_relay.zig").CloudRelay = null,
+    /// The phones that came in through the cloud relay: the socket each one
+    /// opened there, and the hub client that stands in for it.
+    cloud_peers: std.ArrayList(*CloudPeer) = .empty,
     /// Every session made, so a relay started later finds them all.
     sessions: std.ArrayList(*Session) = .empty,
     exe: []const u8 = "",
@@ -124,7 +129,10 @@ pub const Shared = struct {
     }
 
     pub fn deinit(s: *Shared) void {
-        if (s.relay) |h| h.destroy();
+        // The hub frees the cloud clients it holds, and they free their peers.
+        if (s.relay) |h| h.destroy() else closeCloudPeers(s);
+        if (s.cloud_relay) |cr| cr.deinit();
+        s.cloud_peers.deinit(s.gpa);
         s.sessions.deinit(s.gpa);
         if (s.visuals) |h| h.destroy();
         s.log.deinit();
@@ -148,6 +156,28 @@ pub const Shared = struct {
     /// Turns the relay on for a phone — over the LAN or over Tailscale —
     /// or off. A relay already running keeps its sessions and its token,
     /// and only listens somewhere else.
+    /// Switches the phone's relay on in whichever way `prefs.relay` says:
+    /// a hub on this machine, or the cloud relay's agent. Exactly one of them
+    /// runs, so the two are turned off against each other here.
+    pub fn applyRelay(s: *Shared, mode: @import("settings.zig").Relay) !void {
+        if (mode == .cloud) {
+            return s.setCloudRelay(
+                .cloud,
+                s.prefs.cloud_host,
+                s.prefs.cloud_port,
+                s.prefs.cloud_token,
+            );
+        }
+        if (s.cloud_relay != null) {
+            // The clients of the connection being replaced go with it: their
+            // conns point into the relay that is about to be freed.
+            closeCloudPeers(s);
+            if (s.cloud_relay) |cr| cr.deinit();
+            s.cloud_relay = null;
+        }
+        return s.setRelay(mode, s.prefs.relay_port);
+    }
+
     pub fn setRelay(s: *Shared, mode: @import("settings.zig").Relay, port: u16) !void {
         const hub = @import("relay.zig");
         if (mode == .off) {
@@ -175,6 +205,227 @@ pub const Shared = struct {
         }
         std.log.info("nanoterm: relay on port {d}, token {s}", .{ port, hub.Hub.tokenHex(s.relay.?) });
     }
+
+/// Turns the cloud relay on for a phone — over alma-relay — or off.
+pub fn setCloudRelay(s: *Shared, mode: @import("settings.zig").Relay, host: []const u8, port: u16, token: []const u8) !void {
+    if (mode != .cloud) {
+        // The clients of the tunnel point into the relay being freed.
+        closeCloudPeers(s);
+        if (s.cloud_relay) |cr| { cr.deinit(); s.cloud_relay = null; }
+        return;
+    }
+    if (host.len == 0 or token.len == 0) return error.InvalidArgument;
+    // The phones that come through the relay are clients of the hub, so it has
+    // to be running: on this machine only, since nobody reaches it directly.
+    try s.ensureHub();
+    // The clients of the connection being replaced go with it.
+    closeCloudPeers(s);
+    if (s.cloud_relay) |cr| { cr.deinit(); s.cloud_relay = null; }
+
+    const cr = @import("cloud_relay.zig");
+    const cb: cr.Callback = .{
+        .on_hreq = &onCloudHreq,
+        .on_wopen = &onCloudWopen,
+        .on_wmsg = &onCloudWmsg,
+        .on_wclose = &onCloudWclose,
+        .on_closed = &onCloudClosed,
+        .ctx = s,
+    };
+    // A certificate is verified unless the user said otherwise on the relay
+    // settings page: a relay behind a proxy with a certificate this machine
+    // cannot check is the only reason to turn that off.
+    const trust: @import("ws_client.zig").Trust = if (s.prefs.cloud_insecure) .insecure else .system;
+    const relay = try cr.CloudRelay.connect(s.gpa, s.io, host, port, token, trust, cb);
+    s.cloud_relay = relay;
+    relay.start() catch |err| {
+        relay.deinit();
+        s.cloud_relay = null;
+        return err;
+    };
+}
+
+/// Brings up the hub a cloud client can be attached to, unless it already
+/// runs. It listens on this machine alone: the phone arrives through the relay.
+fn ensureHub(s: *Shared) !void {
+    if (s.relay != null) return;
+    const hub = @import("relay.zig");
+    const token_path = hub.Hub.tokenPath(s.gpa, s.home);
+    defer s.gpa.free(token_path);
+    const h = try hub.Hub.create(s.gpa, s.io, .{
+        .port = s.prefs.relay_port,
+        .mode = .loopback,
+        .token = s.env.get("NANOTERM_RELAY_TOKEN") orelse "",
+        .token_path = token_path,
+    });
+    for (s.sessions.items) |sess| h.attach(sess);
+    s.relay = h;
+}
+
+/// A phone that came in through the cloud relay: the socket it opened there,
+/// and the hub client that speaks the relay's protocol in its name.
+const CloudPeer = struct {
+    shared: *Shared,
+    cr: *@import("cloud_relay.zig").CloudRelay,
+    /// The socket's id at the relay, which the phone was given. Ours.
+    ws_id: []u8,
+    conn: ?*@import("relay.zig").Conn = null,
+};
+
+fn findCloud(s: *Shared, id: []const u8) ?*CloudPeer {
+    for (s.cloud_peers.items) |peer| {
+        if (std.mem.eql(u8, peer.ws_id, id)) return peer;
+    }
+    return null;
+}
+
+/// Forgets a peer and the memory it holds, whether or not it is in the list.
+fn forgetCloud(s: *Shared, peer: *CloudPeer) void {
+    for (s.cloud_peers.items, 0..) |p, i| {
+        if (p == peer) {
+            _ = s.cloud_peers.swapRemove(i);
+            break;
+        }
+    }
+    s.gpa.free(peer.ws_id);
+    s.gpa.destroy(peer);
+}
+
+/// The tunnel to the relay ended: the phones that came through it are gone
+/// with it, so their clients are dropped here rather than left behind as
+/// tabs that answer nothing. The relay itself stays in the session as a dead
+/// one, which is what makes the settings page offer to connect again.
+fn onCloudClosed(ctx: ?*anyopaque) void {
+    const s: *Shared = @ptrCast(@alignCast(ctx orelse return));
+    closeCloudPeers(s);
+}
+
+/// Closes every cloud client. The hub drops each one, which forgets its peer.
+fn closeCloudPeers(s: *Shared) void {
+    while (s.cloud_peers.items.len > 0) {
+        const peer = s.cloud_peers.items[s.cloud_peers.items.len - 1];
+        // A peer the hub already dropped, or a hub that is gone, is forgotten
+        // here and the loop goes on with the others.
+        if (peer.conn) |conn| {
+            if (s.relay) |h| {
+                h.remove(conn);
+                continue;
+            }
+        }
+        s.forgetCloud(peer);
+    }
+}
+
+/// Writes a line the hub produced for a cloud client: one websocket frame.
+fn cloudWrite(ctx: *anyopaque, bytes: []const u8) bool {
+    const peer: *CloudPeer = @ptrCast(@alignCast(ctx));
+    return peer.cr.sendWmsg(peer.ws_id, bytes);
+}
+
+/// Whether phones can reach this machine through the cloud relay right now.
+/// A tunnel the relay closed stays in the session but is no longer live, so
+/// the settings page offers to connect again instead of claiming it works.
+pub fn cloudLive(s: *Shared) bool {
+    const cr = s.cloud_relay orelse return false;
+    return !cr.closed;
+}
+
+/// The hub let go of a cloud client: tell the phone, then forget the peer.
+fn cloudClosed(ctx: *anyopaque) void {
+    const peer: *CloudPeer = @ptrCast(@alignCast(ctx));
+    peer.cr.sendWclose(peer.ws_id);
+    peer.shared.forgetCloud(peer);
+}
+
+/// The phone opened its half of a tunnel through the cloud relay.
+fn onCloudWopen(cr: *@import("cloud_relay.zig").CloudRelay, id: []const u8, path: []const u8) !void {
+    const s: *Shared = @ptrCast(@alignCast(cr.cb.ctx));
+    _ = path;
+    const h = s.relay orelse return error.NoRelay;
+
+    const peer = try s.gpa.create(CloudPeer);
+    const ws_id = s.gpa.dupe(u8, id) catch |err| {
+        s.gpa.destroy(peer);
+        return err;
+    };
+    peer.* = .{ .shared = s, .cr = cr, .ws_id = ws_id };
+    peer.conn = h.addCloud(.{
+        .ctx = peer,
+        .write = &cloudWrite,
+        .closed = &cloudClosed,
+    }) catch |err| {
+        s.gpa.free(ws_id);
+        s.gpa.destroy(peer);
+        return err;
+    };
+    s.cloud_peers.append(s.gpa, peer) catch |err| {
+        // Dropping the client runs `cloudClosed`, which frees the peer.
+        h.remove(peer.conn.?);
+        return err;
+    };
+    cr.sendWopened(ws_id);
+}
+
+/// The phone sent bytes up its half of the tunnel: a line for the hub.
+fn onCloudWmsg(cr: *@import("cloud_relay.zig").CloudRelay, id: []const u8, bytes: []const u8) void {
+    const s: *Shared = @ptrCast(@alignCast(cr.cb.ctx));
+    const peer = s.findCloud(id) orelse return;
+    const h = s.relay orelse return;
+    h.feed(peer.conn.?, bytes);
+}
+
+/// The phone closed its half of the tunnel.
+fn onCloudWclose(cr: *@import("cloud_relay.zig").CloudRelay, id: []const u8) void {
+    const s: *Shared = @ptrCast(@alignCast(cr.cb.ctx));
+    const peer = s.findCloud(id) orelse return;
+    // Removing it frees the peer, so it is not touched afterwards.
+    if (s.relay) |h| h.remove(peer.conn.?);
+}
+
+/// Handles alma-relay hreq frames forwarded to this desktop's local sessions.
+const json_headers = "{\"content-type\":\"application/json\"}";
+
+fn onCloudHreq(cr: *@import("cloud_relay.zig").CloudRelay, id: []const u8, method: []const u8, path: []const u8, body: []const u8) !void {
+    const s: *Shared = @ptrCast(@alignCast(cr.cb.ctx));
+    _ = body;
+
+    if (std.mem.eql(u8, path, "/sessions") and std.mem.eql(u8, method, "GET")) {
+        var buf: [1024]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        w.writeByte('{') catch {};
+        w.writeAll("\"sessions\":[") catch {};
+        for (s.sessions.items, 0..) |sess, i| {
+            if (i > 0) w.writeByte(',') catch {};
+            w.writeByte('{') catch {};
+            w.print("\"id\":{d}", .{sess.id}) catch {};
+            w.writeByte('}') catch {};
+        }
+        w.writeAll("\"]}") catch {};
+        cr.sendHres(id, 200, json_headers);
+        cr.sendHchunk(id, buf[0..w.end]);
+        cr.sendHend(id);
+        return;
+    }
+    if (std.mem.eql(u8, path, "/") and std.mem.eql(u8, method, "GET")) {
+        var buf: [128]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        w.writeByte('{') catch {};
+        w.print("\"ok\":true,\"service\":\"nanoterm-cloud-relay\",\"proto\":{d}", .{cr.proto}) catch {};
+        w.writeByte('}') catch {};
+        cr.sendHres(id, 200, json_headers);
+        cr.sendHchunk(id, buf[0..w.end]);
+        cr.sendHend(id);
+        return;
+    }
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.writeByte('{') catch {};
+    w.print("\"error\":\"not found\",\"path\":\"{s}\"", .{path}) catch {};
+    w.writeByte('}') catch {};
+    cr.sendHres(id, 404, json_headers);
+    cr.sendHchunk(id, buf[0..w.end]);
+    cr.sendHend(id);
+}
 
     pub fn redraw(s: *Shared) void {
         if (s.window) |w| w.redraw();

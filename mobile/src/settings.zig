@@ -30,11 +30,37 @@ pub const Layout = enum {
     sidebar,
 };
 
+/// How the phone reaches the workstation: the LAN it sits on, a Tailscale
+/// name that works anywhere, or the Cloudflare relay the workstation
+/// registers with.
+pub const Kind = enum {
+    lan,
+    tailscale,
+    cloud,
+};
+
+pub const port_cloud_default: u16 = 443;
+
+/// A connection, as saved: typed once, then recalled.
+pub const Conn = struct {
+    kind: Kind = .lan,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = port_default,
+    token: []const u8 = "",
+    /// The relay in front of the workstation, when `kind` is cloud.
+    cloud_host: []const u8 = "",
+    cloud_port: u16 = port_cloud_default,
+};
+
 /// What the file holds, in memory: owned by the allocator it was read with.
 pub const Stored = struct {
+    kind: Kind = .lan,
     host: []u8 = &.{},
     port: u16 = port_default,
     token: []u8 = &.{},
+    /// The relay in front of the workstation, when `kind` is cloud.
+    cloud_host: []u8 = &.{},
+    cloud_port: u16 = port_cloud_default,
     theme: ThemePreference = .system,
     /// A named theme from the desktop's shelf; empty follows the appearance.
     theme_id: []u8 = &.{},
@@ -43,6 +69,7 @@ pub const Stored = struct {
     pub fn deinit(s: Stored, gpa: std.mem.Allocator) void {
         if (s.host.len > 0) gpa.free(s.host);
         if (s.token.len > 0) gpa.free(s.token);
+        if (s.cloud_host.len > 0) gpa.free(s.cloud_host);
         if (s.theme_id.len > 0) gpa.free(s.theme_id);
     }
 
@@ -64,9 +91,12 @@ pub fn path(buf: *[512]u8) ?[]const u8 {
 /// The file, as written: every field optional, so a hand-edited one with
 /// only a host still reads.
 const Written = struct {
+    kind: []const u8 = "lan",
     host: []const u8 = "",
     port: u16 = port_default,
     token: []const u8 = "",
+    cloud_host: []const u8 = "",
+    cloud_port: u16 = port_cloud_default,
     theme: []const u8 = "system",
     theme_id: []const u8 = "",
     layout: []const u8 = "tabs",
@@ -85,16 +115,25 @@ pub fn loadFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8) ?Stored {
     var parsed = std.json.parseFromSlice(Written, gpa, data, .{ .ignore_unknown_fields = true }) catch return null;
     defer parsed.deinit();
     const w = parsed.value;
-    var s: Stored = .{ .port = w.port };
+    var s: Stored = .{ .port = w.port, .cloud_port = w.cloud_port };
+    // A mode nobody knows, and a relay address that cannot be one: the
+    // LAN it was before the file grew this field.
+    s.kind = if (std.mem.eql(u8, w.kind, "cloud")) .cloud else if (std.mem.eql(u8, w.kind, "tailscale")) .tailscale else .lan;
     // Nothing half-saved is worth keeping: an empty host is the default.
     s.host = gpa.dupe(u8, if (w.host.len > 0 and w.host.len <= host_max) w.host else "127.0.0.1") catch return null;
     s.token = gpa.dupe(u8, if (w.token.len == token_len) w.token else "") catch {
         gpa.free(s.host);
         return null;
     };
+    s.cloud_host = gpa.dupe(u8, if (w.cloud_host.len <= host_max) w.cloud_host else "") catch {
+        gpa.free(s.host);
+        gpa.free(s.token);
+        return null;
+    };
     s.theme_id = gpa.dupe(u8, w.theme_id) catch {
         gpa.free(s.host);
         gpa.free(s.token);
+        gpa.free(s.cloud_host);
         return null;
     };
     // Theme preference: parse the string, default to system.
@@ -105,13 +144,13 @@ pub fn loadFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8) ?Stored {
 
 /// Writes it, and says whether it landed: a phone that cannot save still
 /// works for this run, it just asks again next time.
-pub fn save(io: std.Io, gpa: std.mem.Allocator, host: []const u8, port: u16, token: []const u8, theme: ThemePreference, theme_id: []const u8, layout: Layout) bool {
+pub fn save(io: std.Io, gpa: std.mem.Allocator, conn: Conn, theme: ThemePreference, theme_id: []const u8, layout: Layout) bool {
     var buf: [512]u8 = undefined;
     const p = path(&buf) orelse return false;
-    return saveFile(io, gpa, p, host, port, token, theme, theme_id, layout);
+    return saveFile(io, gpa, p, conn, theme, theme_id, layout);
 }
 
-pub fn saveFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8, host: []const u8, port: u16, token: []const u8, theme: ThemePreference, theme_id: []const u8, layout: Layout) bool {
+pub fn saveFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8, conn: Conn, theme: ThemePreference, theme_id: []const u8, layout: Layout) bool {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     const theme_str = switch (theme) {
@@ -119,7 +158,17 @@ pub fn saveFile(io: std.Io, gpa: std.mem.Allocator, p: []const u8, host: []const
         .light => "light",
         .dark => "dark",
     };
-    std.json.Stringify.value(Written{ .host = host, .port = port, .token = token, .theme = theme_str, .theme_id = theme_id, .layout = @tagName(layout) }, .{}, &aw.writer) catch return false;
+    std.json.Stringify.value(Written{
+        .kind = @tagName(conn.kind),
+        .host = conn.host,
+        .port = conn.port,
+        .token = conn.token,
+        .cloud_host = conn.cloud_host,
+        .cloud_port = conn.cloud_port,
+        .theme = theme_str,
+        .theme_id = theme_id,
+        .layout = @tagName(layout),
+    }, .{}, &aw.writer) catch return false;
     var file = std.Io.Dir.cwd().createFile(io, p, .{ .truncate = true }) catch return false;
     defer file.close(io);
     file.writeStreamingAll(io, aw.written()) catch return false;
@@ -138,7 +187,7 @@ test "what was saved is what is read back" {
     // Nothing saved yet: nothing read.
     try testing.expect(loadFile(testing.io, testing.allocator, p) == null);
 
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "192.168.1.20", 4790, "0123456789abcdef0123456789abcdef", .system, "", .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, .{ .host = "192.168.1.20", .port = 4790, .token = "0123456789abcdef0123456789abcdef" }, .system, "", .tabs));
     const s = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s.deinit(testing.allocator);
     try testing.expectEqualStrings("192.168.1.20", s.host);
@@ -149,7 +198,7 @@ test "what was saved is what is read back" {
     try testing.expectEqual(Layout.tabs, s.layout);
 
     // Saving again replaces it, rather than appending.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "mac.local", 4789, "ffffffffffffffffffffffffffffffff", .dark, "", .sidebar));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, .{ .host = "mac.local", .port = 4789, .token = "ffffffffffffffffffffffffffffffff" }, .dark, "", .sidebar));
     const t = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer t.deinit(testing.allocator);
     try testing.expectEqualStrings("mac.local", t.host);
@@ -199,19 +248,19 @@ test "theme preference is saved and loaded" {
     const p = dir ++ "/theme.json";
 
     // Default theme is system.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .system, "", .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, .{ .host = "127.0.0.1", .port = 4789, .token = "0123456789abcdef0123456789abcdef" }, .system, "", .tabs));
     const s1 = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s1.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.system, s1.theme);
 
     // Light theme.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .light, "", .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, .{ .host = "127.0.0.1", .port = 4789, .token = "0123456789abcdef0123456789abcdef" }, .light, "", .tabs));
     const s2 = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s2.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.light, s2.theme);
 
     // Dark theme.
-    try testing.expect(saveFile(testing.io, testing.allocator, p, "127.0.0.1", 4789, "0123456789abcdef0123456789abcdef", .dark, "", .tabs));
+    try testing.expect(saveFile(testing.io, testing.allocator, p, .{ .host = "127.0.0.1", .port = 4789, .token = "0123456789abcdef0123456789abcdef" }, .dark, "", .tabs));
     const s3 = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
     defer s3.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.dark, s3.theme);
@@ -223,4 +272,38 @@ test "theme preference is saved and loaded" {
     const s4 = loadFile(testing.io, testing.allocator, dir ++ "/unknown.json") orelse return error.NotRead;
     defer s4.deinit(testing.allocator);
     try testing.expectEqual(ThemePreference.system, s4.theme);
+}
+
+test "a relay in front of the workstation is remembered" {
+    const dir = "/tmp/nanoterm-phone-test-cloud";
+    std.Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(testing.io, dir);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, dir) catch {};
+    const p = dir ++ "/cloud.json";
+
+    try testing.expect(saveFile(testing.io, testing.allocator, p, .{
+        .kind = .cloud,
+        .host = "192.168.1.20",
+        .port = 4790,
+        .token = "0123456789abcdef0123456789abcdef",
+        .cloud_host = "relay.example.com",
+        .cloud_port = 8443,
+    }, .dark, "nord", .tabs));
+    const s = loadFile(testing.io, testing.allocator, p) orelse return error.NotRead;
+    defer s.deinit(testing.allocator);
+    try testing.expectEqual(Kind.cloud, s.kind);
+    try testing.expectEqualStrings("relay.example.com", s.cloud_host);
+    try testing.expectEqual(@as(u16, 8443), s.cloud_port);
+    // The LAN address it falls back to survives alongside it.
+    try testing.expectEqualStrings("192.168.1.20", s.host);
+
+    // A file written before the relay existed is a phone on the LAN.
+    var f = try std.Io.Dir.cwd().createFile(testing.io, dir ++ "/old.json", .{ .truncate = true });
+    try f.writeStreamingAll(testing.io, "{\"host\":\"127.0.0.1\",\"port\":4789,\"token\":\"0123456789abcdef0123456789abcdef\"}");
+    f.close(testing.io);
+    const old = loadFile(testing.io, testing.allocator, dir ++ "/old.json") orelse return error.NotRead;
+    defer old.deinit(testing.allocator);
+    try testing.expectEqual(Kind.lan, old.kind);
+    try testing.expectEqual(port_cloud_default, old.cloud_port);
+    try testing.expectEqualStrings("", old.cloud_host);
 }

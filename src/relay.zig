@@ -306,6 +306,31 @@ pub const Hub = struct {
 
     /// Sends what a change in the last `min_interval` held back. The frame
     /// after a change always comes, so nothing waits for another one.
+    /// A phone that reached us through the cloud relay: `sink` takes its
+    /// events, `feed` brings its commands. It says hello with the token like
+    /// any other client, so nothing is special about it afterwards.
+    pub fn addCloud(h: *Hub, sink: Sink) !*Conn {
+        const c = try h.gpa.create(Conn);
+        c.* = .{ .hub = h, .sink = sink };
+        errdefer h.gpa.destroy(c);
+        try h.conns.append(h.gpa, c);
+        return c;
+    }
+
+    /// Bytes from a cloud client: whole lines go to `command`, the rest waits,
+    /// as they would have in the socket's read.
+    pub fn feed(h: *Hub, c: *Conn, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        c.in.appendSlice(h.gpa, bytes) catch return h.drop(c);
+        if (c.in.items.len > max_waiting) return h.drop(c);
+        h.consume(c);
+    }
+
+    /// A cloud client hung up: freed as any other client is.
+    pub fn remove(h: *Hub, c: *Conn) void {
+        h.drop(c);
+    }
+
     pub fn tick(h: *Hub) void {
         if (!h.pending) return;
         if (h.conns.items.len == 0) {
@@ -609,7 +634,7 @@ pub const Hub = struct {
         aw.writer.writeByte('\n') catch return;
         const bytes = aw.written();
         if (c) |conn| {
-            if (!writeAll(conn.fd, bytes)) h.drop(conn);
+            if (!writeConn(conn, bytes)) h.drop(conn);
         } else h.broadcast(bytes);
     }
 
@@ -639,7 +664,7 @@ pub const Hub = struct {
             i -= 1;
             const c = h.conns.items[i];
             if (!c.authed) continue;
-            if (!writeAll(c.fd, bytes)) h.drop(c);
+            if (!writeConn(c, bytes)) h.drop(c);
         }
     }
 
@@ -663,7 +688,10 @@ pub const Hub = struct {
                 c.watch = null;
                 w.cancel();
             }
-            _ = sys.close(c.fd);
+            if (c.sink) |s| {
+                if (s.closed) |closed| closed(s.ctx);
+            }
+            if (c.fd >= 0) _ = sys.close(c.fd);
             c.in.deinit(h.gpa);
             h.gpa.destroy(c);
             return;
@@ -763,7 +791,20 @@ pub const Hub = struct {
             return true;
         };
         if (std.mem.eql(u8, m.op, "hello")) {
-            if (m.token.len != 32 or !std.crypto.timing_safe.eql([32]u8, m.token[0..32].*, h.token)) {
+            // A client that came through the cloud relay has no socket: the
+            // tunnel it arrived on was opened with the cloud token, and the
+            // phone had to say the same token to reach it, so there is no
+            // second token to ask for here.
+            //
+            // This is a deliberate trust boundary, not an oversight: whoever
+            // holds the cloud token can start a terminal here, exactly as a
+            // holder of the LAN token can. `sink` clients are therefore only
+            // created by the tunnel, never by a local listener — see
+            // `addCloud`. Nothing end-to-end protects the traffic: it is
+            // authenticated by the relay, not by nanoterm.
+            if (c.sink == null and
+                (m.token.len != 32 or !std.crypto.timing_safe.eql([32]u8, m.token[0..32].*, h.token)))
+            {
                 h.refuse(c, "the token is not this relay's");
                 return false;
             }
@@ -896,7 +937,12 @@ pub const Hub = struct {
             c.in.appendSlice(h.gpa, chunk[0..@intCast(n)]) catch return h.drop(c);
             if (c.in.items.len > max_waiting) return h.drop(c);
         }
-        // Whole lines, in the order they came; the rest waits.
+        h.consume(c);
+    }
+
+    /// Whole lines, in the order they came; the rest waits. A client that a
+    /// reply could not be written to is dropped here — its bytes went with it.
+    fn consume(h: *Hub, c: *Conn) void {
         var used: usize = 0;
         var keep = true;
         while (std.mem.indexOfScalar(u8, c.in.items[used..], '\n')) |at| {
@@ -912,8 +958,6 @@ pub const Hub = struct {
                 keep = false;
                 break;
             }
-            // A reply that could not be written dropped the client already;
-            // its bytes went with it.
             if (!h.alive(c)) return;
         }
         if (!h.alive(c)) return;
@@ -927,13 +971,31 @@ pub const Hub = struct {
 };
 
 /// A client: its socket, and the bytes of a command that has not all come.
-const Conn = struct {
+/// A phone that arrived through the cloud relay has no socket: its bytes go
+/// to `sink` instead, and `feed` brings its commands in.
+pub const Conn = struct {
     hub: *Hub,
-    fd: c_int,
+    fd: c_int = -1,
+    sink: ?Sink = null,
     watch: ?fdwatch.Watch = null,
     in: std.ArrayList(u8) = .empty,
     authed: bool = false,
 };
+
+/// Where a client's events go when it is not a socket: `session.zig` carries
+/// them as frames of the cloud relay's WebSocket. `write` answers false when
+/// the socket is gone; `closed` hears about it, so the peer can be forgotten
+/// before the client it describes is freed.
+pub const Sink = struct {
+    ctx: *anyopaque,
+    write: *const fn (ctx: *anyopaque, bytes: []const u8) bool,
+    closed: ?*const fn (ctx: *anyopaque) void = null,
+};
+
+fn writeConn(c: *Conn, bytes: []const u8) bool {
+    if (c.sink) |s| return s.write(s.ctx, bytes);
+    return writeAll(c.fd, bytes);
+}
 
 fn tokenFor(io: std.Io, options: Options) ![32]u8 {
     if (options.token.len > 0) {

@@ -18,6 +18,8 @@ test {
     _ = @import("tests_visual.zig");
     _ = @import("tests_visual_mcp.zig");
     _ = @import("tests_relay.zig");
+    _ = @import("ws_client.zig");
+    _ = @import("cloud_relay.zig");
     _ = @import("tests_visual_view.zig");
     _ = @import("tests_fold.zig");
     _ = @import("tests_copy.zig");

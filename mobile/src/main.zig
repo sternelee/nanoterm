@@ -18,6 +18,9 @@ const ui = nanoui.ui;
 const fdwatch = nanoui.fdwatch;
 const settings = @import("settings.zig");
 const md = @import("markdown");
+/// The desktop's websocket client, so a phone behind a relay speaks to the
+/// workstation the way the relay's own clients do.
+const ws_client = @import("relay_ws");
 const highlight = @import("highlight");
 /// The desktop's palette: the phone wears the same theme.
 const theme = @import("theme");
@@ -871,6 +874,8 @@ const Notification = struct {
 const Dial = struct {
     state: std.atomic.Value(u8) = .init(0),
     stream: std.Io.net.Stream = undefined,
+    /// Set instead of `stream` when the relay is reached over a websocket.
+    ws: ?*ws_client.Ws = null,
     err: [64]u8 = @splat(0),
     err_len: usize = 0,
 };
@@ -880,6 +885,9 @@ pub const Phone = struct {
     io: std.Io,
     window: ?*nanoui.Window = null,
     stream: ?std.Io.net.Stream = null,
+    /// The websocket to the cloud relay, when that is how this phone came
+    /// in: it carries the same lines the socket would.
+    ws: ?*ws_client.Ws = null,
     watch: ?fdwatch.Watch = null,
     /// A dial running off the UI thread: std's connect has no timeout, so a
     /// connect to an unreachable relay would freeze the app. The worker
@@ -962,6 +970,13 @@ pub const Phone = struct {
     port: u16 = 4789,
     host: [64]u8 = @splat(0),
     host_len: usize = 0,
+    /// How the phone reaches the workstation: the LAN it sits on, a
+    /// Tailscale name that works anywhere, or the relay in front of it.
+    kind: settings.Kind = .lan,
+    /// The relay in front of the workstation, when `kind` is cloud.
+    cloud_host: [64]u8 = @splat(0),
+    cloud_host_len: usize = 0,
+    cloud_port: u16 = 443,
     /// Theme preference: system, light, or dark.
     theme_pref: settings.ThemePreference = .system,
     /// A named theme from the desktop's shelf (id), empty to follow the
@@ -985,6 +1000,12 @@ pub const Phone = struct {
                 p.host_len = saved.host.len;
             }
             p.port = saved.port;
+            p.kind = saved.kind;
+            p.cloud_port = saved.cloud_port;
+            if (saved.cloud_host.len <= p.cloud_host.len) {
+                @memcpy(p.cloud_host[0..saved.cloud_host.len], saved.cloud_host);
+                p.cloud_host_len = saved.cloud_host.len;
+            }
             p.theme_pref = saved.theme;
             if (saved.theme_id.len <= p.theme_choice.len) {
                 @memcpy(p.theme_choice[0..saved.theme_id.len], saved.theme_id);
@@ -1038,7 +1059,21 @@ pub const Phone = struct {
             p.dial_thread = null;
         }
         if (p.dial) |d| {
-            if (d.state.load(.acquire) != 0) p.gpa.destroy(d);
+            // A dial the worker finished but the UI never picked up: its
+            // socket is still open, so it has to be closed here — the phone
+            // that opened the tunnel is going away, and nothing would ever
+            // read from it again. One still dialing leaks with the exit.
+            switch (d.state.load(.acquire)) {
+                1 => {
+                    if (d.ws) |w| {
+                        w.deinit();
+                        p.gpa.destroy(w);
+                    }
+                    p.gpa.destroy(d);
+                },
+                2 => p.gpa.destroy(d),
+                else => {},
+            }
             p.dial = null;
         }
         for (p.feed.items) |*f| f.deinit(p.gpa);
@@ -1067,6 +1102,15 @@ pub const Phone = struct {
     }
 
     pub fn close(p: *Phone) void {
+        if (p.ws) |w| {
+            w.ctx = null;
+            w.onMessage = null;
+            w.onClosed = null;
+            w.close(1000, "bye");
+            w.deinit();
+            p.gpa.destroy(w);
+            p.ws = null;
+        }
         if (p.watch) |w| w.cancel();
         p.watch = null;
         if (p.stream) |s| s.close(p.io);
@@ -1080,6 +1124,34 @@ pub const Phone = struct {
         p.close();
         if (!p.has_token) {
             p.fail("no token: --token, or NANOTERM_RELAY_TOKEN");
+            return;
+        }
+        // A relay in front of the workstation is reached the way the
+        // relay's own clients are: a websocket under the token's path.
+        if (p.kind == .cloud) {
+            var urlbuf: [256]u8 = undefined;
+            const url = std.fmt.bufPrint(&urlbuf, "wss://{s}:{d}/c/{s}/phone", .{
+                p.cloud_host[0..p.cloud_host_len], p.cloud_port, p.token,
+            }) catch {
+                p.fail("the cloud address is too long");
+                return;
+            };
+            var copy: [256]u8 = @splat(0);
+            @memcpy(copy[0..url.len], url);
+            const cd = p.gpa.create(Dial) catch {
+                p.fail("out of memory");
+                return;
+            };
+            cd.* = .{};
+            p.dial = cd;
+            p.status = .connecting;
+            p.dial_thread = std.Thread.spawn(.{}, wsWorker, .{ p.gpa, p.io, copy, url.len, cd }) catch |err| {
+                p.gpa.destroy(cd);
+                p.dial = null;
+                p.fail(@errorName(err));
+                return;
+            };
+            nanoui.App.after(40, p, pollDial);
             return;
         }
         const host = p.host[0..p.host_len];
@@ -1122,6 +1194,37 @@ pub const Phone = struct {
         d.state.store(1, .release);
     }
 
+    /// Records a failed dial from a worker thread.
+    fn wsFail(d: *Dial, why: []const u8) void {
+        d.err_len = @min(why.len, d.err.len);
+        @memcpy(d.err[0..d.err_len], why[0..d.err_len]);
+        d.state.store(2, .release);
+    }
+
+    /// The worker for a cloud relay: the websocket is dialed and
+    /// handshaken off the UI thread, as a socket is.
+    fn wsWorker(gpa: std.mem.Allocator, io: std.Io, url: [256]u8, url_len: usize, d: *Dial) void {
+        const w = gpa.create(ws_client.Ws) catch {
+            wsFail(d, "out of memory");
+            return;
+        };
+        // The phone has no CA store to verify a relay against, so the tunnel is
+        // encrypted but unauthenticated; mobile/README.md says so.
+        w.* = ws_client.Ws.connectWith(gpa, io, url[0..url_len], .insecure) catch |err| {
+            gpa.destroy(w);
+            wsFail(d, @errorName(err));
+            return;
+        };
+        w.start() catch |err| {
+            w.deinit();
+            gpa.destroy(w);
+            wsFail(d, @errorName(err));
+            return;
+        };
+        d.ws = w;
+        d.state.store(1, .release);
+    }
+
     /// Polls the dial from the UI thread until it turns.
     fn pollDial(ctx: ?*anyopaque) callconv(.c) void {
         const p: *Phone = @ptrCast(@alignCast(ctx.?));
@@ -1141,13 +1244,21 @@ pub const Phone = struct {
             t.join();
             p.dial_thread = null;
         }
-        p.stream = d.stream;
-        const fd = p.stream.?.socket.handle;
-        p.gpa.destroy(d);
-        p.watch = fdwatch.readable(fd, p, onReadable) catch |err| {
-            p.fail(@errorName(err));
-            return;
-        };
+        if (d.ws) |w| {
+            w.ctx = p;
+            w.onMessage = onWsFrame;
+            w.onClosed = onWsClosed;
+            p.ws = w;
+            p.gpa.destroy(d);
+        } else {
+            p.stream = d.stream;
+            const fd = p.stream.?.socket.handle;
+            p.gpa.destroy(d);
+            p.watch = fdwatch.readable(fd, p, onReadable) catch |err| {
+                p.fail(@errorName(err));
+                return;
+            };
+        }
         p.status = .live;
         var buf: [96]u8 = undefined;
         const hello = std.fmt.bufPrint(&buf, "{{\"op\":\"hello\",\"token\":\"{s}\"}}\n", .{p.token}) catch return;
@@ -1223,6 +1334,12 @@ pub const Phone = struct {
             // A short read is the end of what had come.
             if (n < buf.len) break;
         }
+        p.consume();
+    }
+
+    /// Splits what has come into lines and hands each to `event`: the
+    /// socket and the relay's websocket carry the same lines.
+    fn consume(p: *Phone) void {
         while (std.mem.indexOfScalar(u8, p.in.items, '\n')) |at| {
             const line = p.in.items[0..at];
             p.event(line);
@@ -1232,6 +1349,32 @@ pub const Phone = struct {
         }
         if (p.in.items.len > max_waiting) p.in.clearRetainingCapacity();
         p.draw();
+    }
+
+    /// A whole line from the relay, whether it came as text or binary.
+    fn wsPush(p: *Phone, bytes: []const u8) void {
+        p.in.appendSlice(p.gpa, bytes) catch return;
+        if (p.in.items.len == 0 or p.in.items[p.in.items.len - 1] != '\n') {
+            p.in.append(p.gpa, '\n') catch return;
+        }
+        p.consume();
+    }
+
+    fn onWsFrame(ctx: ?*anyopaque, frame: ws_client.Frame) void {
+        const p: *Phone = @ptrCast(@alignCast(ctx.?));
+        switch (frame) {
+            .text => |t| p.wsPush(t),
+            .binary => |b| p.wsPush(b),
+            .close => p.fail("the relay closed the connection"),
+            else => {},
+        }
+    }
+
+    fn onWsClosed(ctx: ?*anyopaque, code: u16, reason: []const u8) void {
+        _ = code;
+        _ = reason;
+        const p: *Phone = @ptrCast(@alignCast(ctx.?));
+        p.fail("the relay closed the connection");
     }
 
     /// One event, rendered as the thing it is, not as JSON.
@@ -1713,6 +1856,10 @@ pub const Phone = struct {
     /// A line to the relay, whole: a partial one would be read as JSON
     /// and refused.
     pub fn write(p: *Phone, bytes: []const u8) void {
+        if (p.ws) |w| {
+            if (!w.sendText(bytes)) p.fail("the relay closed the connection");
+            return;
+        }
         const s = p.stream orelse return;
         var wbuf: [512]u8 = undefined;
         var out = s.writer(p.io, &wbuf);
@@ -1817,7 +1964,7 @@ pub const Phone = struct {
     /// The layout and theme, saved as the connect fields were.
     fn persist(p: *Phone) void {
         if (!p.has_token) return;
-        _ = settings.save(p.io, p.gpa, p.host[0..p.host_len], p.port, &p.token, p.theme_pref, p.themeId(), p.layout);
+        _ = settings.save(p.io, p.gpa, p.connOf(p.host[0..p.host_len], p.port, &p.token), p.theme_pref, p.themeId(), p.layout);
     }
 
     /// Tabs as pills, or the desktop's sidebar as a drawer.
@@ -1861,9 +2008,16 @@ pub const Phone = struct {
     /// The connect screen's fields, from what the phone has now: a second
     /// visit starts where the first one ended.
     pub fn fillConnect(p: *Phone) void {
-        p.host_input.set(p.host[0..p.host_len]);
+        // The fields hold whichever address this way of connecting needs:
+        // the relay on the LAN, or the one in front of it.
+        if (p.kind == .cloud) {
+            p.host_input.set(p.cloud_host[0..p.cloud_host_len]);
+        } else {
+            p.host_input.set(p.host[0..p.host_len]);
+        }
         var buf: [8]u8 = undefined;
-        p.port_input.set(std.fmt.bufPrint(&buf, "{d}", .{p.port}) catch "4789");
+        const port: u16 = if (p.kind == .cloud) p.cloud_port else p.port;
+        p.port_input.set(std.fmt.bufPrint(&buf, "{d}", .{port}) catch "4789");
         p.token_input.set(if (p.has_token) &p.token else "");
         p.connect_why_len = 0;
     }
@@ -1887,16 +2041,26 @@ pub const Phone = struct {
         if (token.len != settings.token_len) return p.connectFail("the token, all 32 characters of it: nanoterm prints it");
         const port = std.fmt.parseInt(u16, port_text, 10) catch
             return p.connectFail("a port, as a number: 4789 unless the relay said otherwise");
-        @memcpy(p.host[0..host.len], host);
-        p.host_len = host.len;
-        p.port = port;
         @memcpy(&p.token, token);
         p.has_token = true;
-        const printed: []u8 = std.fmt.bufPrint(&p.where, "{s}:{d}", .{ p.host[0..p.host_len], p.port }) catch p.where[0..0];
+        // Cloud keeps its own address: the LAN one is still the fallback
+        // when the relay is not what this phone came in through.
+        const shown: []const u8, const shown_port: u16 = if (p.kind == .cloud) blk: {
+            @memcpy(p.cloud_host[0..host.len], host);
+            p.cloud_host_len = host.len;
+            p.cloud_port = port;
+            break :blk .{ p.cloud_host[0..p.cloud_host_len], p.cloud_port };
+        } else blk: {
+            @memcpy(p.host[0..host.len], host);
+            p.host_len = host.len;
+            p.port = port;
+            break :blk .{ p.host[0..p.host_len], p.port };
+        };
+        const printed: []u8 = std.fmt.bufPrint(&p.where, "{s}:{d}", .{ shown, shown_port }) catch p.where[0..0];
         p.where_len = printed.len;
         // Saved before it is tried: a phone that cannot save still works
         // for this run, and one that can does not ask again.
-        _ = settings.save(p.io, p.gpa, host, port, token, p.theme_pref, p.themeId(), p.layout);
+        _ = settings.save(p.io, p.gpa, p.connOf(host, port, token), p.theme_pref, p.themeId(), p.layout);
         // Save to recent connections history.
         p.saveConnection(host, port, token);
         p.connect_why_len = 0;
@@ -1908,6 +2072,19 @@ pub const Phone = struct {
     }
 
     /// Save a connection to the recent history, keeping last 5.
+    /// What the fields say, as the file takes it: the mode and the relay
+    /// address only change on the connect screen.
+    fn connOf(p: *Phone, host: []const u8, port: u16, token: []const u8) settings.Conn {
+        return .{
+            .kind = p.kind,
+            .host = host,
+            .port = port,
+            .token = token,
+            .cloud_host = p.cloud_host[0..p.cloud_host_len],
+            .cloud_port = p.cloud_port,
+        };
+    }
+
     fn saveConnection(p: *Phone, host: []const u8, port: u16, token: []const u8) void {
         // Check if already exists, update last_used.
         for (p.saved_connections.items) |*s| {
@@ -2044,9 +2221,26 @@ pub const Phone = struct {
             ui.text(c, "Workstation", .{ .size = 13, .weight = .semibold, .color = c.theme.muted });
             const box = ui.div(c).column().wFull().p(16).gap(12).bg(c.theme.surface).rounded(12).border(c.theme.border);
             defer box.end();
-            ui.text(c, "The relay on the machine running nanoterm prints the address and a token.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
-            _ = p.field(c, "Host", "127.0.0.1 or workstation name", &p.host_input, false, true);
-            _ = p.field(c, "Port", "4789", &p.port_input, false, false);
+            ui.text(c, if (p.kind == .cloud)
+                "The cloud relay holds the tunnel open, so this address reaches the workstation from anywhere."
+            else
+                "The relay on the machine running nanoterm prints the address and a token.", .{ .size = 13, .color = c.theme.muted, .wrap = true, .leading = 1.4 });
+            {
+                const modes = [_][]const u8{ "LAN", "Tailscale", "Cloud" };
+                const kinds = [_]settings.Kind{ .lan, .tailscale, .cloud };
+                const row = ui.div(c).row().wFull().gap(8);
+                defer row.end();
+                for (modes, kinds) |label, kind| {
+                    if (ui.button(c, label, .{ .size = 13, .variant = if (p.kind == kind) .primary else .secondary }).clicked) {
+                        if (p.kind != kind) {
+                            p.kind = kind;
+                            p.fillConnect();
+                        }
+                    }
+                }
+            }
+            _ = p.field(c, if (p.kind == .cloud) "Relay host" else "Host", if (p.kind == .cloud) "relay.example.com" else "127.0.0.1 or workstation name", &p.host_input, false, true);
+            _ = p.field(c, "Port", if (p.kind == .cloud) "443" else "4789", &p.port_input, false, false);
             const token = p.field(c, "Token", "the 32 characters from relay", &p.token_input, false, true);
             if (ui.button(c, if (p.status == .connecting) "Connecting…" else "Connect", .{
                 .size = 14,
@@ -2115,7 +2309,7 @@ pub const Phone = struct {
                     p.theme_pref = next;
                     const host = p.host[0..p.host_len];
                     const port = p.port;
-                    if (p.has_token) _ = settings.save(p.io, p.gpa, host, port, &p.token, p.theme_pref, p.themeId(), p.layout);
+                    if (p.has_token) _ = settings.save(p.io, p.gpa, p.connOf(host, port, &p.token), p.theme_pref, p.themeId(), p.layout);
                     p.notify(.info, "Theme: {s}", .{if (p.theme_choice_len > 0) p.themeId() else @tagName(p.theme_pref)});
                 }
             }

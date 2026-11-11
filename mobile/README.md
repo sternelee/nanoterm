@@ -30,6 +30,20 @@ Through a tunnel (Tailscale, a Cloudflare tunnel, `ssh -L`), `--host` is the
 tunnel's address on the phone and the port is the same: the relay itself
 never leaves the loopback of the Mac.
 
+With **Cloud** picked on the connect screen, the phone reaches the Mac from
+anywhere without a tunnel of your own. It dials a relay you run —
+[alma-relay](../alma-relay) is one, a Cloudflare Worker over a Durable
+Object — at `wss://<host>/c/<token>/phone`, and the Mac, which dialled the
+same relay, is at the other end. The address and the token are the relay's:
+the same 32 characters, matched by their hash, sent in the clear only to
+the relay that already holds them.
+
+That tunnel is encrypted but not authenticated: Android builds here have no
+certificate store to check the relay against, so the phone accepts whatever
+certificate the relay presents. The token is what stands for the relay's
+identity — keep it to yourself, and remember that whoever runs the relay can
+read what the tunnel carries.
+
 ## What it shows, and what it does
 
 The tabs and what happens in them, rendered as what they are rather than as

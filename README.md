@@ -298,6 +298,44 @@ back: `run`, `ask`, `interrupt`, `answer` for a permission (by `rpc` and
 option), and `list` for everything again. Each event carries a `seq`, so a
 phone whose tunnel dropped knows what it missed and can start over.
 
+### Through a cloud relay
+
+A relay you run yourself — [alma-relay](../alma-relay) is one: a Cloudflare
+Worker in front of a Durable Object — puts the same tabs on the phone from
+anywhere, and still without a port open on the workstation. nanoterm dials
+the relay itself and stays the far end of that tunnel; the relay only holds
+the two sockets together and never sees the token.
+
+Settings → Relay → Cloud takes the relay's host, port (443 unless it says
+otherwise) and the same 32-character token. nanoterm connects to
+`wss://<host>:<port>/agent?th=<sha256 of the token>` and registers as an
+agent, protocol 2: the phone's HTTP requests arrive as `hreq` and its
+websocket as `wopen`/`wmsg`/`wclose`, each answered over the same tunnel by
+id. Nothing else about the session changes — the same `hello`, the same
+`block` and `turn` frames.
+
+A host that starts with `ws://` or `wss://` is used as it stands, port
+included, which is how a relay running in plaintext — a local `wrangler dev`,
+or one behind a proxy that terminates TLS — is reached while developing.
+
+The phone picks **Cloud** on its connect screen and enters the relay's
+address and that token; it dials `wss://<host>/c/<token>/phone`, and the
+relay matches the two ends by the token's hash.
+
+The tunnel is TLS with the certificate verified against this machine's
+store. A relay whose certificate cannot be checked — a self-signed one, or
+one behind a proxy that presents its own — needs **Accept any certificate
+from this relay** in Settings → Relay → Cloud, which encrypts the tunnel but
+no longer authenticates the far end. The phone has no certificate store of
+its own, so it always connects that way.
+
+Trust in the tunnel ends at the relay: a phone that arrives through it has
+already proved it knows the cloud token, so nanoterm does not ask for the
+LAN token a second time (`src/relay.zig`, `hello`). Whoever holds that token
+can therefore start a terminal on this machine, exactly as the LAN token
+allows over a network. Anything that can read the tunnel's traffic at the
+relay can read the sessions on it.
+
 What a phone gets is the tail of each block's text (8 KB), not a terminal
 screen: it reads the command and what it printed, it does not emulate the
 pane. The client is a nanoui app with native UI (`Content.page` is not on

@@ -634,6 +634,74 @@ fn privacy(c: *ui.Context, w: *Workspace) void {
     if (ui.button(c, "Terms", .{ .variant = .ghost, .size = 11.5, .icon = "doc.text" }).clicked) _ = nanoui.shell.openUrl(an.terms_url);
 }
 
+/// What the cloud relay needs: which alma-relay to dial, and the token that
+/// relay checks. Kept as buffers so typing in one frame survives the next.
+var cloud_host_buf: ui.TextBuffer = .{};
+var cloud_port_buf: ui.TextBuffer = .{};
+var cloud_token_buf: ui.TextBuffer = .{};
+/// Seeded once, so a field the user empties is not filled in again.
+var cloud_seeded = false;
+
+fn cloudFields(c: *ui.Context, w: *Workspace) void {
+    const p = &w.shared.prefs;
+    if (!cloud_seeded) {
+        cloud_seeded = true;
+        cloud_host_buf.set(p.cloud_host);
+        var port_buf: [8]u8 = undefined;
+        cloud_port_buf.set(std.fmt.bufPrint(&port_buf, "{d}", .{p.cloud_port}) catch "443");
+        cloud_token_buf.set(p.cloud_token);
+    }
+
+    ui.text(c, "Relay host", .{ .size = 11.5, .color = theme.muted });
+    _ = ui.textField(c, &cloud_host_buf, .{ .placeholder = "relay.example.com", .width = .fill });
+    ui.text(c, "Port", .{ .size = 11.5, .color = theme.muted });
+    _ = ui.textField(c, &cloud_port_buf, .{ .placeholder = "443", .width = .fill, .mono = true });
+    ui.text(c, "Relay token", .{ .size = 11.5, .color = theme.muted });
+    _ = ui.textField(c, &cloud_token_buf, .{ .placeholder = "The token this relay was started with", .width = .fill, .password = true });
+
+    var insecure = p.cloud_insecure;
+    if (ui.toggle(c, "Accept any certificate from this relay", &insecure)) p.setCloudInsecure(insecure);
+    if (p.cloud_insecure) {
+        ui.text(c, "The tunnel is encrypted but not authenticated: anyone who can intercept it can read the phone's traffic. Leave this off unless the relay's certificate cannot be verified any other way.", .{ .size = 11, .color = theme.failure, .wrap = true });
+    }
+
+    const live = w.shared.cloudLive();
+    const row = ui.div(c).row().gap(8).itemsCenter();
+    defer row.end();
+    if (ui.button(c, if (live) "Reconnect" else "Connect", .{ .variant = .primary, .size = 12 }).clicked) {
+        const host = std.mem.trim(u8, cloud_host_buf.text(), " \t\r\n");
+        const token = std.mem.trim(u8, cloud_token_buf.text(), " \t\r\n");
+        if (host.len == 0 or token.len == 0) {
+            ui.text(c, "A host and the relay's token are both needed.", .{ .size = 11, .color = theme.failure, .wrap = true });
+        } else {
+            p.setCloudHost(host);
+            p.setCloudPort(std.fmt.parseInt(u16, std.mem.trim(u8, cloud_port_buf.text(), " \t\r\n"), 10) catch 443);
+            p.setCloudToken(token);
+            p.setRelay(.cloud, p.relay_port);
+            w.shared.applyRelay(.cloud) catch |err| {
+                ui.text(c, c.print("The cloud relay did not connect: {s}", .{@errorName(err)}), .{ .size = 11, .color = theme.failure, .wrap = true });
+            };
+        }
+    }
+    if (live) {
+        if (ui.button(c, "Disconnect", .{ .size = 12 }).clicked) {
+            p.setRelay(.off, p.relay_port);
+            w.shared.applyRelay(.off) catch {};
+        }
+    }
+
+    if (w.shared.cloud_relay) |cr| {
+        if (cr.closed) {
+            ui.text(c, "The relay dropped the tunnel. Connect again to reopen it.", .{ .size = 12, .color = theme.failure, .wrap = true });
+        } else {
+            ui.text(c, c.print("Connected to {s}:{d}, protocol {d}", .{ p.cloud_host, p.cloud_port, cr.proto }), .{ .size = 12.5, .weight = .semibold });
+            ui.text(c, "The phone's Connect screen wants this host and this token: it builds https://host/c/token/ itself.", .{ .size = 11, .color = theme.muted, .wrap = true });
+        }
+    } else {
+        ui.text(c, "Not connected.", .{ .size = 12, .color = theme.muted });
+    }
+}
+
 /// The phone's relay: off, on the LAN, or over Tailscale — the addresses a
 /// phone must be told, and the token it has to say when it connects.
 fn relayPage(c: *ui.Context, w: *Workspace) void {
@@ -645,13 +713,21 @@ fn relayPage(c: *ui.Context, w: *Workspace) void {
         defer b.end();
         ui.text(c, "A phone reads this machine's tabs through the relay, and runs in them too.", .{ .size = 12, .color = theme.muted, .wrap = true });
 
-        const order = [_][]const u8{ "Off", "LAN", "Tailscale" };
+        const order = [_][]const u8{ "Off", "LAN", "Tailscale", "Cloud" };
         var picked: usize = @backingInt(p.relay);
         if (ui.segmented(c, &order, &picked)) {
-            p.relay = @as(settings.Relay, @fromBackingInt(@intCast(picked)));
-            w.shared.setRelay(p.relay, p.relay_port) catch |err| {
+            const mode = @as(settings.Relay, @fromBackingInt(@intCast(picked)));
+            p.setRelay(mode, p.relay_port);
+            w.shared.applyRelay(mode) catch |err| {
                 ui.text(c, c.print("The relay did not start: {s}", .{@errorName(err)}), .{ .size = 11, .color = theme.failure, .wrap = true });
             };
+        }
+
+        // Through a relay this machine does not run: alma-relay, wherever it
+        // is, dialled by this machine and by the phone alike.
+        if (p.relay == .cloud) {
+            cloudFields(c, w);
+            return;
         }
 
         const h = w.shared.relay;

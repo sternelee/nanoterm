@@ -8,6 +8,7 @@ const session_mod = @import("session.zig");
 const ws_mod = @import("workspace.zig");
 const actions = @import("actions.zig");
 const relay = @import("relay.zig");
+const ws_client = @import("ws_client.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
 const Workspace = ws_mod.Workspace;
@@ -105,12 +106,32 @@ pub fn main(init: std.process.Init) !void {
     const mode: settings.Relay = if (relay_port != null)
         (if (shared.prefs.relay == .off) .lan else shared.prefs.relay)
     else shared.prefs.relay;
-    const port: ?u16 = relay_port orelse (if (shared.prefs.relay != .off) shared.prefs.relay_port else null);
-    if (port) |p| {
-        shared.setRelay(mode, p) catch |err| {
-            std.log.err("nanoterm: the relay did not start: {s}", .{@errorName(err)});
+    if (mode == .cloud) {
+        // Cloudflare relay (alma-relay): the phone reaches us through it.
+        shared.setCloudRelay(
+            .cloud,
+            shared.prefs.cloud_host,
+            shared.prefs.cloud_port,
+            shared.prefs.cloud_token,
+        ) catch |err| {
+            std.log.err("nanoterm: the cloud relay did not connect: {s}", .{@errorName(err)});
         };
-        if (shared.relay) |h| std.log.info("nanoterm: relay on port {d}, token {s}", .{ h.port(), relay.Hub.tokenHex(h) });
+        if (shared.cloudLive()) {
+            const host = shared.prefs.cloud_host;
+            if (std.mem.startsWith(u8, host, "ws://") or std.mem.startsWith(u8, host, "wss://")) {
+                std.log.info("nanoterm: cloud relay connected to {s}", .{host});
+            } else {
+                std.log.info("nanoterm: cloud relay connected to {s}:{d}", .{ host, shared.prefs.cloud_port });
+            }
+        }
+    } else {
+        const port: ?u16 = relay_port orelse (if (shared.prefs.relay != .off) shared.prefs.relay_port else null);
+        if (port) |p| {
+            shared.setRelay(mode, p) catch |err| {
+                std.log.err("nanoterm: the relay did not start: {s}", .{@errorName(err)});
+            };
+            if (shared.relay) |h| std.log.info("nanoterm: relay on port {d}, token {s}", .{ h.port(), relay.Hub.tokenHex(h) });
+        }
     }
 
     shared.window = try app.newWindow(.{

@@ -35,6 +35,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "nanoui", .module = fork.module("nanoui") }},
     });
+    // The desktop's websocket client, so a phone can reach the workstation
+    // through the cloud relay the same way the desktop reaches it.
+    const relay_ws = b.createModule(.{
+        .root_source_file = b.path("../src/ws_client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = fork.module("nanoui") }},
+    });
     // The desktop's palette, so the phone wears the same theme.
     const theme = b.createModule(.{
         .root_source_file = b.path("../src/theme.zig"),
@@ -54,6 +62,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "markdown", .module = markdown },
                 .{ .name = "highlight", .module = highlight },
                 .{ .name = "theme", .module = theme },
+                .{ .name = "relay_ws", .module = relay_ws },
             },
         }),
     });
