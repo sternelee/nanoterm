@@ -160,10 +160,10 @@ index eab73bd6a..04989e457 100644
          try std.testing.expect(spec.source != .global_fx);
      }
 diff --git a/src/core/agent/runtime/orchestrator.zig b/src/core/agent/runtime/orchestrator.zig
-index b294a346d..06205eee1 100644
+index 895620ded..f25f0c39a 100644
 --- a/src/core/agent/runtime/orchestrator.zig
 +++ b/src/core/agent/runtime/orchestrator.zig
-@@ -8800,10 +8800,14 @@ fn processQueuedPromptLoop(
+@@ -9300,10 +9300,14 @@ fn processQueuedPromptLoop(
                              reset_stream_for_next_attempt = true;
                              continue;
                          }
@@ -183,16 +183,17 @@ index b294a346d..06205eee1 100644
                  }
              }
 diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
-index 647759058..2ae04b527 100644
+index 87eda48a3..f9233748d 100644
 --- a/src/core/cli/cli_ask.zig
 +++ b/src/core/cli/cli_ask.zig
-@@ -1,5 +1,4 @@
+@@ -1,6 +1,5 @@
  const std = @import("std");
+ const toolbox = @import("../tooling/toolbox.zig");
 -const command_specs = @import("../slash_commands/command_specs.zig");
  const testing_allocator = @import("../shared/testing_allocator.zig");
  const std_builtin = @import("builtin");
  const command_admission = @import("../permissions/command_admission.zig");
-@@ -39,15 +38,8 @@ const shell_snapshot = @import("../terminal/shell_snapshot.zig");
+@@ -40,22 +39,16 @@ const shell_snapshot = @import("../terminal/shell_snapshot.zig");
  const session_title_generation = @import("../session/session_title_generation.zig");
  const compactor = @import("../compactor/compactor.zig");
  const config_runtime = @import("../config/config_runtime.zig");
@@ -202,13 +203,13 @@ index 647759058..2ae04b527 100644
 -const flag_placement = @import("flag_placement.zig");
  const model_capabilities = @import("../config/model_capabilities.zig");
  const model_provider = @import("../config/model_provider.zig");
+ const token_pass = @import("../gateway/token_pass.zig");
 -const builtin_commands = @import("../../builtins/commands.zig");
 -const cli_flags = @import("cli_flags.zig");
 -const output_contracts = @import("../output/output_contracts.zig");
  const mcp_elicitation_interaction = @import("../mcp/elicitation_interaction.zig");
  const mcp_elicitation = @import("../mcp/elicitation.zig");
  const mcp_access_policy = @import("../mcp/access_policy.zig");
-@@ -55,6 +47,7 @@ const mcp_model_catalog = @import("../mcp/model_catalog.zig");
  const mcp_host = @import("../mcp_host/host.zig");
  const mcp_verbs = @import("../mcp_host/verbs.zig");
  const mcp_contract = @import("../mcp/mcp_contract.zig");
@@ -216,7 +217,7 @@ index 647759058..2ae04b527 100644
  const mode_registry = @import("../modes/mode_registry.zig");
  const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
  const prompt_policy = @import("../config/prompt_policy.zig");
-@@ -92,6 +85,7 @@ const tool_dispatch = @import("../tooling/tool_dispatch.zig");
+@@ -93,6 +86,7 @@ const tool_dispatch = @import("../tooling/tool_dispatch.zig");
  const command_output_content = @import("../tooling/command_output_content.zig");
  const tool_mcp_runtime = @import("../tooling/tool_mcp_runtime.zig");
  const tool_presentation = @import("../tooling/tool_presentation.zig");
@@ -224,7 +225,7 @@ index 647759058..2ae04b527 100644
  const tool_result_errors = @import("../tooling/tool_result_errors.zig");
  const tool_runtime = @import("../tooling/tool_runtime.zig");
  const tool_set_contract = @import("../tooling/tool_set.zig");
-@@ -107,7 +101,7 @@ const url_opener = @import("../hosts/url_opener.zig");
+@@ -108,7 +102,7 @@ const url_opener = @import("../hosts/url_opener.zig");
  const Allocator = std.mem.Allocator;
  const ChatMessage = types.ChatMessage;
  const HistoryTurn = types.HistoryTurn;
@@ -233,15 +234,15 @@ index 647759058..2ae04b527 100644
  const PermissionGrant = types.PermissionGrant;
  const PermissionMode = types.PermissionMode;
  const SessionRuntime = session_runtime.SessionRuntime;
-@@ -263,6 +257,7 @@ pub const Config = struct {
+@@ -264,6 +258,7 @@ pub const Config = struct {
      max_history_turns: usize,
      mode_registry: mode_registry.Registry,
      load_mcp_host: ?mcp_host.LoadFn = null,
 +    embedded_extra_mcp: ?builtin_mcp.ExtraStdioServer = null,
      context_limit_overrides: []const config_runtime.context_limits.Override = &.{},
+     tool_placement_overrides: []const config_runtime.tool_placement.Override = &.{},
      additional_directories: []const []const u8 = &.{},
-     saved_directories_suppressed: bool = false,
-@@ -355,14 +350,18 @@ test "prompt result failure writer preserves exact error type and identity" {
+@@ -359,14 +354,18 @@ test "prompt result failure writer preserves exact error type and identity" {
  }
  
  /// Resume selector parsed from fx ask --resume.
@@ -264,7 +265,7 @@ index 647759058..2ae04b527 100644
      image_paths: std.ArrayList([]u8) = .empty,
      images: std.ArrayList(ImageAttachment) = .empty,
      system_prompt_override: ?[]u8 = null,
-@@ -370,21 +369,22 @@ const AskOptions = struct {
+@@ -374,21 +373,22 @@ const AskOptions = struct {
      prompt_permissions: bool = false,
      timeout_ms: ?usize = null,
      quiet: bool = false,
@@ -292,7 +293,7 @@ index 647759058..2ae04b527 100644
      }
  };
  
-@@ -470,9 +470,36 @@ const PermissionApprovalPromptResult = enum {
+@@ -474,9 +474,36 @@ const PermissionApprovalPromptResult = enum {
  const NotifyAttentionFn = *const fn (?*anyopaque) void;
  const PermissionApprovalPromptFn = *const fn (?*anyopaque, ?*anyopaque, WriteFn, []const u8, ?*anyopaque, NotifyAttentionFn) anyerror!PermissionApprovalPromptResult;
  const IsTtyFn = *const fn (?*anyopaque) bool;
@@ -331,7 +332,7 @@ index 647759058..2ae04b527 100644
  const InitializeSessionStoresFn = *const fn (*AskContext) anyerror!void;
  const LoadSkillsFn = *const fn (
      Allocator,
-@@ -494,16 +521,25 @@ const RunDeps = struct {
+@@ -498,16 +525,25 @@ const RunDeps = struct {
      stdout_is_tty: IsTtyFn = realStdoutIsTty,
      stderr_is_tty: IsTtyFn = realStderrIsTty,
      load_startup_state: LoadStartupStateFn = loadStartupStateDefault,
@@ -358,7 +359,7 @@ index 647759058..2ae04b527 100644
  };
  
  const OutputMode = enum {
-@@ -530,10 +566,8 @@ const RunOptions = struct {
+@@ -534,10 +570,8 @@ const RunOptions = struct {
      save_session: bool = true,
      resume_target: ?ResumeTarget = null,
      color_enabled: bool = true,
@@ -370,7 +371,7 @@ index 647759058..2ae04b527 100644
      effort_override: ?types.ReasoningEffort = null,
      fast_override: ?bool = null,
      ultrafast_override: ?bool = null,
-@@ -702,10 +736,6 @@ const AskContext = struct {
+@@ -708,10 +742,6 @@ const AskContext = struct {
      image_snapshot_temp_dir: ?[]u8 = null,
      prompt_snapshot_committed: bool = false,
      last_recovery_status: ?types.RouteRecoveryStatus = null,
@@ -381,7 +382,7 @@ index 647759058..2ae04b527 100644
  
      fn init(alloc: Allocator, cfg: Config, deps: RunDeps, workspace_root: []const u8) AskContext {
          const lifecycle_runtime = hooks.Runtime.init(alloc);
-@@ -874,6 +904,7 @@ const AskContext = struct {
+@@ -880,6 +910,7 @@ const AskContext = struct {
      }
  
      fn cancelFlag(self: *AskContext) *std.atomic.Value(bool) {
@@ -389,7 +390,7 @@ index 647759058..2ae04b527 100644
          if (comptime supports_headless_interrupt) {
              if (self.use_process_interrupt_flag) {
                  return &headless_interrupt.cancel_requested;
-@@ -1237,6 +1268,7 @@ fn askElicitationCapabilities(
+@@ -1245,6 +1276,7 @@ fn askElicitationCapabilities(
  }
  
  fn checkHeadlessCancellation(deps: RunDeps) !void {
@@ -397,7 +398,7 @@ index 647759058..2ae04b527 100644
      if (comptime supports_headless_interrupt) {
          if (deps.install_headless_interrupt and
              headless_interrupt.cancel_requested.load(.seq_cst))
-@@ -1269,33 +1301,32 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1277,33 +1309,32 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
      );
      defer interrupt_scope.restoreAndRedeliver();
  
@@ -440,7 +441,7 @@ index 647759058..2ae04b527 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
                  return 1;
-@@ -1305,7 +1336,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1313,7 +1344,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
          },
          error.PromptInputReadFailed => {
              if (hasJsonFlag(args)) {
@@ -449,7 +450,7 @@ index 647759058..2ae04b527 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
                  return 1;
-@@ -1315,18 +1346,17 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1323,18 +1354,17 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
          },
          error.InvalidAskArgs => {
              if (hasJsonFlag(args)) {
@@ -472,7 +473,7 @@ index 647759058..2ae04b527 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
                  return 1;
-@@ -1351,30 +1381,26 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1359,30 +1389,26 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
          effective_cfg.prompt_policy.system_prompt = sp;
      }
  
@@ -512,7 +513,7 @@ index 647759058..2ae04b527 100644
          .deps = deps,
      }) catch |err| {
          if (interrupt_scope.requested()) return headless_interrupt.exitCode();
-@@ -1386,25 +1412,6 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1394,25 +1420,6 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
              );
              return 1;
          }
@@ -538,7 +539,7 @@ index 647759058..2ae04b527 100644
          if (!options.json_output) {
              const notice = askErrorNotice(err) orelse return err;
              try deps.write_stderr(deps.stderr_ctx, "fx ask: ");
-@@ -1412,7 +1419,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
+@@ -1420,7 +1427,7 @@ fn runWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps:
              try deps.write_stderr(deps.stderr_ctx, "\n");
              return 1;
          }
@@ -547,7 +548,7 @@ index 647759058..2ae04b527 100644
          defer alloc.free(json);
          try deps.write_stdout(deps.stdout_ctx, json);
          return 1;
-@@ -1461,7 +1468,7 @@ fn preflightAskImages(
+@@ -1469,7 +1476,7 @@ fn preflightAskImages(
              if (options.json_output) {
                  const detail = try alloc.print("{s}: {s}", .{ @errorName(err), image_path });
                  defer alloc.free(detail);
@@ -556,7 +557,7 @@ index 647759058..2ae04b527 100644
                  defer alloc.free(json);
                  try deps.write_stdout(deps.stdout_ctx, json);
              } else {
-@@ -1480,39 +1487,72 @@ fn preflightAskImages(
+@@ -1488,39 +1495,72 @@ fn preflightAskImages(
      return true;
  }
  
@@ -648,7 +649,7 @@ index 647759058..2ae04b527 100644
          .deps = .{
              .context_registry = context_registry,
              .tool_set = tool_set,
-@@ -1555,9 +1595,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1563,9 +1603,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
              cfg.default_model,
              cfg.default_agent_step_limit,
              cfg.auth_mode,
@@ -659,7 +660,7 @@ index 647759058..2ae04b527 100644
          )
      else
          try options.deps.load_startup_state(
-@@ -1566,11 +1605,14 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1574,11 +1613,14 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
              cfg.secret_store,
              cfg.default_model,
              cfg.default_agent_step_limit,
@@ -676,7 +677,7 @@ index 647759058..2ae04b527 100644
      applyAskThemeChoice(startup.theme);
      cfg.provider_set.definitions = startup.configured_providers.definitions;
      // Bind gateway chat traffic to a per-process connection pool and warm one
-@@ -1604,15 +1646,11 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1612,15 +1654,11 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
      for (startup.config_diagnostics) |diagnostic| {
          var notice_writer: std.Io.Writer.Allocating = .init(alloc);
          defer notice_writer.deinit();
@@ -697,7 +698,7 @@ index 647759058..2ae04b527 100644
          try notice_writer.writer.writeByte('\n');
          const notice = try notice_writer.toOwnedSlice();
          defer alloc.free(notice);
-@@ -1691,9 +1729,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1700,9 +1738,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
          try ctx.checkCancellation();
          try options.deps.initialize_session_stores(&ctx);
          try ctx.checkCancellation();
@@ -708,7 +709,7 @@ index 647759058..2ae04b527 100644
              ctx.provider = startup.provider;
              ctx.model = startup.selected_model;
          }
-@@ -1836,7 +1872,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1842,7 +1878,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
      }
  
      try ctx.checkCancellation();
@@ -720,7 +721,7 @@ index 647759058..2ae04b527 100644
          ctx.mcp_host = try load_host(alloc, startup.workspace_root, ctx.toolRegistry(), .{ .questions = ctx.mcp_elicitation_capabilities });
          if (ctx.mcp_host) |h| try reportUnapprovedMcpServers(&ctx, h);
      }
-@@ -1878,7 +1917,6 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+@@ -1885,7 +1924,6 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
          // process_queued_prompt is synchronous here; AskContext keeps the
          // immutable snapshot allocations alive for the whole call.
          .context_snapshot = ctx.context_snapshot,
@@ -728,15 +729,15 @@ index 647759058..2ae04b527 100644
      };
  
      const deps = agentRuntimeDeps(&ctx);
-@@ -2136,7 +2174,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2156,7 +2194,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .append_static_context = appendStaticContext,
          .validate_tool_call = validateToolCall,
          .snapshot_mcp_definition = snapshotMcpDefinition,
 -        .resolve_unselected_mcp_tool = resolveUnselectedMcpTool,
-         .prepare_skill_call = prepareSkillCall,
          .check_tool_availability = checkToolAvailability,
          .request_tool_permission = requestToolPermissionOutcomeWithRequest,
-@@ -2151,7 +2188,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+         .request_prepared_file_mutation_permission = requestPreparedFileMutationPermissionOutcomeForRuntime,
+@@ -2170,7 +2207,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .propagate_history_turn = propagateHistoryTurn,
          .commit_context_compaction = .{ .commit = commitContextCompaction },
          .append_turn_piece = if (ctx.v2 != null) appendTurnPiece else null,
@@ -744,15 +745,15 @@ index 647759058..2ae04b527 100644
          .save_prompt_images = if (ctx.v2 != null) savePromptImages else null,
          .propagate_grant = propagateGrant,
          .push_event = pushEvent,
-@@ -2161,7 +2197,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
-         .push_system_notice = pushSystemNotice,
+@@ -2181,7 +2217,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .push_context_notice = pushContextNotice,
+         .push_session_notice = pushSessionNotice,
          .push_route_recovery_status = pushRouteRecoveryStatus,
 -        .begin_route_recovery_request = beginRouteRecoveryRequest,
          .push_command_output_complete = pushCommandOutputComplete,
          .push_http_error = pushHttpError,
          .refresh_gateway_credential = refreshGatewayCredential,
-@@ -2343,11 +2378,6 @@ fn snapshotMcpDefinition(raw_ctx: *anyopaque, arena: Allocator, name: []const u8
+@@ -2363,11 +2398,6 @@ fn snapshotMcpDefinition(raw_ctx: *anyopaque, arena: Allocator, name: []const u8
      return tool_runtime.snapshotMcpDefinition(ctx.toolContext(), arena, name, known);
  }
  
@@ -764,7 +765,7 @@ index 647759058..2ae04b527 100644
  fn validateToolCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      if (try ctx.cfg.mode_registry.toolPolicyDeniedJson(arena, ctx.deps.tool_set, ctx.mode_id, call.name)) |reason| {
-@@ -2697,6 +2727,7 @@ fn executeToolCallAuthorized(
+@@ -2712,6 +2742,7 @@ fn executeToolCallAuthorized(
      request: agent_runtime.ToolExecutionRequest,
  ) !ToolExecutionResult {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -772,7 +773,7 @@ index 647759058..2ae04b527 100644
      var tool_ctx = ctx.toolContext();
      tool_ctx.root_user_intent_context = request.root_user_intent_context;
      tool_ctx.root_user_messages = request.root_user_messages;
-@@ -2715,11 +2746,126 @@ fn executeToolCallAuthorized(
+@@ -2730,11 +2761,126 @@ fn executeToolCallAuthorized(
      return result;
  }
  
@@ -899,7 +900,7 @@ index 647759058..2ae04b527 100644
      if (ctx.output_mode.capturesJson()) {
          appendToolCallRecordBestEffort(
              ctx,
-@@ -2737,6 +2883,7 @@ fn captureToolExecutionResult(
+@@ -2752,6 +2898,7 @@ fn captureToolExecutionResult(
      request: agent_runtime.ToolExecutionRequest,
      result: ToolExecutionResult,
  ) void {
@@ -907,7 +908,7 @@ index 647759058..2ae04b527 100644
      if (ctx.output_mode.capturesJson()) {
          appendToolCallRecordBestEffort(
              ctx,
-@@ -2771,6 +2918,7 @@ fn recordToolCallRejected(
+@@ -2786,6 +2933,7 @@ fn recordToolCallRejected(
      command_result_json: ?[]const u8,
  ) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -915,7 +916,7 @@ index 647759058..2ae04b527 100644
      if (!ctx.output_mode.capturesJson()) return;
      appendToolCallRecordBestEffort(
          ctx,
-@@ -2794,6 +2942,7 @@ fn recordToolCallFailed(
+@@ -2809,6 +2957,7 @@ fn recordToolCallFailed(
      command_result_json: ?[]const u8,
  ) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -923,7 +924,7 @@ index 647759058..2ae04b527 100644
      if (!ctx.output_mode.capturesJson()) return;
      appendToolCallRecordBestEffort(
          ctx,
-@@ -3092,16 +3241,6 @@ fn appendTurnPiece(raw_ctx: *anyopaque, progress: agent_runtime.TurnProgress) !v
+@@ -3116,16 +3265,6 @@ fn appendTurnPiece(raw_ctx: *anyopaque, progress: agent_runtime.TurnProgress) !v
      ctx.prompt_snapshot_committed = true;
  }
  
@@ -940,7 +941,7 @@ index 647759058..2ae04b527 100644
  /// The prompt's images become the session's blobs before its first request
  /// (D89). A failure leaves the rest inline, with no path, as the adapter
  /// does for one image the store refuses.
-@@ -3121,10 +3260,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
+@@ -3145,10 +3284,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      defer worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
      switch (event) {
@@ -952,7 +953,7 @@ index 647759058..2ae04b527 100644
          .provider_resolved => |slug| {
              if (ctx.resolved_provider) |old| ctx.alloc.free(old);
              ctx.resolved_provider = try ctx.alloc.dupe(u8, slug);
-@@ -3286,6 +3422,12 @@ fn publishPendingToolProgress(ctx: *AskContext, call_id: []const u8, text: []con
+@@ -3310,6 +3446,12 @@ fn publishPendingToolProgress(ctx: *AskContext, call_id: []const u8, text: []con
          pending.visible = true;
          return;
      }
@@ -965,7 +966,7 @@ index 647759058..2ae04b527 100644
      try ctx.writeStderr(text);
      try ctx.writeStderr("\n");
      pending.visible = true;
-@@ -3400,34 +3542,25 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
+@@ -3430,34 +3572,25 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
      try pushSystemNotice(raw_ctx, text);
  }
  
@@ -1012,7 +1013,7 @@ index 647759058..2ae04b527 100644
      var label_buf: [types.RouteRecoveryStatus.label_max_bytes]u8 = undefined;
      try pushSystemNotice(raw_ctx, status.label(&label_buf));
  }
-@@ -3472,6 +3605,8 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const
+@@ -3502,6 +3635,8 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const
  fn onCommandOutputChunk(raw_ctx: *anyopaque, _: ?types.ToolLifecycleId, _: command_output_content.Stream, chunk: []const u8) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      if (ctx.output_mode.isTerminal()) return;
@@ -1021,7 +1022,7 @@ index 647759058..2ae04b527 100644
      try ctx.writeStderr(chunk);
      if (chunk.len > 0) ctx.command_output_line_open = chunk[chunk.len - 1] != '\n';
  }
-@@ -3728,111 +3863,117 @@ fn resolveAskSubagentAuthority(
+@@ -3758,111 +3893,117 @@ fn resolveAskSubagentAuthority(
      );
  }
  
@@ -1236,7 +1237,7 @@ index 647759058..2ae04b527 100644
          }
      }
  
-@@ -3847,35 +3988,6 @@ fn parseAskOptions(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSou
+@@ -3877,35 +4018,6 @@ fn parseAskOptions(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSou
      return opts;
  }
  
@@ -1272,7 +1273,7 @@ index 647759058..2ae04b527 100644
  fn emitHeadlessYoloWarning(alloc: Allocator, options: RunOptions) !void {
      if (options.color_enabled and options.deps.stderr_is_tty(options.deps.stderr_ctx)) {
          try options.deps.write_stderr(
-@@ -4056,15 +4168,11 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
+@@ -4086,15 +4198,11 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
          }
          try out.writer.writeAll("}");
      }
@@ -1293,7 +1294,7 @@ index 647759058..2ae04b527 100644
      if (result.error_code) |error_code| {
          try out.writer.writeAll(",\"error\":");
          try std.json.Stringify.value(error_code, .{}, &out.writer);
-@@ -4074,19 +4182,34 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
+@@ -4104,19 +4212,34 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
          try failure.writeJson(&out.writer);
      }
      if (result.recovery) |recovery| {
@@ -1335,7 +1336,7 @@ index 647759058..2ae04b527 100644
          .assistant_output = &.{},
          .error_code = err_name,
      });
-@@ -4135,18 +4258,17 @@ fn loadStartupStateDefault(
+@@ -4165,18 +4288,17 @@ fn loadStartupStateDefault(
      default_agent_step_limit: usize,
      provider_override: ?model_provider.ProviderId,
      model_override: ?[]const u8,
@@ -1357,7 +1358,7 @@ index 647759058..2ae04b527 100644
      );
  }
  
-@@ -4323,7 +4445,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
+@@ -4353,7 +4475,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
  
  fn testConfig() Config {
      return .{
@@ -1366,7 +1367,7 @@ index 647759058..2ae04b527 100644
          .default_model = "model",
          .default_agent_step_limit = 4,
          .gateway_retry_count = 1,
-@@ -4349,7 +4471,7 @@ fn testConfig() Config {
+@@ -4379,7 +4501,7 @@ fn testConfig() Config {
      };
  }
  
@@ -1375,7 +1376,7 @@ index 647759058..2ae04b527 100644
      var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
      errdefer state.deinit(alloc);
      state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
-@@ -4358,7 +4480,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
+@@ -4388,7 +4510,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
      return state;
  }
  
@@ -1384,7 +1385,7 @@ index 647759058..2ae04b527 100644
      var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
      errdefer state.deinit(alloc);
      state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
-@@ -4371,14 +4493,14 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
+@@ -4401,14 +4523,14 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
      return state;
  }
  
@@ -1403,7 +1404,7 @@ index 647759058..2ae04b527 100644
      errdefer state.deinit(alloc);
      state.config_diagnostics = try alloc.alloc(config_runtime.ConfigDiagnostic, 1);
      state.config_diagnostics[0] = .{
-@@ -4388,8 +4510,8 @@ fn testMissingKeyDiagnosticStartup(alloc: Allocator, transport: oauth_transport.
+@@ -4418,8 +4540,8 @@ fn testMissingKeyDiagnosticStartup(alloc: Allocator, transport: oauth_transport.
      return state;
  }
  
@@ -1414,7 +1415,7 @@ index 647759058..2ae04b527 100644
      errdefer state.deinit(alloc);
      state.configured_model = try alloc.dupe(u8, default_model);
      return state;
-@@ -4410,41 +4532,29 @@ fn testProcessQueuedPrompt(_: *agent_runtime.Agent, deps: *const agent_runtime.A
+@@ -4440,41 +4562,29 @@ fn testProcessQueuedPrompt(_: *agent_runtime.Agent, deps: *const agent_runtime.A
  fn testProcessQueuedPromptRecoveryLifecycle(_: *agent_runtime.Agent, deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, _: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
      try std.testing.expect(semantic_presentation == null);
      try std.testing.expectEqual(hooks.ScopeKind.ask, lifecycle.scope.kind);
@@ -1469,7 +1470,7 @@ index 647759058..2ae04b527 100644
          .diagnostic = types.ModelFailureDiagnostic.init("TestProviderSerializationFailed"),
      });
      return error.TestProviderSerializationFailed;
-@@ -4514,13 +4624,12 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(_: *agent_runtime.Agent, deps:
+@@ -4544,13 +4654,12 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(_: *agent_runtime.Agent, deps:
      for (advertised_shell.input_schema.properties) |property| {
          try std.testing.expect(!std.mem.eql(u8, property.name, "tty"));
      }
@@ -1485,7 +1486,7 @@ index 647759058..2ae04b527 100644
      try testPushAssistantText(deps, "assistant text");
  }
  
-@@ -4531,8 +4640,7 @@ fn testProcessQueuedPromptChecksFullTerminal(_: *agent_runtime.Agent, deps: *con
+@@ -4561,8 +4670,7 @@ fn testProcessQueuedPromptChecksFullTerminal(_: *agent_runtime.Agent, deps: *con
      const advertised_shell = for (cfg.advertised_functions) |function| {
          if (std.mem.eql(u8, function.name, "shell")) break function;
      } else return error.TestExpectedEqual;
@@ -1495,7 +1496,7 @@ index 647759058..2ae04b527 100644
      try testPushAssistantText(deps, "assistant text");
  }
  
-@@ -4582,9 +4690,9 @@ var test_initialize_session_store_calls: usize = 0;
+@@ -4612,9 +4720,9 @@ var test_initialize_session_store_calls: usize = 0;
  var test_image_preflight_startup_calls: usize = 0;
  var test_image_preflight_process_calls: usize = 0;
  
@@ -1507,7 +1508,7 @@ index 647759058..2ae04b527 100644
  }
  
  fn testCountImagePreflightProcess(agent: *agent_runtime.Agent, deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, job: worker_runtime.QueuedPrompt) !void {
-@@ -4688,8 +4796,8 @@ fn testLoadTruncatedSkillsWithDiagnostic(
+@@ -4718,8 +4826,8 @@ fn testLoadTruncatedSkillsWithDiagnostic(
      };
  }
  
@@ -1518,7 +1519,7 @@ index 647759058..2ae04b527 100644
      state.context_limits.skill_catalog_bytes = .{
          .value = .{ .bytes = 0 },
          .source = .command_line,
-@@ -4832,7 +4940,7 @@ const TestContextRegistryFixture = struct {
+@@ -4873,7 +4981,7 @@ const TestContextRegistryFixture = struct {
          defer messages.deinit(arena);
  
          const append_static = deps.append_static_context orelse return error.TestExpectedEqual;
@@ -1527,7 +1528,7 @@ index 647759058..2ae04b527 100644
          try deps.append_runtime_context(deps.ctx, arena, &messages);
          try std.testing.expectEqual(
              ctx.permission_mode,
-@@ -4862,8 +4970,8 @@ const test_cli_context_registry = context_contract.Registry{ .default_provider =
+@@ -4903,8 +5011,8 @@ const test_cli_context_registry = context_contract.Registry{ .default_provider =
      .append_transient_fn = TestContextRegistryFixture.appendTransient,
  } };
  
@@ -1538,7 +1539,7 @@ index 647759058..2ae04b527 100644
      state.context_enabled = false;
      return state;
  }
-@@ -5028,7 +5136,7 @@ test "CLI prompt projection configures web search then blocks native execution"
+@@ -5069,7 +5177,7 @@ test "CLI prompt projection configures web search then blocks native execution"
      defer messages.deinit(arena);
      const deps = agentRuntimeDeps(&ctx);
      const append_static = deps.append_static_context orelse return error.TestExpectedEqual;
@@ -1547,7 +1548,7 @@ index 647759058..2ae04b527 100644
      try deps.append_runtime_context(deps.ctx, arena, &messages);
  
      try std.testing.expectEqualStrings("stale-key", ctx.web_search_runtime.api_key);
-@@ -5188,6 +5296,7 @@ test "parse options preserves active ask flags and operands" {
+@@ -5260,6 +5368,7 @@ test "parse options preserves active ask flags and operands" {
          "--json",
          "--prompt-permissions",
          "--quiet",
@@ -1555,7 +1556,7 @@ index 647759058..2ae04b527 100644
          "--no-save",
          "--no-color",
          "--timeout",
-@@ -5197,10 +5306,11 @@ test "parse options preserves active ask flags and operands" {
+@@ -5269,10 +5378,11 @@ test "parse options preserves active ask flags and operands" {
      }, .tty);
      defer options.deinit(std.testing.allocator);
  
@@ -1568,7 +1569,7 @@ index 647759058..2ae04b527 100644
      try std.testing.expect(options.no_save);
      try std.testing.expect(options.no_color);
      try std.testing.expectEqual(@as(?usize, 123 * std.time.ms_per_s), options.timeout_ms);
-@@ -5211,36 +5321,32 @@ test "parse options preserves active ask flags and operands" {
+@@ -5283,36 +5393,32 @@ test "parse options preserves active ask flags and operands" {
      try std.testing.expectEqualStrings("hello world", options.prompt);
  }
  
@@ -1616,7 +1617,7 @@ index 647759058..2ae04b527 100644
      try std.testing.expectEqualStrings("--full-access --yolo --auto", literal.prompt);
  
      const cases = [_]struct {
-@@ -5254,7 +5360,7 @@ test "parse options preserves full access aliases after the delimiter as prompt
+@@ -5326,7 +5432,7 @@ test "parse options preserves full access aliases after the delimiter as prompt
      for (cases) |case| {
          var options = try parseOptionsWithStdin(alloc, &.{ case.flag, "--", "--full-access", "--yolo", "--auto" }, .tty);
          defer options.deinit(alloc);
@@ -1625,7 +1626,7 @@ index 647759058..2ae04b527 100644
          try std.testing.expectEqualStrings("--full-access --yolo --auto", options.prompt);
      }
  }
-@@ -5271,45 +5377,24 @@ test "parse options preserves model effort and fast overrides" {
+@@ -5343,45 +5449,24 @@ test "parse options preserves model effort and fast overrides" {
      }, .tty);
      defer options.deinit(alloc);
  
@@ -1679,7 +1680,7 @@ index 647759058..2ae04b527 100644
  }
  
  test "parse options accepts provider routing flags and rejects malformed values" {
-@@ -5317,51 +5402,41 @@ test "parse options accepts provider routing flags and rejects malformed values"
+@@ -5389,51 +5474,41 @@ test "parse options accepts provider routing flags and rejects malformed values"
  
      var options = try parseOptionsWithStdin(alloc, &.{ "--provider-order", "azure,anthropic", "--provider-strict", "hello" }, .tty);
      defer options.deinit(alloc);
@@ -1743,7 +1744,7 @@ index 647759058..2ae04b527 100644
      try std.testing.expectEqualStrings("--model --fast", literal.prompt);
  }
  
-@@ -5665,33 +5740,27 @@ test "preflightAskImages resolves image paths from the workspace" {
+@@ -5737,33 +5812,27 @@ test "preflightAskImages resolves image paths from the workspace" {
      try std.testing.expectEqualStrings(expected_path, options.images.items[0].path);
  }
  
@@ -1789,7 +1790,7 @@ index 647759058..2ae04b527 100644
      try std.testing.expectError(error.MissingPrompt, parseOptionsWithStdin(std.testing.allocator, &.{}, .tty));
  }
  
-@@ -5732,14 +5801,14 @@ test "stdin prompt reader propagates allocation failure" {
+@@ -5804,14 +5873,14 @@ test "stdin prompt reader propagates allocation failure" {
  
  test "stdin prompt errors keep exact structured names" {
      const alloc = std.testing.allocator;
@@ -1806,7 +1807,7 @@ index 647759058..2ae04b527 100644
      defer alloc.free(read_failure);
      try std.testing.expectEqualStrings(
          "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"PromptInputReadFailed\"}\n",
-@@ -5756,7 +5825,7 @@ test "image preparation failure has stable text and JSON contracts" {
+@@ -5828,7 +5897,7 @@ test "image preparation failure has stable text and JSON contracts" {
      try std.testing.expect(askErrorNotice(error.Cancelled) == null);
      try std.testing.expect(askErrorNotice(error.TimedOut) == null);
  
@@ -1815,7 +1816,7 @@ index 647759058..2ae04b527 100644
      defer alloc.free(json);
      try std.testing.expectEqualStrings(
          "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"ImagePreparationFailed\"}\n",
-@@ -5784,7 +5853,6 @@ test "unresolved image capability has actionable text and stable JSON code" {
+@@ -5856,7 +5925,6 @@ test "unresolved image capability has actionable text and stable JSON code" {
      const json = try renderErrorJsonResult(
          alloc,
          @errorName(error.ModelImageCapabilityUnavailable),
@@ -1823,7 +1824,7 @@ index 647759058..2ae04b527 100644
      );
      defer alloc.free(json);
      try std.testing.expectEqualStrings(
-@@ -6029,9 +6097,7 @@ fn testLoadStartupStateWithCancellation(
+@@ -6101,9 +6169,7 @@ fn testLoadStartupStateWithCancellation(
      secret_store: host.SecretStore,
      default_model: []const u8,
      default_agent_step_limit: usize,
@@ -1833,7 +1834,7 @@ index 647759058..2ae04b527 100644
  ) !app_lifecycle.StartupState {
      const state = try testPresentKeyStartup(
          alloc,
-@@ -6040,8 +6106,6 @@ fn testLoadStartupStateWithCancellation(
+@@ -6112,8 +6178,6 @@ fn testLoadStartupStateWithCancellation(
          default_model,
          default_agent_step_limit,
          null,
@@ -1842,7 +1843,7 @@ index 647759058..2ae04b527 100644
      );
      if (test_startup_cancellation_stage == .after_startup_state) {
          requestTestHeadlessInterrupt();
-@@ -7254,11 +7318,11 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
+@@ -7326,11 +7390,11 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
          json: bool,
      }{
          .{
@@ -1856,7 +1857,7 @@ index 647759058..2ae04b527 100644
              .json = true,
          },
      };
-@@ -7539,23 +7603,30 @@ test "parse options rejects model-unsafe prompt text from arguments and stdin" {
+@@ -7611,23 +7675,30 @@ test "parse options rejects model-unsafe prompt text from arguments and stdin" {
      );
  }
  
@@ -1899,7 +1900,7 @@ index 647759058..2ae04b527 100644
      try std.testing.expectError(
          error.NoSaveResumeConflict,
          parseOptionsWithStdin(
-@@ -7568,7 +7639,7 @@ test "parse options keeps the last resume target and rejects no-save resume" {
+@@ -7640,7 +7711,7 @@ test "parse options keeps the last resume target and rejects no-save resume" {
          error.NoSaveResumeConflict,
          parseOptionsWithStdin(
              std.testing.allocator,
@@ -1908,7 +1909,7 @@ index 647759058..2ae04b527 100644
              .tty,
          ),
      );
-@@ -7675,29 +7746,9 @@ test "render final JSON reports the successful recovery attempt" {
+@@ -7747,29 +7818,9 @@ test "render final JSON reports the successful recovery attempt" {
          .exit_code = 0,
          .assistant_output = try alloc.dupe(u8, "recovered"),
          .recovery = .{
@@ -1941,7 +1942,7 @@ index 647759058..2ae04b527 100644
          },
      };
      defer result.deinit(alloc);
-@@ -7707,10 +7758,13 @@ test "render final JSON names what a needs-you status needs" {
+@@ -7779,10 +7830,13 @@ test "render final JSON names what a needs-you status needs" {
      var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
      defer parsed.deinit();
      const recovery = parsed.value.object.get("recovery").?.object;
@@ -1959,7 +1960,7 @@ index 647759058..2ae04b527 100644
  }
  
  test "render final JSON includes the latest terminal recovery diagnostic" {
-@@ -7720,7 +7774,8 @@ test "render final JSON includes the latest terminal recovery diagnostic" {
+@@ -7792,7 +7846,8 @@ test "render final JSON includes the latest terminal recovery diagnostic" {
          .assistant_output = try alloc.dupe(u8, ""),
          .recovery = .{
              .kind = .terminal_provider_error,
@@ -1969,7 +1970,7 @@ index 647759058..2ae04b527 100644
              .cause = .provider_unavailable,
              .diagnostic = types.ModelFailureDiagnostic.init(
                  "HTTP 503 · no_available_providers: No providers are currently available",
-@@ -8350,7 +8405,7 @@ test "json run with session setup failure still emits final object" {
+@@ -8472,7 +8527,7 @@ test "json run with session setup failure still emits final object" {
  
      const exit_code = try runWithDeps(
          alloc,
@@ -1978,7 +1979,7 @@ index 647759058..2ae04b527 100644
          testConfig(),
          deps,
      );
-@@ -8566,38 +8621,13 @@ test "fx ask JSON recovery keeps stdout structured and reports progress on stder
+@@ -8692,38 +8747,13 @@ test "fx ask JSON recovery keeps stdout structured and reports progress on stder
      var parsed = try std.json.parseFromSlice(std.json.Value, alloc, stdout_capture.bytes.items, .{});
      defer parsed.deinit();
      try std.testing.expectEqualStrings("assistant text", parsed.value.object.get("output").?.string);
@@ -2019,7 +2020,7 @@ index 647759058..2ae04b527 100644
  test "fx ask JSON reports the consumed attempt after retry admission failure" {
      const alloc = std.testing.allocator;
      var stdout_capture: TestCapture = .{};
-@@ -8617,12 +8647,12 @@ test "fx ask JSON reports the consumed attempt after retry admission failure" {
+@@ -8743,12 +8773,12 @@ test "fx ask JSON reports the consumed attempt after retry admission failure" {
      const recovery = parsed.value.object.get("recovery").?.object;
      try std.testing.expectEqualStrings("failed", recovery.get("state").?.string);
      try std.testing.expectEqual(@as(i64, 1), recovery.get("attempt").?.integer);
@@ -2035,10 +2036,10 @@ index 647759058..2ae04b527 100644
  }
  
 diff --git a/src/core/config/config_runtime.zig b/src/core/config/config_runtime.zig
-index 9ce324e62..e693725c5 100644
+index 19d502331..c9c926b6a 100644
 --- a/src/core/config/config_runtime.zig
 +++ b/src/core/config/config_runtime.zig
-@@ -1058,6 +1058,7 @@ pub const PermissionMutation = settings_store.PermissionMutation;
+@@ -1170,6 +1170,7 @@ pub const PermissionMutation = settings_store.PermissionMutation;
  pub const PermissionScope = settings_store.PermissionScope;
  pub const StatuslineItem = settings_store.StatuslineItem;
  pub const UserSettingsPatch = settings_store.UserSettingsPatch;
@@ -2046,7 +2047,7 @@ index 9ce324e62..e693725c5 100644
  pub const WorkspaceDirectoryMutation = settings_store.WorkspaceDirectoryMutation;
  pub const CommitOutcome = settings_store.CommitOutcome;
  pub const LegacyCleanup = settings_store.LegacyCleanup;
-@@ -1137,6 +1138,15 @@ pub fn setUserPreferences(
+@@ -1249,6 +1250,15 @@ pub fn setUserPreferences(
      patch: UserSettingsPatch,
  ) !CommitOutcome {
      const home = io_mod.homeDir() orelse return error.HomeNotSet;
@@ -2063,7 +2064,7 @@ index 9ce324e62..e693725c5 100644
      defer store.deinit(alloc);
      return store.applyUserPatch(alloc, patch);
 diff --git a/src/core/config/settings_store.zig b/src/core/config/settings_store.zig
-index 5f53af3d1..b23e54939 100644
+index 35e7a07fc..2619c8b7f 100644
 --- a/src/core/config/settings_store.zig
 +++ b/src/core/config/settings_store.zig
 @@ -9,6 +9,7 @@ const compactor = @import("../compactor/compactor.zig");
@@ -2074,7 +2075,7 @@ index 5f53af3d1..b23e54939 100644
  const workspace_access = @import("../workspace/workspace_access.zig");
  const sort_utils = @import("../shared/sort_utils.zig");
  const update_target = @import("../upgrade/update_target.zig");
-@@ -94,9 +95,19 @@ pub const ProjectMcpMutation = struct {
+@@ -95,9 +96,19 @@ pub const ProjectMcpMutation = struct {
      action: project_config.ProjectMcpAction,
  };
  
@@ -2094,7 +2095,7 @@ index 5f53af3d1..b23e54939 100644
      permission_mode: ?types.PermissionMode = null,
      credential_source: ?types.CredentialSource = null,
      /// Removes the key entirely so resolution returns to plain precedence.
-@@ -133,6 +144,7 @@ pub const UserSettingsPatch = struct {
+@@ -136,6 +147,7 @@ pub const UserSettingsPatch = struct {
      fn isEmpty(self: UserSettingsPatch) bool {
          return self.model_preference == null and
              self.provider == null and
@@ -2102,7 +2103,7 @@ index 5f53af3d1..b23e54939 100644
              self.permission_mode == null and
              self.credential_source == null and
              !self.clear_credential_source and
-@@ -991,6 +1003,14 @@ pub fn validateProviderSlug(slug: []const u8) bool {
+@@ -1002,6 +1014,14 @@ pub fn validateProviderSlug(slug: []const u8) bool {
  
  fn validateUserPatch(patch: UserSettingsPatch) !void {
      if (patch.model_preference) |preference| try validateModel(preference.model);
@@ -2117,7 +2118,7 @@ index 5f53af3d1..b23e54939 100644
      if (patch.theme) |theme| {
          if (theme_mod.classifyValue(theme)) |choice| switch (choice) {
              .pin_light, .pin_dark => {},
-@@ -1245,6 +1265,38 @@ fn applyUserPatchToRoot(
+@@ -1262,6 +1282,38 @@ fn applyUserPatchToRoot(
          application.changed = try putModelPreference(arena, &root.object, preference) or application.changed;
      }
      if (patch.provider) |value| application.changed = try putString(arena, &root.object, "provider", value.label()) or application.changed;
@@ -2485,10 +2486,10 @@ index 000000000..ddbbfb6a8
 +    );
 +}
 diff --git a/src/gateway/chat_completions_protocol.zig b/src/gateway/chat_completions_protocol.zig
-index 0fe33bf63..849cd10fe 100644
+index eaa3bfc2e..2fcbb974e 100644
 --- a/src/gateway/chat_completions_protocol.zig
 +++ b/src/gateway/chat_completions_protocol.zig
-@@ -721,7 +721,26 @@ pub const Reducer = struct {
+@@ -689,7 +689,26 @@ pub const Reducer = struct {
          }
          if (non_null(delta, "role")) |role| if (!std.mem.eql(u8, try string(role), "assistant")) return error.InvalidChunk;
          // These fields carry semantics outside this codec's text/function subset.
@@ -2516,7 +2517,7 @@ index 0fe33bf63..849cd10fe 100644
          const reasoning_delta = try self.accept_reasoning(delta);
          const content_start = self.content.items.len;
          if (non_null(delta, "content")) |value| try append_bounded(self.alloc, &self.content, try string(value), self.limits.content_bytes, error.ContentTooLarge);
-@@ -1027,7 +1046,25 @@ pub fn consume_stream(alloc: Allocator, source: *std.Io.Reader, request: stream_
+@@ -1011,7 +1030,25 @@ pub fn consume_stream(alloc: Allocator, source: *std.Io.Reader, request: stream_
              else => return err,
          };
          const chunk = data orelse return error.IncompleteStream;
