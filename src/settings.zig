@@ -48,6 +48,10 @@ pub const Prefs = struct {
     /// Motion turns them all off regardless.
     motion_duration: f32 = 1,
     motion_intensity: f32 = 1,
+    /// The conversation input's typing effects: `soft` is the flash and
+    /// decaying glyphs; `pastel` is the ASCII field after typing-animations'
+    /// pastel.zig — ripples, fish, lock-on brackets, a springing caret.
+    typing_fx: TypingFx = .soft,
     /// The relay for the phone: off, or on over the LAN, or over Tailscale,
     /// and on which port.
     relay: Relay = .off,
@@ -56,13 +60,16 @@ pub const Prefs = struct {
     /// Anonymous usage analytics, sent only when `analytics` is on.
     telemetry: @import("analytics.zig").Client,
 
+    /// The input's typing effects, as `typing_fx` keeps them.
+    pub const TypingFx = enum { soft, pastel };
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, home: []const u8, env: *std.process.Environ.Map) Prefs {
         var p: Prefs = .{ .gpa = gpa, .io = io, .telemetry = .init(gpa, env) };
         p.terminal_font = gpa.dupe(u8, "JetBrains Mono") catch "";
         p.path = std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "settings.json" }) catch "";
         const data = std.Io.Dir.cwd().readFileAlloc(io, p.path, gpa, .limited(64 * 1024)) catch return p;
         defer gpa.free(data);
-        const S = struct { agent: []const u8 = "agent", model: []const u8 = "", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1, relay: []const u8 = "off", relay_port: u16 = relay.default_port };
+        const S = struct { agent: []const u8 = "agent", model: []const u8 = "", zoom: f32 = 1, keys: []const u8 = "system", agents: bool = true, onboarded: bool = false, analytics: []const u8 = "unset", install_id: []const u8 = "", font: []const u8 = "JetBrains Mono", theme: []const u8 = "", file_icons: bool = true, motion_duration: f32 = 1, motion_intensity: f32 = 1, typing_fx: []const u8 = "soft", relay: []const u8 = "off", relay_port: u16 = relay.default_port };
         const parsed = std.json.parseFromSlice(S, gpa, data, .{ .ignore_unknown_fields = true }) catch return p;
         defer parsed.deinit();
         const v = parsed.value;
@@ -78,6 +85,7 @@ pub const Prefs = struct {
         p.file_icons = v.file_icons;
         p.motion_duration = std.math.clamp(v.motion_duration, 0.25, 2);
         p.motion_intensity = std.math.clamp(v.motion_intensity, 0, 1.5);
+        p.typing_fx = std.meta.stringToEnum(TypingFx, v.typing_fx) orelse .soft;
         p.relay = std.meta.stringToEnum(Relay, v.relay) orelse .off;
         p.relay_port = if (v.relay_port == 0) relay.default_port else v.relay_port;
         if (v.install_id.len == p.install_id.len) @memcpy(&p.install_id, v.install_id);
@@ -100,7 +108,7 @@ pub const Prefs = struct {
         if (p.path.len == 0) return;
         if (std.fs.path.dirname(p.path)) |dir| std.Io.Dir.cwd().createDirPath(p.io, dir) catch {};
         var buf: [512]u8 = undefined;
-        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"model\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"relay\": \"{s}\",\n  \"relay_port\": {d}\n}}\n", .{ @tagName(p.agent), p.model, p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.relay), p.relay_port }) catch return;
+        const json = std.fmt.bufPrint(&buf, "{{\n  \"agent\": \"{s}\",\n  \"model\": \"{s}\",\n  \"zoom\": {d:.2},\n  \"keys\": \"{s}\",\n  \"agents\": {},\n  \"onboarded\": {},\n  \"analytics\": \"{s}\",\n  \"install_id\": \"{s}\",\n  \"font\": \"{s}\",\n  \"theme\": \"{s}\",\n  \"file_icons\": {},\n  \"motion_duration\": {d:.2},\n  \"motion_intensity\": {d:.2},\n  \"typing_fx\": \"{s}\",\n  \"relay\": \"{s}\",\n  \"relay_port\": {d}\n}}\n", .{ @tagName(p.agent), p.model, p.zoom, @tagName(p.keys), p.agents, p.onboarded, @tagName(p.analytics), &p.install_id, p.terminal_font, p.theme, p.file_icons, p.motion_duration, p.motion_intensity, @tagName(p.typing_fx), @tagName(p.relay), p.relay_port }) catch return;
         std.Io.Dir.cwd().writeFile(p.io, .{ .sub_path = p.path, .data = json }) catch {};
     }
 
@@ -197,6 +205,13 @@ pub const Prefs = struct {
         p.save();
     }
 
+    /// The input's typing effects; kept for the next launch.
+    pub fn setTypingFx(p: *Prefs, fx: TypingFx) void {
+        if (p.typing_fx == fx) return;
+        p.typing_fx = fx;
+        p.save();
+    }
+
     /// The relay for the phone: off, or on over the LAN or Tailscale.
     pub fn setRelay(p: *Prefs, mode: Relay, port: u16) void {
         if (p.relay == mode and p.relay_port == port) return;
@@ -235,6 +250,7 @@ test "settings are kept across launches" {
         p.setTheme("soot");
         p.setFileIcons(false);
         p.setMotion(1.5, 0.5);
+        p.setTypingFx(.pastel);
         p.finishOnboarding();
     }
     var p: Prefs = .init(gpa, io, arena.allocator(), home, &env);
@@ -251,5 +267,6 @@ test "settings are kept across launches" {
     try std.testing.expect(!p.file_icons);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), p.motion_duration, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), p.motion_intensity, 0.001);
+    try std.testing.expectEqual(Prefs.TypingFx.pastel, p.typing_fx);
     try std.testing.expect(!std.mem.allEqual(u8, &p.install_id, '0'));
 }

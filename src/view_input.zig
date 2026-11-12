@@ -13,10 +13,18 @@ const blocks = @import("blocks.zig");
 const assist = @import("assist.zig");
 const complete = @import("complete.zig");
 const attach = @import("attach.zig");
+const motion = @import("motion.zig");
 const motion_input = @import("motion_input.zig");
+const motion_field = @import("motion_field.zig");
 const pager = @import("pager.zig");
 const Session = @import("session.zig").Session;
 const Workspace = @import("workspace.zig").Workspace;
+
+/// The composer field's stable focus id, as last painted: pastel's field
+/// layer is drawn before the field exists, so it follows the id one frame
+/// behind. The peek id won't do: it is a child index that shifts when the
+/// tree around the pill changes.
+var pastel_id: u64 = 0;
 
 /// Rows of the completion menu shown at once.
 const menu_rows = 8;
@@ -39,10 +47,23 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         const pill = ui.div(c).column().wFull().gap(10).px(16).pt(14).pb(10).rounded(26).glass(.{}).border(theme.border.alpha(0.6));
         defer pill.end();
         pictures(c, s);
+        // Pastel's ASCII field lies under the words: drawn before the
+        // field, from the pill's content corner, as far as the pill goes.
+        // (Under is measured before the field so its node count between
+        // here and the text field must be stable — the field's own id is
+        // peeked after it.)
+        const pastel_fx = w.shared.prefs.typing_fx == .pastel and motion.on();
+        if (pastel_fx) {
+            if (c.rects.get(pill_id)) |r| if (pastel_id != 0) motion_field.under(c, pastel_id, .{ .x = r.x + 16, .y = r.y + 14 }, .{ .w = r.w - 32, .h = r.h - 24 });
+        }
         // The focused pane's input has the keyboard, unless a panel is open.
+        // Its own key, like the pill's: the suggestion row and attachments
+        // come and go around it, and an index id would go with them.
+        ui.key(c, "input");
         s.input_id = c.peekId(null);
         const in_pager = if (pager.open) |pg| pg.session == s else false;
-        if (focused and w.overlay == .none and !w.finding and !in_pager) c.focus = s.input_id;
+        const want_focus = focused and w.overlay == .none and !w.finding and !in_pager;
+        if (want_focus) c.focus = s.input_id;
         const placeholder = if (s.shell.remoteReady())
             c.print("Run a command on {s}, or ask {s}, which works there too", .{ s.shell.remote.?.host, s.which.label() })
         else if (s.shell.busy())
@@ -59,12 +80,15 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         s.caret = result.caret;
         s.input_lines = .{ result.line, result.lines };
         s.vim = if (result.vim_visual) .visual else if (result.vim_normal) .normal else .insert;
-        // What typing left behind: a flash where a glyph landed, and the
-        // ones Backspace took falling away. Drawn over the pill, so the
-        // pill's content corner is where their places are counted from.
+        // What typing left behind: pastel's field, pops and locks, or the
+        // soft flash and falling glyphs. Drawn over the pill, so the pill's
+        // content corner is where their places are counted from.
         if (c.focused_text) |ft| {
             if (ft.id == s.input_id) {
-                if (c.rects.get(pill_id)) |r| motion_input.fx(c, ft, .{ .x = r.x + 16, .y = r.y + 14 }, ft.caret_rect.h);
+                pastel_id = ft.id;
+                if (c.rects.get(pill_id)) |r| {
+                    if (pastel_fx) motion_field.over(c, ft, ft.id, .{ .x = r.x + 16, .y = r.y + 14 }, .{ .w = r.w - 32, .h = r.h - 24 }, result.submitted) else motion_input.fx(c, ft, .{ .x = r.x + 16, .y = r.y + 14 }, ft.caret_rect.h);
+                }
             }
         }
         // Vim's k off the input's first line climbs into the output above

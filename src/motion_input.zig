@@ -77,9 +77,10 @@ fn slotFor(id: u64) *Slot {
 
 /// What changed between two texts: the run that disappeared is
 /// `prev[p .. prev.len - q]`, and `new.len - q - p` bytes appeared.
-const Diff = struct { p: usize = 0, q: usize = 0 };
+/// Exported for motion_field, the pastel field's diff.
+pub const Diff = struct { p: usize = 0, q: usize = 0 };
 
-fn diff(prev: []const u8, new: []const u8) Diff {
+pub fn diff(prev: []const u8, new: []const u8) Diff {
     var d = Diff{};
     while (d.p < prev.len and d.p < new.len and prev[d.p] == new[d.p]) d.p += 1;
     while (d.q < prev.len - d.p and d.q < new.len - d.p and prev[prev.len - 1 - d.q] == new[new.len - 1 - d.q]) d.q += 1;
@@ -234,7 +235,7 @@ fn drawGlyphs(c: *ui.Context, s: *Slot, origin: ui.Point, lh: f32) void {
     }
 }
 
-fn hash01(seed: u32) f32 {
+pub fn hash01(seed: u32) f32 {
     // A uint32 mix (SplitMix32) mapped to 0…1: deterministic drift.
     var z = seed +% 0x9e3779b9;
     z = (z ^ (z >> 16)) *% 0x85ebca6b;

@@ -10,6 +10,8 @@ const session_mod = @import("session.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
 const binds = @import("binds.zig");
+const motion_field = @import("motion_field.zig");
+const motion = @import("motion.zig");
 const screen_mod = @import("screen.zig");
 const view_screen = @import("view_screen.zig");
 
@@ -506,6 +508,90 @@ test "typing flashes, and Backspace's glyph decays away, then rests" {
     t.frame();
     try std.testing.expect(!t.ctx.animating);
     try t.screenshot("/tmp/nanoterm-input-rest.png");
+}
+
+test "pastel typing: the field ripples under the words, then all of it rests" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-pastel-fx";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    // Effects time out: pin the dials so "rests" means what it says no
+    // matter what a previous test left the globals at.
+    const saved_d = motion.duration;
+    const saved_i = motion.intensity;
+    const saved_r = motion.reduce;
+    defer {
+        motion.duration = saved_d;
+        motion.intensity = saved_i;
+        motion.reduce = saved_r;
+    }
+    motion.apply(1, 1, false);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    shared.prefs.setTypingFx(.pastel);
+    t.advance(1);
+    // Typing splashes the field, pops the glyphs and locks the finished
+    // word's brackets: the pastel layer is live while any of it moves.
+    // (A space would open the completion menu and move the keyboard
+    // there, so the word is finished with a comma instead.)
+    //
+    // The session applies edits on its own tick, and a bulk edit can land
+    // on a frame where a backdrop render pass briefly holds the focus —
+    // in which case the whole batch is dropped. Type again until the
+    // buffer holds the line.
+    var typed = false;
+    var tried: usize = 0;
+    while (!typed and tried < 5) : (tried += 1) {
+        t.typeText("yz,");
+        var f: usize = 0;
+        while (s.input.text().len == 0 and f < 60) : (f += 1) t.frame();
+        typed = std.mem.eql(u8, s.input.text(), "yz,");
+    }
+    try std.testing.expectEqualStrings("yz,", s.input.text());
+    var waited: usize = 0;
+    while (!motion_field.activeAny() and waited < 60) : (waited += 1) t.frame();
+    try std.testing.expect(motion_field.activeAny());
+    try t.screenshot("/tmp/nanoterm-input-pastel.png");
+    // The lock outlives the pops; in the end the whole layer rests. The
+    // session applies queued edits on its own tick, so a late chunk can
+    // land mid-wait and start a fresh effect: age what is there, then
+    // poll until the layer is quiet.
+    t.advance(3);
+    var quiet: usize = 0;
+    while (motion_field.activeAny() and quiet < 600) : (quiet += 1) t.frame();
+    try std.testing.expect(!motion_field.activeAny());
+    // ⌫ dissolves its glyph into the field instead of dropping it.
+    var cut = false;
+    tried = 0;
+    while (!cut and tried < 5) : (tried += 1) {
+        t.key(.backspace);
+        var f: usize = 0;
+        while (std.mem.eql(u8, s.input.text(), "yz,") and f < 60) : (f += 1) t.frame();
+        cut = std.mem.eql(u8, s.input.text(), "yz");
+    }
+    try std.testing.expectEqualStrings("yz", s.input.text());
+    waited = 0;
+    while (!motion_field.activeAny() and waited < 60) : (waited += 1) t.frame();
+    try std.testing.expect(motion_field.activeAny());
+    try t.screenshot("/tmp/nanoterm-input-pastel-dissolve.png");
+    t.advance(3);
+    quiet = 0;
+    while (motion_field.activeAny() and quiet < 600) : (quiet += 1) t.frame();
+    try std.testing.expect(!motion_field.activeAny());
 }
 
 test "typing a slash in the Agent's input keeps the caret after it" {

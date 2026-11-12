@@ -604,6 +604,18 @@ fn motionPage(c: *ui.Context, w: *Workspace) void {
         if (ui.slider(c, &inten, .{ .min = 0, .max = 1.5, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(w.shared.prefs.motion_duration, inten);
         ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_intensity}), .{ .size = 12.5, .mono = true, .color = theme.muted });
     }
+    // The conversation input's own effects: the soft flash and decaying
+    // glyphs, or pastel's ASCII field after typing-animations' pastel.zig.
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Input effects", .{ .size = 13 });
+        ui.spacer(c);
+        const order = [_][]const u8{ "Soft", "Pastel" };
+        var picked: usize = @intFromEnum(w.shared.prefs.typing_fx);
+        if (ui.segmented(c, &order, &picked)) w.shared.prefs.setTypingFx(@enumFromInt(picked));
+    }
+    ui.text(c, "Pastel ripples an ASCII field under the words as you type, springs each letter in, and brackets finished words.", .{ .size = 11.5, .color = theme.faint, .wrap = true });
 }
 
 /// Anonymous usage analytics: shared or not, under the privacy policy.
