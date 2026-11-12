@@ -1,69 +1,89 @@
-//! Bridge between nanoterm's Agent and harness adapters.
-//! This allows incremental migration from direct agent_claude.Client to harness-based providers.
+//! The bridge between a pane's `Agent` and the harness adapters. It owns the
+//! registry and the environment the agents are started in, and it points the
+//! adapter at the sink that receives a turn's events.
 const std = @import("std");
-const harness_adapter = @import("harness/adapter.zig");
-const harness_types = @import("harness/types.zig");
-const agent = @import("agent.zig");
+const types = @import("harness/types.zig");
+const registry = @import("harness/registry.zig");
 
 pub const HarnessBridge = struct {
     gpa: std.mem.Allocator,
-    registry: harness_adapter.HarnessRegistry,
-    adapter: ?*harness_adapter.HarnessAdapter = null,
+    io: std.Io,
+    built: registry.Built,
+    env: std.process.Environ.Map,
     thread_id: []const u8,
 
-    pub fn init(gpa: std.mem.Allocator, thread_id: []const u8) HarnessBridge {
-        return .{
-            .gpa = gpa,
-            .registry = harness_adapter.HarnessRegistry.init(gpa),
-            .thread_id = thread_id,
-        };
-    }
-
-    pub fn deinit(b: *HarnessBridge) void {
-        b.registry.deinit();
-        b.gpa.free(b.thread_id);
-    }
-
-    pub fn registerClaude(b: *HarnessBridge, binary_path: []const u8) !void {
-        const claude_provider = try b.gpa.create(@import("harness/providers/claude/claude.zig").ClaudeProvider);
-        claude_provider.* = @import("harness/providers/claude/claude.zig").ClaudeProvider.init(b.gpa, binary_path);
-        
-        const claude_adapter = try b.gpa.create(@import("harness/providers/claude/claude_adapter.zig").ClaudeAdapter);
-        claude_adapter.* = .{
-            .provider = claude_provider,
-            .thread_id = b.thread_id,
-        };
-        
-        const adapter = try b.gpa.create(harness_adapter.HarnessAdapter);
-        adapter.* = @import("harness/providers/claude/claude_adapter.zig").ClaudeAdapter.asHarnessAdapter(claude_adapter);
-        
-        try b.registry.register(b.gpa, adapter);
-        b.adapter = adapter;
-    }
-
-    pub fn sendTurn(b: *HarnessBridge, session_id: []const u8, cwd: []const u8, text: []const u8, images: []const agent.Image, on_event: *const fn (ctx: *anyopaque, event: harness_types.HarnessEvent) void) !void {
-        if (b.adapter == null) return error.NoAdapter;
-        
-        // Convert nanoterm images to harness images
-        var harness_images = try std.ArrayList(harness_types.Image).initCapacity(b.gpa, images.len);
-        defer harness_images.deinit(b.gpa);
-        
-        for (images) |im| {
-            try harness_images.append(b.gpa, .{
-                .name = try b.gpa.dupe(u8, im.name),
-                .mime = try b.gpa.dupe(u8, im.mime),
-                .data = try b.gpa.dupe(u8, im.data),
-            });
+    /// Builds the registry for one pane. `env` is the app's environment as
+    /// "KEY=value" strings, the same ones the agents are started with.
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, env: []const []const u8, thread_id: []const u8) !*HarnessBridge {
+        const self = try gpa.create(HarnessBridge);
+        errdefer gpa.destroy(self);
+        self.gpa = gpa;
+        self.io = io;
+        self.env = .init(gpa);
+        errdefer self.env.deinit();
+        for (env) |entry| {
+            const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+            try self.env.put(entry[0..eq], entry[eq + 1 ..]);
         }
-        
-        const input = harness_types.SendTurnInput{
-            .session_id = session_id,
-            .cwd = cwd,
-            .prompt = text,
-            .images = harness_images.items,
-            .on_event = on_event,
-        };
-        
-        try b.adapter.?.send_turn(b.adapter.?.ctx, &input);
+        self.thread_id = try gpa.dupe(u8, thread_id);
+        errdefer gpa.free(self.thread_id);
+        self.built = try registry.init(gpa, io, &self.env);
+        return self;
+    }
+
+    pub fn destroy(self: *HarnessBridge) void {
+        self.built.deinit();
+        self.gpa.free(self.thread_id);
+        self.env.deinit();
+        self.gpa.destroy(self);
+    }
+
+    pub fn has(self: *HarnessBridge, id: []const u8) bool {
+        return self.built.get(id) != null;
+    }
+
+    /// Whether a follow-up can be folded into the turn running now.
+    pub fn canSteer(self: *HarnessBridge, id: []const u8) bool {
+        return self.built.registry.canSteer(id);
+    }
+
+    /// Sends a turn through `id`'s adapter, with `sink_ctx` as the context the
+    /// caller's `on_event` is called with.
+    pub fn sendTurn(self: *HarnessBridge, id: []const u8, sink_ctx: *anyopaque, input: *const types.SendTurnInput) !void {
+        self.built.setSink(id, sink_ctx);
+        try self.built.registry.sendTurn(input, id);
+    }
+
+    pub fn cancelTurn(self: *HarnessBridge, id: []const u8, session_id: []const u8) !void {
+        try self.built.registry.cancelTurn(id, session_id);
+    }
+
+    /// Folds `input`'s text into the turn already running.
+    pub fn steerTurn(self: *HarnessBridge, id: []const u8, sink_ctx: *anyopaque, input: *const types.SteerTurnInput) !void {
+        self.built.setSink(id, sink_ctx);
+        try self.built.registry.steerTurn(input, id);
+    }
+
+    pub fn stopSession(self: *HarnessBridge, id: []const u8, session_id: []const u8) !void {
+        try self.built.registry.stopSession(id, session_id);
+    }
+
+    pub fn forgetSession(self: *HarnessBridge, id: []const u8, session_id: []const u8) !void {
+        try self.built.registry.forgetSession(id, session_id);
+    }
+
+    pub fn respondApproval(self: *HarnessBridge, id: []const u8, session_id: []const u8, request_id: u32, decision: types.ApprovalDecision) !void {
+        try self.built.registry.respondApproval(id, session_id, request_id, decision);
     }
 };
+
+test "the bridge reads the environment it was given" {
+    const gpa = std.testing.allocator;
+    const env = [_][]const u8{ "PATH=/usr/bin", "HOME=/tmp/me", "not-a-pair" };
+    var bridge = try HarnessBridge.create(gpa, std.testing.io, &env, "thread-1");
+    defer bridge.destroy();
+    try std.testing.expectEqualStrings("/tmp/me", bridge.env.get("HOME").?);
+    try std.testing.expectEqualStrings("thread-1", bridge.thread_id);
+    try std.testing.expect(bridge.has(types.ids.hermes));
+    try std.testing.expect(bridge.has(types.ids.claude));
+}

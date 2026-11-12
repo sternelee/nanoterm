@@ -32,6 +32,9 @@ pub const Client = struct {
     alive: bool = false,
     /// What the agent wrote to stderr, for errors.
     stderr: proc.Tail,
+    /// Codex's app-server speaks the same frames without the
+    /// `"jsonrpc":"2.0"` member (headerless JSON-RPC); ACP includes it.
+    headerless: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, handler: Handler) Client {
         return .{ .gpa = gpa, .handler = handler, .stderr = .{ .gpa = gpa } };
@@ -62,7 +65,11 @@ pub const Client = struct {
         c.next_id += 1;
         var aw: std.Io.Writer.Allocating = .init(c.gpa);
         defer aw.deinit();
-        try aw.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":", .{id});
+        if (c.headerless) {
+            try aw.writer.print("{{\"id\":{d},\"method\":", .{id});
+        } else {
+            try aw.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":", .{id});
+        }
         try std.json.Stringify.encodeJsonString(method, .{}, &aw.writer);
         try aw.writer.writeAll(",\"params\":");
         try std.json.Stringify.value(params, .{}, &aw.writer);
@@ -74,7 +81,11 @@ pub const Client = struct {
     pub fn notify(c: *Client, method: []const u8, params: anytype) !void {
         var aw: std.Io.Writer.Allocating = .init(c.gpa);
         defer aw.deinit();
-        try aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":");
+        if (c.headerless) {
+            try aw.writer.writeAll("{\"method\":");
+        } else {
+            try aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":");
+        }
         try std.json.Stringify.encodeJsonString(method, .{}, &aw.writer);
         try aw.writer.writeAll(",\"params\":");
         try std.json.Stringify.value(params, .{}, &aw.writer);
@@ -91,7 +102,11 @@ pub const Client = struct {
     pub fn respond(c: *Client, id: []const u8, result: anytype) void {
         var aw: std.Io.Writer.Allocating = .init(c.gpa);
         defer aw.deinit();
-        aw.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":", .{id}) catch return;
+        if (c.headerless) {
+            aw.writer.print("{{\"id\":{s},\"result\":", .{id}) catch return;
+        } else {
+            aw.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":", .{id}) catch return;
+        }
         std.json.Stringify.value(result, .{}, &aw.writer) catch return;
         aw.writer.writeAll("}\n") catch return;
         c.send(aw.written());
@@ -100,7 +115,11 @@ pub const Client = struct {
     pub fn respondError(c: *Client, id: []const u8, code: i32, message: []const u8) void {
         var aw: std.Io.Writer.Allocating = .init(c.gpa);
         defer aw.deinit();
-        aw.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":{d},\"message\":", .{ id, code }) catch return;
+        if (c.headerless) {
+            aw.writer.print("{{\"id\":{s},\"error\":{{\"code\":{d},\"message\":", .{ id, code }) catch return;
+        } else {
+            aw.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":{d},\"message\":", .{ id, code }) catch return;
+        }
         std.json.Stringify.encodeJsonString(message, .{}, &aw.writer) catch return;
         aw.writer.writeAll("}}\n") catch return;
         c.send(aw.written());

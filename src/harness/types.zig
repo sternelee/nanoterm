@@ -1,6 +1,18 @@
 //! Common types for the harness adapter system.
 const std = @import("std");
 
+/// The provider ids a harness adapter is registered under. They match the
+/// `Agent.Which` names, so the UI can map one to the other.
+pub const ids = struct {
+    pub const claude = "claude";
+    pub const codex = "codex";
+    pub const opencode = "opencode";
+    pub const grok = "grok";
+    pub const devin = "devin";
+    pub const hermes = "hermes";
+    pub const pi = "pi";
+};
+
 pub const ApprovalDecision = enum { allow, deny };
 
 pub const UserQuestionReply = union(enum) {
@@ -29,6 +41,22 @@ pub const ToolKind = enum {
     think,
     other,
 };
+
+/// ACP tool-call kinds as words; anything unknown is `other`.
+pub fn toolKindFromName(name: []const u8) ToolKind {
+    const eq = std.mem.eql;
+    if (eq(u8, name, "execute")) return .execute;
+    if (eq(u8, name, "read")) return .read;
+    if (eq(u8, name, "edit")) return .edit;
+    if (eq(u8, name, "search")) return .search;
+    if (eq(u8, name, "fetch")) return .fetch;
+    if (eq(u8, name, "think")) return .think;
+    return .other;
+}
+
+pub fn toolKindName(kind: ToolKind) []const u8 {
+    return @tagName(kind);
+}
 
 pub const ToolStatus = enum {
     pending,
@@ -101,6 +129,65 @@ pub const TurnMetrics = struct {
     total_tokens: u32,
 };
 
+/// One entry of a plan the agent keeps for the turn.
+pub const PlanEntry = struct {
+    text: []const u8,
+    status: []const u8 = "pending",
+};
+
+/// A slash command an agent advertises (`available_commands_update`).
+pub const CommandInfo = struct {
+    name: []const u8,
+    description: []const u8 = "",
+};
+
+/// One value of a config option an agent offers.
+pub const ConfigValue = struct {
+    id: []const u8,
+    name: []const u8,
+    description: []const u8 = "",
+};
+
+/// A choice an agent offers (model, mode, thinking level), as ACP's
+/// `configOptions` gives it.
+pub const ConfigOption = struct {
+    id: []const u8,
+    name: []const u8,
+    category: []const u8 = "",
+    current: []const u8 = "",
+    values: []const ConfigValue = &.{},
+};
+
+/// What an agent said about its own configuration. Each variant replaces
+/// the matching part of the client's view, as the ACP updates do.
+pub const ConfigUpdate = union(enum) {
+    commands: []const CommandInfo,
+    options: []const ConfigOption,
+    current_mode: struct { id: []const u8, value: []const u8 },
+};
+
+/// A model an agent offers in its session state (`session/new`'s `models`).
+pub const SessionModel = struct {
+    id: []const u8,
+    name: []const u8,
+};
+
+/// A mode an agent offers in its session state (`modes`).
+pub const SessionMode = struct {
+    id: []const u8,
+    name: []const u8,
+};
+
+/// The choices a session opened with, taken from `session/new`'s result.
+pub const SessionInfo = struct {
+    session_id: []const u8 = "",
+    models: []const SessionModel = &.{},
+    current_model: ?[]const u8 = null,
+    modes: []const SessionMode = &.{},
+    current_mode: ?[]const u8 = null,
+    options: []const ConfigOption = &.{},
+};
+
 pub const HarnessEvent = union(enum) {
     session_started: void,
     session_ended: ?i32,
@@ -111,6 +198,8 @@ pub const HarnessEvent = union(enum) {
     turn_ended: []const u8,
     turn_cancelled: void,
     status: []const u8,
+    /// A line an agent wrote to stderr that a turn should show as a note.
+    note: []const u8,
     message_delta: []const u8,
     message_completed: void,
     reasoning_delta: []const u8,
@@ -118,6 +207,8 @@ pub const HarnessEvent = union(enum) {
     tool_start: ToolStart,
     tool_delta: ToolDelta,
     tool_result: ToolResult,
+    plan: []const PlanEntry,
+    config: ConfigUpdate,
     question_asked: QuestionAsked,
     permission_request: PermissionRequest,
     background_updated: []const []const u8,

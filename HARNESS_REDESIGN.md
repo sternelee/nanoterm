@@ -366,3 +366,45 @@ pub fn listModelsFromControlResponse(v: std.json.Value, request_id: []const u8) 
 - The control channel adds new capability (model switching, list_models) that was missing
 - Session resume becomes more robust with cwd/account validation
 - Isolated helper calls (titles, summaries) can share the same infrastructure with `isolated=true`
+
+## Status
+
+Done. The adapter layer is real code with tests, and the app drives it when
+Settings → Agents → "Harness integration" is on (default off).
+
+- `types.zig`, `adapter.zig`: the event vocabulary, the `HarnessAdapter`
+  interface, and `HarnessRegistry` with its dispatch methods.
+- `providers/acp/`: one provider for every ACP agent. `events.zig` maps
+  `session/update` to harness events; `provider.zig` owns the child, the
+  session, the prompts, and the approvals; `adapter.zig` wraps it.
+- `providers/hermes/` and `providers/others.zig`: the ACP agents, one
+  `Options` each (command line, mode ids, stderr notes).
+- `providers/codex/`: Codex through its own `codex app-server` (headerless
+  JSON-RPC), not an ACP adapter: `thread/start`/`thread/resume`, one
+  `turn/start` per turn, `turn/steer` for a follow-up, and the approval and
+  question requests answered as server requests.
+- `providers/claude/`: Claude Code over its own stream-json CLI, with the
+  control channel for permissions and its message mapping.
+- `providers/pi/`: Pi over its own RPC mode.
+- `registry.zig` + `harness_bridge.zig`: one registry per pane, and the bridge
+  that points an adapter at the sink a turn's events go to.
+- `Agent` creates the bridge on first use, sends turns through the matching
+  adapter, folds a follow-up into a running Codex turn (`Turn.queued`), and
+  applies `HarnessEvent`s to the pane's turn.
+- `src/test_harness.zig`: the protocol mappings, plus three end-to-end turns
+  against stand-in agents: an ACP agent, a Codex app-server, and a Codex
+  app-server that only answers once it has been steered.
+
+Open:
+
+- The ACP providers advertise no filesystem or terminal capabilities, so an
+  agent that needs `fs/*` or `terminal/*` from the client falls back to the
+  pane's own client (the harness path is opt-in).
+- Codex's richer surface is only partly used: `collaborationMode`,
+  `serviceTier`, `thread/compact/start`, and `thread/revert` are not sent yet.
+- `config`, `context`, and `turn_metrics` events are received but not yet
+  drawn; the pane's own ACP path still owns the model/mode menus.
+- Isolated helper calls (titles, commit messages) are not built on the
+  adapters yet; `run_text_prompt` is unused.
+- Only Codex declares `steer_turn`; the other providers queue a follow-up as a
+  new turn instead.

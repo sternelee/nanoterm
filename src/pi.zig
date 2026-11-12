@@ -155,18 +155,21 @@ fn writeFields(w: *std.Io.Writer, fields: anytype) !void {
     const info = @typeInfo(@TypeOf(fields)).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
         const v = @field(fields, name);
-        const omit = switch (T) {
-            @TypeOf(null) => true,
-            ?[]const u8 => v == null,
-            ?[]const Image => v == null,
-            else => false,
-        };
-        if (omit) continue;
-        try w.writeAll(",\"");
-        try w.writeAll(name);
-        try w.writeAll("\":");
-        try std.json.Stringify.value(v, .{}, w);
+        // A null field is left out: Pi reads an absent `images` as none.
+        const keep = if (comptime omittableWhenNull(T)) v != null else true;
+        if (keep) {
+            try w.writeAll(",\"");
+            try w.writeAll(name);
+            try w.writeAll("\":");
+            try std.json.Stringify.value(v, .{}, w);
+        }
     }
+}
+
+/// Whether a field of type `T` is left out when its value is null: an
+/// optional, or the `null` literal itself.
+fn omittableWhenNull(comptime T: type) bool {
+    return T == @TypeOf(null) or @typeInfo(T) == .optional;
 }
 
 /// The string field `key` of JSON object `v`, or null.

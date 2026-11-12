@@ -13,6 +13,8 @@ const visual = @import("visual.zig");
 const prompt_mod = @import("agent_prompt.zig");
 const native_agent = @import("agent_native.zig");
 const view_fold = @import("view_fold.zig");
+const harness_types = @import("harness/types.zig");
+const harness_bridge = @import("harness_bridge.zig");
 
 /// Agent is built in; the other agents use ACP (`agents.zig` locates them).
 pub const Which = enum {
@@ -106,6 +108,9 @@ pub const Permission = struct {
     chosen: ?usize = null,
     /// Claude: the tool input, echoed back with an allow.
     input_json: ?[]u8 = null,
+    /// A harness adapter asked for this: it is answered through the bridge,
+    /// not over the pane's own ACP client.
+    harness: bool = false,
 };
 
 /// A visual the agent showed (`show_visual`), live in its turn.
@@ -165,7 +170,8 @@ pub const Turn = struct {
     /// agent answered the prompt.
     sent: bool = false,
     done: bool = false,
-    /// Pi: the `prompt` command is queued behind the turn running now.
+    /// A follow-up folded into the turn running now (Pi's `followUp` prompt,
+    /// Codex's `turn/steer`): its text is in that turn, not a new one.
     queued: bool = false,
     /// Pi: the id of its `prompt` command, which ties the answer to it.
     pi_cmd: i64 = 0,
@@ -257,7 +263,10 @@ pub const Agent = struct {
     on_destroy: ?struct { ctx: *anyopaque, func: *const fn (ctx: *anyopaque, a: *Agent) void } = null,
     msg_buf: [512]u8 = undefined,
     harness_enabled: bool = false,
-    harness_bridge: ?*const @import("harness_bridge.zig").HarnessBridge = null,
+    /// The harness adapters this pane drives when `harness_enabled` is on.
+    harness: ?*harness_bridge.HarnessBridge = null,
+    /// The turn the harness's events belong to.
+    harness_turn: ?*Turn = null,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, app: App, which: Which, cwd: []const u8) !*Agent {
         const a = try gpa.create(Agent);
@@ -279,6 +288,7 @@ pub const Agent = struct {
 
     pub fn destroy(a: *Agent) void {
         if (a.on_destroy) |d| d.func(d.ctx, a);
+        if (a.harness) |h| h.destroy();
         if (a.remote) |r| r.deinit(a.gpa);
         if (a.native) |native| native.deinit();
         if (a.claude) |c| {
@@ -1158,6 +1168,7 @@ pub const Agent = struct {
         // A prompt sent while Pi streams is a follow-up: it has to say so.
         const streaming = a.status == .working;
         a.status = .working;
+        if (a.harness_enabled and a.which != .agent and a.harnessSend(text, images)) return;
         if (a.which == .codex) {
             if (a.current()) |t| t.sent = true;
             a.codexSend(text);
@@ -1725,7 +1736,13 @@ pub const Agent = struct {
     pub fn answer(a: *Agent, p: *Permission, index: usize) void {
         if (p.chosen != null or index >= p.options.len) return;
         p.chosen = index;
-        if (a.claude) |c| {
+        if (p.harness) {
+            const id = harnessIdFor(a.which) orelse return;
+            const bridge = a.harness orelse return;
+            const decision: harness_types.ApprovalDecision = if (std.mem.eql(u8, p.options[index].id, "allow")) .allow else .deny;
+            const request_id = std.fmt.parseInt(u32, p.rpc_id, 10) catch return;
+            bridge.respondApproval(id, harness_session_key, request_id, decision) catch {};
+        } else if (a.claude) |c| {
             a.claudeRespond(c, p, index);
         } else {
             a.client.respond(p.rpc_id, .{ .outcome = .{ .outcome = "selected", .optionId = p.options[index].id } });
@@ -2175,6 +2192,221 @@ pub const Agent = struct {
             a.addItem(t, .{ .plan = list });
         }
     }
+
+    /// The harness id a pane's agent runs under, when the harness knows it.
+    fn harnessIdFor(which: Which) ?[]const u8 {
+        return switch (which) {
+            .claude => harness_types.ids.claude,
+            .codex => harness_types.ids.codex,
+            .opencode => harness_types.ids.opencode,
+            .grok => harness_types.ids.grok,
+            .devin => harness_types.ids.devin,
+            .hermes => harness_types.ids.hermes,
+            .pi => harness_types.ids.pi,
+            .agent => null,
+        };
+    }
+
+    /// The key a pane's harness session is filed under. One pane owns one
+    /// bridge, so a constant is enough and it survives a restart.
+    const harness_session_key = "pane";
+
+    /// Builds the bridge on first use, so a pane that never asks for the
+    /// harness never pays for it.
+    fn ensureHarness(a: *Agent) ?*harness_bridge.HarnessBridge {
+        if (a.harness) |h| return h;
+        a.harness = harness_bridge.HarnessBridge.create(a.gpa, a.io, a.env, harness_session_key) catch |err| {
+            a.fail("could not start the harness: {s}", .{@errorName(err)});
+            return null;
+        };
+        return a.harness;
+    }
+
+    /// Sends a turn through the pane's harness adapter. False when this agent
+    /// has no adapter, so the pane's own path takes the turn instead.
+    fn harnessSend(a: *Agent, text: []const u8, images: []const Image) bool {
+        const id = harnessIdFor(a.which) orelse return false;
+        const bridge = a.ensureHarness() orelse return true;
+        if (!bridge.has(id)) return false;
+        const t = a.current() orelse return true;
+        // A prompt sent while a harness turn runs is a follow-up: it goes
+        // into that turn (Codex's `turn/steer`), not a new one, and its row
+        // is marked queued behind it.
+        if (a.harness_turn) |running| {
+            if (!running.done and bridge.canSteer(id)) {
+                t.sent = true;
+                t.queued = true;
+                const steer = harness_types.SteerTurnInput{
+                    .session_id = harness_session_key,
+                    .cwd = a.cwd,
+                    .text = text,
+                    .on_event = onHarnessEvent,
+                };
+                bridge.steerTurn(id, a, &steer) catch |err| {
+                    t.queued = false;
+                    a.fail("could not steer {s}: {s}", .{ a.which.label(), @errorName(err) });
+                };
+                return true;
+            }
+        }
+        t.sent = true;
+        a.harness_turn = t;
+        var himages: std.ArrayList(harness_types.Image) = .empty;
+        defer himages.deinit(a.gpa);
+        for (images) |im| himages.append(a.gpa, .{
+            .name = im.name,
+            .mime = im.mime,
+            .data = im.data,
+            .path = im.path,
+        }) catch {};
+        const input = harness_types.SendTurnInput{
+            .session_id = harness_session_key,
+            .cwd = a.cwd,
+            .prompt = text,
+            .images = himages.items,
+            .runtime_mode = .default,
+            .on_event = onHarnessEvent,
+        };
+        bridge.sendTurn(id, a, &input) catch |err| {
+            a.harness_turn = null;
+            a.fail("could not start {s}: {s}", .{ a.which.label(), @errorName(err) });
+        };
+        return true;
+    }
+
+    /// One harness event, applied to the turn it belongs to.
+    fn onHarnessEvent(ctx: *anyopaque, event: harness_types.HarnessEvent) void {
+        const a: *Agent = @ptrCast(@alignCast(ctx));
+        defer a.app.changed(a.app.ctx);
+        const t = a.harness_turn;
+        switch (event) {
+            .session_provider_bound => |sid| {
+                if (a.session) |s| a.gpa.free(s);
+                a.session = a.gpa.dupe(u8, sid) catch null;
+            },
+            .session_started => a.status = .ready,
+            .session_ended => |code| {
+                a.status = .off;
+                if (code) |c| a.fail("the agent exited (code {d})", .{c});
+            },
+            .session_error => |msg| if (t) |turn| a.addItem(turn, .{ .note = a.gpa.dupe(u8, msg) catch return }),
+            .turn_started => a.status = .working,
+            .turn_ready, .turn_ended, .turn_cancelled => a.harnessTurnDone(),
+            .status, .message_completed, .reasoning_completed, .background_updated, .context, .turn_metrics => {},
+            .note => |text| if (t) |turn| a.addItem(turn, .{ .note = a.gpa.dupe(u8, text) catch return }),
+            .message_delta => |text| if (t) |turn| a.appendChunk(turn, false, text),
+            .reasoning_delta => |text| if (t) |turn| a.appendChunk(turn, true, text),
+            .tool_start => |s| if (t) |turn| a.harnessToolStart(turn, s),
+            .tool_delta => |d| if (t) |turn| a.harnessToolDelta(turn, d),
+            .tool_result => |r| if (t) |turn| a.harnessToolResult(turn, r),
+            .plan => |entries| if (t) |turn| a.harnessPlan(turn, entries),
+            .config => {},
+            .question_asked => {},
+            .permission_request => |p| if (t) |turn| a.harnessPermission(turn, p),
+        }
+    }
+
+    /// The turn is over: mark it done and let the pane settle, as the pane's
+    /// own prompt-done handler does.
+    fn harnessTurnDone(a: *Agent) void {
+        const t = a.harness_turn orelse return;
+        a.harness_turn = null;
+        a.finishHarnessTurn(t);
+        // A follow-up folded into this turn is over with it.
+        for (a.turns.items) |q| {
+            if (q.done or !q.queued) continue;
+            q.queued = false;
+            a.finishHarnessTurn(q);
+        }
+        if (a.status == .working) a.status = .ready;
+    }
+
+    fn finishHarnessTurn(a: *Agent, t: *Turn) void {
+        t.done = true;
+        t.ended = blocks.now();
+        if (a.app.finished) |f| f(a.app.ctx, t);
+    }
+
+    fn harnessToolStart(a: *Agent, t: *Turn, s: harness_types.ToolStart) void {
+        if (tool(t, s.id)) |tl| return a.harnessToolDetail(tl, s.input orelse "");
+        var new: Tool = .{
+            .id = a.gpa.dupe(u8, s.id) catch return,
+            .kind = a.gpa.dupe(u8, harness_types.toolKindName(s.kind)) catch return,
+        };
+        new.title.appendSlice(a.gpa, s.name) catch {};
+        new.status = .in_progress;
+        a.addItem(t, .{ .tool = new });
+        if (s.input) |input| a.harnessToolDetail(&t.items.items[t.items.items.len - 1].tool, input);
+    }
+
+    fn harnessToolDelta(a: *Agent, t: *Turn, d: harness_types.ToolDelta) void {
+        const tl = tool(t, d.id) orelse return;
+        tl.detail.appendSlice(a.gpa, d.delta) catch {};
+        tl.status = .in_progress;
+    }
+
+    fn harnessToolResult(a: *Agent, t: *Turn, r: harness_types.ToolResult) void {
+        const tl = tool(t, r.id) orelse return;
+        tl.status = switch (r.status) {
+            .pending => .pending,
+            .in_progress => .in_progress,
+            .completed => .completed,
+            .failed => .failed,
+        };
+        tl.detail.clearRetainingCapacity();
+        tl.detail.appendSlice(a.gpa, r.output) catch {};
+    }
+
+    fn harnessToolDetail(a: *Agent, tl: *Tool, detail: []const u8) void {
+        if (detail.len == 0) return;
+        tl.detail.clearRetainingCapacity();
+        tl.detail.appendSlice(a.gpa, detail[0..@min(detail.len, 2000)]) catch {};
+    }
+
+    fn harnessPlan(a: *Agent, t: *Turn, entries: []const harness_types.PlanEntry) void {
+        var list: std.ArrayList(PlanEntry) = .empty;
+        for (entries) |e| list.append(a.gpa, .{
+            .text = a.gpa.dupe(u8, e.text) catch continue,
+            .status = a.gpa.dupe(u8, e.status) catch continue,
+        }) catch {};
+        for (t.items.items) |*it| switch (it.*) {
+            .plan => |*p| {
+                for (p.items) |e| {
+                    a.gpa.free(e.text);
+                    a.gpa.free(e.status);
+                }
+                p.deinit(a.gpa);
+                p.* = list;
+                return;
+            },
+            else => {},
+        };
+        a.addItem(t, .{ .plan = list });
+    }
+
+    /// A permission card the user answers; the choice goes back through the
+    /// adapter, which knows how its agent takes an approval.
+    fn harnessPermission(a: *Agent, t: *Turn, p: harness_types.PermissionRequest) void {
+        const options = a.gpa.alloc(Option, 2) catch return;
+        options[0] = .{
+            .id = a.gpa.dupe(u8, "allow") catch return,
+            .name = a.gpa.dupe(u8, "Allow") catch return,
+            .kind = a.gpa.dupe(u8, "allow_once") catch return,
+        };
+        options[1] = .{
+            .id = a.gpa.dupe(u8, "deny") catch return,
+            .name = a.gpa.dupe(u8, "Deny") catch return,
+            .kind = a.gpa.dupe(u8, "reject_once") catch return,
+        };
+        a.addItem(t, .{ .permission = .{
+            .rpc_id = std.fmt.allocPrint(a.gpa, "{d}", .{p.request_id}) catch return,
+            .title = a.gpa.dupe(u8, p.title) catch return,
+            .options = options,
+            .input_json = if (p.input) |i| a.gpa.dupe(u8, i) catch null else null,
+            .harness = true,
+        } });
+    }
+
 };
 
 /// Applies one built-in Agent tool event to its row. Free of `Agent` so the

@@ -1,19 +1,20 @@
-//! Claude Code harness adapter wrapper.
+//! The `HarnessAdapter` over the Claude Code provider. Like the ACP wrapper,
+//! it is the adapter's `ctx` and carries the sink context.
 const std = @import("std");
-const harness_types = @import("../../types.zig");
-const harness_adapter = @import("../../adapter.zig");
-const claude_provider = @import("claude.zig");
+const iface = @import("../../adapter.zig");
+const types = @import("../../types.zig");
+const claude = @import("claude.zig");
 
 pub const ClaudeAdapter = struct {
-    provider: *claude_provider.ClaudeProvider,
-    thread_id: []const u8,
+    provider: *claude.ClaudeProvider,
+    sink_ctx: *anyopaque = undefined,
 
-    pub fn asHarnessAdapter(adapter: *ClaudeAdapter) harness_adapter.HarnessAdapter {
+    pub fn harness(self: *ClaudeAdapter) iface.HarnessAdapter {
         return .{
-            .id = "claude",
+            .id = claude.id,
             .live = true,
-            .can_steer = true,
-            .ctx = adapter,
+            .can_steer = false,
+            .ctx = self,
             .send_turn = sendTurn,
             .cancel_turn = cancelTurn,
             .stop_session = stopSession,
@@ -22,55 +23,50 @@ pub const ClaudeAdapter = struct {
             .respond_approval = respondApproval,
             .respond_question = respondQuestion,
             .refresh_catalog = refreshCatalog,
-            .steer_turn = null,
-            .compact_context = null,
-            .generate_title = null,
-            .generate_commit_message = null,
-            .generate_pr_content = null,
-            .generate_branch_name = null,
-            .warmup_text = null,
-            .run_text_prompt = null,
-            .stop_text_prompts = null,
         };
     }
 
-    fn sendTurn(ctx: *anyopaque, thread_id: []const u8, input: harness_types.SendTurnInput) !void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        try adapter.provider.sendTurn(thread_id, input);
+    fn sendTurn(ctx: *anyopaque, input: *const types.SendTurnInput) anyerror!void {
+        const self: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
+        try self.provider.sendTurn(input, self.sink_ctx);
     }
 
-    fn cancelTurn(ctx: *anyopaque, thread_id: []const u8) !void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        try adapter.provider.cancelTurn(thread_id);
+    fn cancelTurn(ctx: *anyopaque, session_id: []const u8) anyerror!void {
+        const self: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
+        try self.provider.cancelTurn(session_id);
     }
 
-    fn stopSession(ctx: *anyopaque, thread_id: []const u8) void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        adapter.provider.stopSession(thread_id);
+    fn stopSession(ctx: *anyopaque, session_id: []const u8) anyerror!void {
+        const self: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
+        self.provider.stopSession(session_id);
     }
 
-    fn forgetSession(ctx: *anyopaque, thread_id: []const u8) void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        adapter.provider.forgetSession(thread_id);
+    fn forgetSession(ctx: *anyopaque, session_id: []const u8) anyerror!void {
+        const self: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
+        self.provider.forgetSession(session_id);
     }
 
-    fn bindSession(ctx: *anyopaque, thread_id: []const u8, session_id: []const u8) !void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        try adapter.provider.bindSession(thread_id, session_id);
+    fn bindSession(ctx: *anyopaque, thread_id: []const u8, provider_session_id: []const u8, cwd: []const u8, provider_account_id: ?[]const u8) void {
+        _ = ctx;
+        _ = thread_id;
+        _ = provider_session_id;
+        _ = cwd;
+        _ = provider_account_id;
     }
 
-    fn respondApproval(ctx: *anyopaque, thread_id: []const u8, input: harness_types.ApprovalDecision) !void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        try adapter.provider.respondApproval(thread_id, input);
+    fn respondApproval(ctx: *anyopaque, session_id: []const u8, request_id: u32, decision: types.ApprovalDecision) void {
+        const self: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
+        self.provider.respondApproval(session_id, request_id, decision);
     }
 
-    fn respondQuestion(ctx: *anyopaque, thread_id: []const u8, input: harness_types.UserQuestionReply) !void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        try adapter.provider.respondQuestion(thread_id, input);
+    fn respondQuestion(ctx: *anyopaque, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) void {
+        _ = ctx;
+        _ = session_id;
+        _ = request_id;
+        _ = reply;
     }
 
-    fn refreshCatalog(ctx: *anyopaque) !void {
-        const adapter: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
-        try adapter.provider.refreshCatalog();
+    fn refreshCatalog(ctx: *anyopaque) anyerror!void {
+        _ = ctx;
     }
 };

@@ -659,6 +659,9 @@ pub const Session = struct {
         if (a.agent) |ag| return ag;
         const ag = agent_mod.Agent.create(a.gpa, a.io, .{ .ctx = a, .changed = changed, .newBlock = agentBlock, .finished = finished }, a.which, a.cwd()) catch return null;
         ag.env = a.shared.env_list;
+        // The experimental harness path is a setting; a pane reads it as it
+        // starts, so turning it on takes effect for the next agent.
+        if (a.shared.agent_store) |store| ag.harness_enabled = store.harness_enabled;
         a.agent = ag;
         a.offerVisuals(ag);
         if (a.model_choice) |m| {

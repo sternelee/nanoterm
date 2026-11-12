@@ -65,6 +65,8 @@ pub const HarnessRegistry = struct {
             r.gpa.free(entry.key_ptr.*);
         }
         r.idle_park_timers.deinit();
+        var aiter = r.adapters.iterator();
+        while (aiter.next()) |entry| r.gpa.free(entry.key_ptr.*);
         r.adapters.deinit();
     }
 

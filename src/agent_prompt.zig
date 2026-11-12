@@ -19,7 +19,13 @@ pub const trailer_header = "Attached images (local files \u{2014} open them to v
 /// agent that takes images (`images_ok`), each picture as an `image`
 /// block with its file's `uri`.
 pub fn parts(arena: std.mem.Allocator, text: []const u8, images: []const Image, images_ok: bool) ![]const Part {
-    var out: std.ArrayList(Part) = .empty;
+    return partsOf(Image, arena, text, images, images_ok);
+}
+
+/// `parts` over any picture type with `data`, `path` and `mime` fields, so the
+/// harness's own `Image` builds the same prompt the pane's does.
+pub fn partsOf(comptime T: type, arena: std.mem.Allocator, text: []const u8, images: []const T, images_ok: bool) ![]const PartOf(T) {
+    var out: std.ArrayList(PartOf(T)) = .empty;
     var trailer: std.ArrayList(u8) = .empty;
     for (images) |*im| {
         if (images_ok and im.data.len <= max_inline_bytes) try out.append(arena, .{ .image = im });
@@ -33,11 +39,12 @@ pub fn parts(arena: std.mem.Allocator, text: []const u8, images: []const Image, 
 }
 
 /// A content block of a prompt: text, or an image in base64.
-pub const Part = struct {
-    text: []const u8 = "",
-    image: ?*const Image = null,
+pub fn PartOf(comptime T: type) type {
+    return struct {
+        text: []const u8 = "",
+        image: ?*const T = null,
 
-    pub fn jsonStringify(p: Part, jw: anytype) !void {
+        pub fn jsonStringify(p: @This(), jw: anytype) !void {
         try jw.beginObject();
         try jw.objectField("type");
         if (p.image) |im| {
@@ -64,8 +71,11 @@ pub const Part = struct {
             try jw.write(p.text);
         }
         try jw.endObject();
-    }
-};
+        }
+    };
+}
+
+pub const Part = PartOf(Image);
 
 /// `path` as a file URL's path: its bytes, percent-encoded where a URL needs.
 fn writeUriPath(w: *std.Io.Writer, path: []const u8) !void {
