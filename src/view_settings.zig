@@ -221,7 +221,7 @@ pub fn account(c: *ui.Context, w: *Workspace) void {
                     ui.spacer(c);
                     ui.text(c, store.perm_mode, .{ .size = 11.5, .color = theme.muted });
                 }
-                ui.text(c, "What fx may do without asking. The built-in agent runs auto inside nanoterm; fx in the terminal and its new sessions follow this.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                ui.text(c, "What fx may do without asking. The built-in agent, fx in the terminal, and its new sessions all follow this.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
             }
             {
                 const b = box(c);

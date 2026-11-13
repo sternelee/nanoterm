@@ -9,5 +9,6 @@ zig-pkg/
 .rpi
 .context
 .codex
+.perch/
 vendor/*
 !vendor/fx

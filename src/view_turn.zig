@@ -177,7 +177,9 @@ fn tool(c: *ui.Context, app: *App, tl: *agent_mod.Tool) void {
         // then what it printed. No block holds it — the built-in Agent's shell
         // runs in the agent's own process, not nanoterm's terminal.
         if (tl.command.items.len > 0) commandLine(c, tl);
-        if (tl.detail.items.len > 0 and tl.status != .in_progress) {
+        // A streamed call shows what it has printed while it runs, so a long
+        // command is visible as it works rather than only once it ends.
+        if (tl.detail.items.len > 0 and (tl.status != .in_progress or tl.streamed)) {
             // A tool that listed files without a terminal — its output's shape
             // says so — shows them with their icons, like any listing.
             const d = tl.detail.items;
