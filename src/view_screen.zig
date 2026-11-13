@@ -85,34 +85,21 @@ pub fn draw(c: *ui.Context, s: *Screen, focused: bool) void {
     }
     if (s.cursor_visible and (!focused or cursorShown(c))) {
         const color = if (focused) theme.accent.alpha(0.75) else theme.muted.alpha(0.5);
-        // It springs between cells, stretching toward where it goes —
-        // squash and stretch, as a caret that means to be somewhere.
-        const id = @intFromPtr(s);
-        const tx = @as(f32, @floatFromInt(s.cur.x)) * m.w;
-        const ty = @as(f32, @floatFromInt(s.cur.y)) * m.h;
-        const px = ui.spring(c, id, 1, tx, cursor_spring);
-        const py = ui.spring(c, id, 2, ty, cursor_spring);
-        var sx: f32 = 1;
-        if (motion.on()) {
-            const going = @min(@abs(tx - px) / @max(m.w, 1), 1);
-            sx = 1 + 0.25 * motion.intensity * going;
-        }
-        const w = m.w * sx;
-        const h = m.h / sx;
+        // It sits on its cell: a terminal's cursor snaps where it goes.
+        // Springing it made every keystroke keep the window animating
+        // (and redrawing) for a beat after the key landed, which read as
+        // typing lag in full-screen programs.
         _ = c.leaf(.{
             .absolute = true,
-            .offset = .{ .x = px - (w - m.w) / 2, .y = py - (h - m.h) / 2 },
-            .width = .{ .px = w },
-            .height = .{ .px = h },
+            .offset = .{ .x = @as(f32, @floatFromInt(s.cur.x)) * m.w, .y = @as(f32, @floatFromInt(s.cur.y)) * m.h },
+            .width = .{ .px = m.w },
+            .height = .{ .px = m.h },
             .background = if (focused) color else null,
             .border = if (focused) null else color,
             .border_width = 1,
         }, .none, null);
     }
 }
-
-/// The caret's spring between cells: quick, a slight overshoot.
-const cursor_spring = ui.Spring{ .response = 0.06, .damping = 0.85 };
 
 /// A terminal's cursor blink: half a second on, half a second off, and
 /// ask for the frame that turns it so an idle screen still blinks.

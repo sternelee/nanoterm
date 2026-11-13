@@ -585,7 +585,7 @@ fn motionPage(c: *ui.Context, w: *Workspace) void {
     defer s.end();
     const b = box(c);
     defer b.end();
-    ui.text(c, "How new output settles in, glyph at a time, and the cursor springs between cells. The system's Reduce Motion turns all of it off.", .{ .size = 12, .color = theme.muted, .wrap = true });
+    ui.text(c, "How new output settles in, glyph at a time, and a running block's bar breathes. The system's Reduce Motion turns all of it off.", .{ .size = 12, .color = theme.muted, .wrap = true });
     {
         const r = ui.div(c).row().wFull().gap(10).itemsCenter();
         defer r.end();

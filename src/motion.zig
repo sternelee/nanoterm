@@ -2,8 +2,8 @@
 //! (every effect's timings), an intensity multiplier (how far each one
 //! goes), and the system's Reduce Motion turning them all off. What
 //! Metalterm does with its motion settings, made one dial set every
-//! animated thing obeys: new output settling in a glyph at a time, the
-//! cursor springing between cells, a running block's bar breathing.
+//! animated thing obeys: new output settling in a glyph at a time and a
+//! running block's bar breathing.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
