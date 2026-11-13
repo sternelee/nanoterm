@@ -128,6 +128,22 @@ pub const Runtime = struct {
         self.callback = callback;
     }
 
+    /// Drains the queue the way the app's frame pump does. Tests have no frame
+    /// loop, so they call this to see what the worker queued; the app never
+    /// does, because `drainMain` already runs on its own schedule.
+    fn drainForTest(self: *Runtime) void {
+        while (true) {
+            const event = blk: {
+                self.mutex.lockUncancelable(threaded_io.io());
+                defer self.mutex.unlock(threaded_io.io());
+                if (self.events.items.len == 0) break :blk null;
+                break :blk self.events.orderedRemove(0);
+            } orelse break;
+            if (self.callback) |callback| callback(self.callback_context, event);
+            freeEvent(event);
+        }
+    }
+
     pub fn start(self: *Runtime, prompt: []const u8, images: []const engine.ImageAttachment) !void {
         if (self.busy()) return error.Busy;
         if (self.worker) |worker| worker.join();
@@ -531,9 +547,11 @@ test "a permission question blocks its worker until an answer arrives" {
     const r = try Runtime.create("/tmp", null, null);
     defer r.deinit();
     const Saw = struct {
-        var got: ?Event.Permission = null;
+        /// Only the id is kept: `freeEvent` frees the strings when the drain
+        /// returns, so holding the whole event would be a dangling read.
+        var got_id: ?u64 = null;
         fn on(_: ?*anyopaque, event: Event) void {
-            if (event == .permission) got = event.permission;
+            if (event == .permission) got_id = event.permission.id;
         }
     };
     r.setCallback(@constCast(&Saw), Saw.on);
@@ -553,13 +571,15 @@ test "a permission question blocks its worker until an answer arrives" {
         var answered = std.atomic.Value(bool).init(false);
     };
     const worker = try std.Thread.spawn(.{}, Worker.run, .{r});
-    // Give the worker time to queue its card and start waiting.
+    // Give the worker time to queue its card, draining as the frame pump would:
+    // `emit` only enqueues, so without a drain the callback never runs.
     var spins: usize = 0;
-    while (Saw.got == null and spins < 2000) : (spins += 1) {
+    while (Saw.got_id == null and spins < 2000) : (spins += 1) {
+        r.drainForTest();
         std.Io.sleep(threaded_io.io(), .fromMilliseconds(1), .awake) catch {};
     }
-    try std.testing.expect(Saw.got != null);
-    try std.testing.expectEqual(@as(u64, 7), Saw.got.?.id);
+    try std.testing.expect(Saw.got_id != null);
+    try std.testing.expectEqual(@as(u64, 7), Saw.got_id.?);
     // A click for a different question must not decide this one.
     r.answerPermission(99, .deny);
     std.Io.sleep(threaded_io.io(), .fromMilliseconds(2), .awake) catch {};
