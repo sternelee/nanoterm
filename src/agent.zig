@@ -57,6 +57,9 @@ pub const Tool = struct {
     duration_ms: ?u64 = null,
     /// Whether `detail` is the head of more output that was not shown.
     truncated: bool = false,
+    /// The built-in Agent streamed this call's output as it ran, so the
+    /// completion event's own copy must not replace what already arrived.
+    streamed: bool = false,
 };
 
 pub const PlanEntry = struct { text: []u8, status: []u8 };
@@ -69,6 +72,10 @@ pub const Permission = struct {
     title: []u8,
     options: []Option,
     chosen: ?usize = null,
+    /// The built-in Agent's question id, when this card came from it rather
+    /// than from an ACP agent. Answering goes back to the worker, not to a
+    /// JSON-RPC client.
+    native_id: ?u64 = null,
 };
 
 /// A visual the agent showed (`show_visual`), live in its turn.
@@ -639,6 +646,8 @@ pub const Agent = struct {
                 }
             },
             .diagnostic => |text| a.appendDiagnostic(t, text),
+            .output => |chunk| a.appendNativeOutput(t, chunk),
+            .permission => |ask| a.addNativePermission(t, ask),
             .tool => |call| {
                 // The built-in Agent reports a call twice, as the ACP path does:
                 // once as it starts and once when it ends. The start makes the
@@ -984,6 +993,27 @@ pub const Agent = struct {
     /// Answers a permission question with option `index`.
     pub fn answer(a: *Agent, p: *Permission, index: usize) void {
         if (p.chosen != null or index >= p.options.len) return;
+        // A built-in Agent question blocks its worker, so the answer goes back
+        // to that worker rather than out as JSON-RPC. Without a runtime there is
+        // nobody to answer, so the card stays open instead of claiming a choice
+        // that never reached fx.
+        if (p.native_id) |id| {
+            const native = a.native orelse return;
+            // Read the decision from the option's own id rather than its
+            // position, so the buttons can be reordered without silently
+            // turning "Deny" into "Allow".
+            const decision: native_agent.PermissionAnswer =
+                if (std.mem.eql(u8, p.options[index].id, "once"))
+                    .once
+                else if (std.mem.eql(u8, p.options[index].id, "always"))
+                    .always
+                else
+                    .deny;
+            p.chosen = index;
+            native.answerPermission(id, decision);
+            a.app.changed(a.app.ctx);
+            return;
+        }
         p.chosen = index;
         a.client.respond(p.rpc_id, .{ .outcome = .{ .outcome = "selected", .optionId = p.options[index].id } });
         a.app.changed(a.app.ctx);
@@ -1321,6 +1351,67 @@ pub const Agent = struct {
         applyNativeToolEvent(a.gpa, tl, call);
     }
 
+    /// A command's output as it arrives, appended to the row it belongs to.
+    /// The row already exists: fx reports the call before it runs it.
+    fn appendNativeOutput(a: *Agent, t: *Turn, chunk: native_agent.Event.Output) void {
+        const tl = nativeTool(t, chunk.call_id) orelse return;
+        if (chunk.bytes.len == 0) return;
+        // The row keeps at most what fx itself keeps for the model, so a chatty
+        // command cannot grow the transcript without bound.
+        const room = native_output_limit -| tl.detail.items.len;
+        if (room == 0) {
+            tl.truncated = true;
+            return;
+        }
+        const take = @min(room, chunk.bytes.len);
+        tl.detail.appendSlice(a.gpa, chunk.bytes[0..take]) catch return;
+        if (take < chunk.bytes.len) tl.truncated = true;
+        tl.streamed = true;
+    }
+
+    /// A tool call waiting for a person. The worker is blocked until this card
+    /// is answered, so it goes into the turn as an item the view can draw.
+    fn addNativePermission(a: *Agent, t: *Turn, ask: native_agent.Event.Permission) void {
+        const labels = [_]struct { id: []const u8, name: []const u8, kind: []const u8 }{
+            .{ .id = "once", .name = "Allow once", .kind = "allow_once" },
+            .{ .id = "always", .name = "Always allow", .kind = "allow_always" },
+            .{ .id = "deny", .name = "Deny", .kind = "reject_once" },
+        };
+        var options: std.ArrayList(Option) = .empty;
+        // A half-built card must not leak the options it already made, and it
+        // must not reach the turn either: the worker is waiting on an answer
+        // that a partial card cannot give.
+        errdefer {
+            for (options.items) |o| {
+                a.gpa.free(o.id);
+                a.gpa.free(o.name);
+                a.gpa.free(o.kind);
+            }
+            options.deinit(a.gpa);
+        }
+        for (labels) |label| {
+            const id = a.gpa.dupe(u8, label.id) catch return;
+            errdefer a.gpa.free(id);
+            const name = a.gpa.dupe(u8, label.name) catch return;
+            errdefer a.gpa.free(name);
+            const kind = a.gpa.dupe(u8, label.kind) catch return;
+            errdefer a.gpa.free(kind);
+            options.append(a.gpa, .{ .id = id, .name = name, .kind = kind }) catch return;
+        }
+        // The label is what fx words the action as; the command, when there is
+        // one, is what a person is really being asked to allow.
+        const title = if (ask.command.len > 0)
+            std.fmt.allocPrint(a.gpa, "{s}: {s}", .{ ask.label, ask.command }) catch return
+        else
+            a.gpa.dupe(u8, ask.label) catch return;
+        a.addItem(t, .{ .permission = .{
+            .rpc_id = a.gpa.dupe(u8, "") catch return,
+            .title = title,
+            .options = options.toOwnedSlice(a.gpa) catch return,
+            .native_id = ask.id,
+        } });
+    }
+
     fn tool(t: *Turn, id: []const u8) ?*Tool {
         for (t.items.items) |*it| switch (it.*) {
             .tool => |*tl| if (std.mem.eql(u8, tl.id, id)) return tl,
@@ -1436,9 +1527,16 @@ fn applyNativeToolEvent(gpa: std.mem.Allocator, tl: *Tool, call: native_agent.Ev
     tl.exit_code = call.exit_code;
     tl.duration_ms = call.duration_ms;
     tl.truncated = call.truncated;
+    // A streamed call already has its output; the completion event's copy is
+    // the same bytes cut to a preview, so replacing would lose the tail.
+    if (tl.streamed) return;
     tl.detail.clearRetainingCapacity();
     tl.detail.appendSlice(gpa, call.output) catch {};
 }
+
+/// How much of one call's output a row keeps. It matches what fx keeps for the
+/// model, so the row is not the narrower view of what ran.
+const native_output_limit = 64 * 1024;
 
 /// A tool event whose strings come from `arena`, so a test can write one with
 /// literals and let the arena free them.

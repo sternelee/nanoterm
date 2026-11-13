@@ -300,7 +300,7 @@ fn permission(s: *Session, arg: []const u8) bool {
     if (arg.len == 0) {
         const mode = readPermission(s.gpa, s.home, s.cwd()) orelse return say(s, "permission mode could not be read.", .{});
         defer s.gpa.free(mode);
-        return say(s, "permission mode is {s}; /permissions <mode> changes it. The built-in agent runs auto inside nanoterm.", .{mode});
+        return say(s, "permission mode is {s}; /permissions <mode> changes it. The built-in agent follows it too.", .{mode});
     }
     if (std.mem.eql(u8, arg, "reset")) {
         setPermission(s.gpa, s.home, "ask") catch {};
