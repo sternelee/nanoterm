@@ -132,3 +132,27 @@ test "pi's execution end reports its output and how it went" {
     try std.testing.expectEqual(types.ToolStatus.completed, result.status);
     try std.testing.expectEqualStrings("ok", result.output);
 }
+
+test "pi's extension select is a question, and its other dialogs are not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A `select` carries its choices as plain strings, which is what the card
+    // offers; the harness has no event for the rest, so they stay unhandled
+    // here and the provider declines them.
+    const select = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"type":"extension_ui_request","id":"e1","method":"select","title":"Pick one","options":["Red","Blue"]}
+    , .{});
+    try std.testing.expectEqualStrings("select", pi_rpc.str(select, "method").?);
+    const options = pi_rpc.obj(select, "options").?;
+    try std.testing.expectEqual(@as(usize, 2), options.array.items.len);
+    try std.testing.expectEqualStrings("Blue", options.array.items[1].string);
+    // mapEvent leaves it alone: the provider handles it before mapping.
+    try std.testing.expectEqual(@as(usize, 0), mapEvent(a, select).len);
+
+    const confirm = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"type":"extension_ui_request","id":"e2","method":"confirm","title":"Sure?","message":"Really?"}
+    , .{});
+    try std.testing.expectEqualStrings("confirm", pi_rpc.str(confirm, "method").?);
+    try std.testing.expectEqual(@as(usize, 0), mapEvent(a, confirm).len);
+}

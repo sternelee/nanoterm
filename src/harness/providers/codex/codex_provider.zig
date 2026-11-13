@@ -18,6 +18,8 @@ const Pending = struct {
     kind: []const u8,
     /// The request's own parameters, to echo back what an allow needs.
     params_json: []const u8,
+    /// A question's own `id`, which is the key its answer is filed under.
+    question_id: ?[]const u8 = null,
 };
 
 const Live = struct {
@@ -154,12 +156,122 @@ pub const CodexProvider = struct {
         live.client.respond(id_json, .{ .decision = protocol.approvalDecision(decision) });
     }
 
+    /// A question the agent wants a person to answer. Its options are the
+    /// answers, so it is a question card rather than an approval one, and it
+    /// is kept until `respond_question` names it.
+    fn askQuestion(p: *CodexProvider, live: *Live, id: []const u8, params: std.json.Value, arena: std.mem.Allocator) void {
+        const rpc_id = std.fmt.parseInt(u32, id, 10) catch return;
+        const questions = protocolObj(params, "questions") orelse {
+            live.client.respond(id, .{ .answers = .{} });
+            return;
+        };
+        if (questions != .array or questions.array.items.len == 0) {
+            live.client.respond(id, .{ .answers = .{} });
+            return;
+        }
+        // One card per question, so a request carrying several asks them in
+        // turn; the first is the one the card shows.
+        const first = questions.array.items[0];
+        const question_id = protocolStr(first, "id") orelse "";
+        const text = protocolStr(first, "question") orelse "";
+        const header = protocolStr(first, "header") orelse "";
+        const title = if (header.len > 0) header else text;
+        const options = p.gpa.alloc(types.QuestionOption, countOptions(first)) catch return;
+        var filled: usize = 0;
+        if (protocolObj(first, "options")) |opts| {
+            if (opts == .array) for (opts.array.items) |o| {
+                const label = protocolStr(o, "label") orelse continue;
+                options[filled] = .{
+                    .id = p.gpa.dupe(u8, label) catch break,
+                    .name = p.gpa.dupe(u8, label) catch break,
+                };
+                filled += 1;
+            };
+        }
+        if (filled == 0) {
+            p.gpa.free(options);
+            // Nothing to pick from: the question can only be typed, and the
+            // card has no field for that, so it is declined rather than left
+            // waiting on a person who cannot answer it.
+            live.client.respond(id, .{ .answers = .{} });
+            return;
+        }
+        const params_json = std.json.Stringify.valueAlloc(p.gpa, params, .{}) catch {
+            for (options[0..filled]) |o| {
+                p.gpa.free(o.id);
+                p.gpa.free(o.name);
+            }
+            p.gpa.free(options);
+            return;
+        };
+        live.approvals.put(p.gpa, rpc_id, .{
+            .kind = p.gpa.dupe(u8, "question") catch {
+                p.gpa.free(params_json);
+                for (options[0..filled]) |o| {
+                    p.gpa.free(o.id);
+                    p.gpa.free(o.name);
+                }
+                p.gpa.free(options);
+                return;
+            },
+            .params_json = params_json,
+            .question_id = p.gpa.dupe(u8, question_id) catch null,
+        }) catch {
+            p.gpa.free(params_json);
+            for (options[0..filled]) |o| {
+                p.gpa.free(o.id);
+                p.gpa.free(o.name);
+            }
+            p.gpa.free(options);
+            return;
+        };
+        _ = arena;
+        p.emit(live, .{ .question_asked = .{
+            .request_id = rpc_id,
+            .title = title,
+            .options = options[0..filled],
+        } });
+    }
+
+    /// Answers a question with the pick at `reply`. Codex files an answer
+    /// under the question's own `id` as a list of strings, which is not the
+    /// shape claude takes, so the two providers build their own reply.
+    pub fn respondQuestion(p: *CodexProvider, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) void {
+        const live = p.live.get(session_id) orelse return;
+        const pending = live.approvals.fetchRemove(request_id) orelse return;
+        defer p.gpa.free(pending.value.kind);
+        defer p.gpa.free(pending.value.params_json);
+        if (pending.value.question_id) |qid| p.gpa.free(qid);
+        var buf: [32]u8 = undefined;
+        const id_json = std.fmt.bufPrint(&buf, "{d}", .{request_id}) catch return;
+        var arena_state: std.heap.ArenaAllocator = .init(p.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const answer = switch (reply) {
+            .text => |t| t,
+            .choice => |i| blk: {
+                // The card sends the option's index; codex wants the label.
+                const label = questionLabel(arena, pending.value.params_json, i) orelse break :blk "";
+                break :blk label;
+            },
+        };
+        const qid = pending.value.question_id orelse "";
+        var one = std.json.Array.init(arena);
+        one.append(.{ .string = answer }) catch return;
+        var entry = std.json.ObjectMap.empty;
+        entry.put(arena, "answers", .{ .array = one }) catch return;
+        var map = std.json.ObjectMap.empty;
+        map.put(arena, qid, .{ .object = entry }) catch return;
+        live.client.respond(id_json, .{ .answers = std.json.Value{ .object = map } });
+    }
+
     fn destroyLive(p: *CodexProvider, live: *Live) void {
         live.client.deinit();
         var ait = live.approvals.iterator();
         while (ait.next()) |e| {
             p.gpa.free(e.value_ptr.kind);
             p.gpa.free(e.value_ptr.params_json);
+            if (e.value_ptr.question_id) |q| p.gpa.free(q);
         }
         live.approvals.deinit(p.gpa);
         p.gpa.free(live.cwd);
@@ -383,9 +495,7 @@ pub const CodexProvider = struct {
             return p.askApproval(live, id, method, params, arena);
         }
         if (std.mem.eql(u8, method, "item/tool/requestUserInput")) {
-            p.emit(live, .{ .note = "Codex asked a question nanoterm has no dialog for; it was skipped" });
-            live.client.respond(id, .{ .answers = .{} });
-            return;
+            return p.askQuestion(live, id, params, arena);
         }
         if (std.mem.eql(u8, method, "mcpServer/elicitation/request")) {
             p.emit(live, .{ .note = "An MCP server asked for a form nanoterm cannot show; it was cancelled" });
@@ -439,4 +549,41 @@ fn protocolStr(v: std.json.Value, key: []const u8) ?[]const u8 {
 fn protocolObj(v: std.json.Value, key: []const u8) ?std.json.Value {
     if (v != .object) return null;
     return v.object.get(key);
+}
+
+/// How many options a question offers, so one allocation holds them all.
+fn countOptions(question: std.json.Value) usize {
+    const opts = protocolObj(question, "options") orelse return 0;
+    if (opts != .array) return 0;
+    return opts.array.items.len;
+}
+
+/// The label of a question's option at `index`, which is what codex expects
+/// back rather than the option's position.
+fn questionLabel(arena: std.mem.Allocator, params_json: []const u8, index: u32) ?[]const u8 {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, params_json, .{}) catch return null;
+    const questions = protocolObj(parsed, "questions") orelse return null;
+    if (questions != .array or questions.array.items.len == 0) return null;
+    const opts = protocolObj(questions.array.items[0], "options") orelse return null;
+    if (opts != .array or index >= opts.array.items.len) return null;
+    return protocolStr(opts.array.items[index], "label");
+}
+
+test "codex's question offers its labels as the answers" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The real shape, from `codex app-server generate-json-schema`.
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"isBlocking":true,"itemId":"i1","threadId":"t1","turnId":"u1","questions":[
+        \\{"header":"Color","id":"q1","question":"Which color do you prefer?","isOther":false,"isSecret":false,
+        \\ "options":[{"label":"Red","description":"Red"},{"label":"Blue","description":"Blue"}]}]}
+    , .{});
+    const questions = protocolObj(params, "questions").?;
+    const first = questions.array.items[0];
+    try std.testing.expectEqual(@as(usize, 2), countOptions(first));
+    // The answer is filed under the question's id, and its value is the
+    // option's label, not its position.
+    try std.testing.expectEqualStrings("q1", protocolStr(first, "id").?);
+    try std.testing.expectEqualStrings("Blue", questionLabel(arena, std.json.Stringify.valueAlloc(arena, params, .{}) catch unreachable, 1).?);
 }

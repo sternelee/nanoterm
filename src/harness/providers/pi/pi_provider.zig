@@ -18,6 +18,18 @@ const Live = struct {
     sink: ?*const fn (ctx: *anyopaque, event: types.HarnessEvent) void = null,
     pending_text: ?[]const u8 = null,
     pending_images: []const types.Image = &.{},
+    /// Pi names an extension's UI request with a string; the harness names a
+    /// question with a number, so each open question keeps its own id here
+    /// along with the options it offered.
+    questions: std.AutoHashMapUnmanaged(u32, OpenQuestion) = .empty,
+    next_question_id: u32 = 1,
+};
+
+/// A `select` waiting on a person: pi's own request id, and the choices it
+/// offered, which is what an answer has to name.
+const OpenQuestion = struct {
+    raw_id: []const u8,
+    options: [][]const u8,
 };
 
 /// The `prompt` command's fields, as `pi.zig` encodes them.
@@ -72,6 +84,13 @@ pub const PiProvider = struct {
 
     fn destroyLive(p: *PiProvider, live: *Live) void {
         live.client.deinit();
+        var qit = live.questions.iterator();
+        while (qit.next()) |e| {
+            for (e.value_ptr.options) |t| p.gpa.free(t);
+            p.gpa.free(e.value_ptr.options);
+            p.gpa.free(e.value_ptr.raw_id);
+        }
+        live.questions.deinit(p.gpa);
         p.gpa.free(live.cwd);
         if (live.model) |m| p.gpa.free(m);
         if (live.pending_text) |t| p.gpa.free(t);
@@ -156,8 +175,98 @@ pub const PiProvider = struct {
     fn onEvent(ctx: *anyopaque, record: std.json.Value, arena: std.mem.Allocator) void {
         const live: *Live = @ptrCast(@alignCast(ctx));
         const kind = pi_rpc.str(record, "type") orelse return;
+        // An extension's dialog needs a person, so it becomes a card rather
+        // than being dropped: a dropped request leaves the extension waiting
+        // for an answer that never comes.
+        if (std.mem.eql(u8, kind, "extension_ui_request")) {
+            live.provider.extensionUi(live, record, arena);
+            return;
+        }
         for (protocol.mapEvent(arena, record)) |event| live.provider.emit(live, event);
         if (std.mem.eql(u8, kind, "agent_settled")) live.provider.emit(live, .{ .turn_ready = {} });
+    }
+
+    /// An extension asking the client for something. `select` offers a list,
+    /// which is a question; the rest have no card, so they are declined the
+    /// way the direct path declines them, and a notice is shown.
+    fn extensionUi(p: *PiProvider, live: *Live, record: std.json.Value, arena: std.mem.Allocator) void {
+        const method = pi_rpc.str(record, "method") orelse return;
+        const raw_id = pi_rpc.str(record, "id") orelse return;
+        if (std.mem.eql(u8, method, "select")) {
+            const options = pi_rpc.obj(record, "options") orelse return;
+            if (options != .array or options.array.items.len == 0) return;
+            const title = pi_rpc.str(record, "title") orelse "Choose";
+            const id = live.next_question_id;
+            live.next_question_id += 1;
+            const owned = p.gpa.dupe(u8, raw_id) catch return;
+            const texts = p.gpa.alloc([]const u8, options.array.items.len) catch {
+                p.gpa.free(owned);
+                return;
+            };
+            var filled: usize = 0;
+            for (options.array.items) |o| {
+                if (o != .string) continue;
+                texts[filled] = p.gpa.dupe(u8, o.string) catch break;
+                filled += 1;
+            }
+            if (filled == 0) {
+                p.gpa.free(texts);
+                p.gpa.free(owned);
+                return;
+            }
+            live.questions.put(p.gpa, id, .{ .raw_id = owned, .options = texts[0..filled] }) catch {
+                for (texts[0..filled]) |t| p.gpa.free(t);
+                p.gpa.free(texts);
+                p.gpa.free(owned);
+                return;
+            };
+            const list = p.gpa.alloc(types.QuestionOption, filled) catch {
+                _ = live.questions.remove(id);
+                for (texts[0..filled]) |t| p.gpa.free(t);
+                p.gpa.free(texts);
+                p.gpa.free(owned);
+                return;
+            };
+            for (texts[0..filled], 0..) |t, i| {
+                list[i] = .{ .id = t, .name = t };
+            }
+            _ = arena;
+            p.emit(live, .{ .question_asked = .{
+                .request_id = id,
+                .title = title,
+                .options = list,
+            } });
+            return;
+        }
+        if (std.mem.eql(u8, method, "confirm")) {
+            live.client.extensionResponse(raw_id, .{ .confirmed = false });
+            p.emit(live, .{ .note = "an extension asked for confirmation; nanoterm has no dialog for it, so it was declined" });
+            return;
+        }
+        if (std.mem.eql(u8, method, "input") or std.mem.eql(u8, method, "editor")) {
+            live.client.extensionResponse(raw_id, .{ .cancelled = true });
+            p.emit(live, .{ .note = "an extension asked for input; nanoterm has no dialog for it, so it was cancelled" });
+            return;
+        }
+        if (std.mem.eql(u8, method, "notify")) {
+            if (pi_rpc.str(record, "message")) |m| p.emit(live, .{ .note = m });
+        }
+    }
+
+    /// Answers a `select` with the pick at `reply`, as the option's own text.
+    pub fn respondQuestion(p: *PiProvider, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) void {
+        const live = p.live.get(session_id) orelse return;
+        const open = live.questions.fetchRemove(request_id) orelse return;
+        defer {
+            for (open.value.options) |t| p.gpa.free(t);
+            p.gpa.free(open.value.options);
+            p.gpa.free(open.value.raw_id);
+        }
+        const value = switch (reply) {
+            .text => |t| t,
+            .choice => |i| if (i < open.value.options.len) open.value.options[i] else "",
+        };
+        live.client.extensionResponse(open.value.raw_id, .{ .value = value });
     }
 
     fn onExited(ctx: *anyopaque, code: i32) void {
