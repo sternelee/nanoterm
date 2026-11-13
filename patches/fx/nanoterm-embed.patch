@@ -160,10 +160,10 @@ index eab73bd6a..04989e457 100644
          try std.testing.expect(spec.source != .global_fx);
      }
 diff --git a/src/core/agent/runtime/orchestrator.zig b/src/core/agent/runtime/orchestrator.zig
-index 895620ded..f25f0c39a 100644
+index 2191712fd..60a426ba0 100644
 --- a/src/core/agent/runtime/orchestrator.zig
 +++ b/src/core/agent/runtime/orchestrator.zig
-@@ -9300,10 +9300,14 @@ fn processQueuedPromptLoop(
+@@ -9505,10 +9505,14 @@ fn processQueuedPromptLoop(
                              reset_stream_for_next_attempt = true;
                              continue;
                          }
@@ -183,7 +183,7 @@ index 895620ded..f25f0c39a 100644
                  }
              }
 diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
-index 87eda48a3..bc67928b4 100644
+index 6be871490..2b6fccdd0 100644
 --- a/src/core/cli/cli_ask.zig
 +++ b/src/core/cli/cli_ask.zig
 @@ -1,6 +1,5 @@
@@ -779,7 +779,7 @@ index 87eda48a3..bc67928b4 100644
      };
  
      const deps = agentRuntimeDeps(&ctx);
-@@ -2156,7 +2244,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2171,7 +2259,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .append_static_context = appendStaticContext,
          .validate_tool_call = validateToolCall,
          .snapshot_mcp_definition = snapshotMcpDefinition,
@@ -787,7 +787,7 @@ index 87eda48a3..bc67928b4 100644
          .check_tool_availability = checkToolAvailability,
          .request_tool_permission = requestToolPermissionOutcomeWithRequest,
          .request_prepared_file_mutation_permission = requestPreparedFileMutationPermissionOutcomeForRuntime,
-@@ -2170,7 +2257,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2185,7 +2272,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .propagate_history_turn = propagateHistoryTurn,
          .commit_context_compaction = .{ .commit = commitContextCompaction },
          .append_turn_piece = if (ctx.v2 != null) appendTurnPiece else null,
@@ -795,7 +795,7 @@ index 87eda48a3..bc67928b4 100644
          .save_prompt_images = if (ctx.v2 != null) savePromptImages else null,
          .propagate_grant = propagateGrant,
          .push_event = pushEvent,
-@@ -2181,7 +2267,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
+@@ -2196,7 +2282,6 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
          .push_context_notice = pushContextNotice,
          .push_session_notice = pushSessionNotice,
          .push_route_recovery_status = pushRouteRecoveryStatus,
@@ -803,7 +803,7 @@ index 87eda48a3..bc67928b4 100644
          .push_command_output_complete = pushCommandOutputComplete,
          .push_http_error = pushHttpError,
          .refresh_gateway_credential = refreshGatewayCredential,
-@@ -2363,11 +2448,6 @@ fn snapshotMcpDefinition(raw_ctx: *anyopaque, arena: Allocator, name: []const u8
+@@ -2395,11 +2480,6 @@ fn snapshotMcpDefinition(raw_ctx: *anyopaque, arena: Allocator, name: []const u8
      return tool_runtime.snapshotMcpDefinition(ctx.toolContext(), arena, name, known);
  }
  
@@ -815,7 +815,7 @@ index 87eda48a3..bc67928b4 100644
  fn validateToolCall(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      if (try ctx.cfg.mode_registry.toolPolicyDeniedJson(arena, ctx.deps.tool_set, ctx.mode_id, call.name)) |reason| {
-@@ -2575,6 +2655,29 @@ fn requestCliPermission(
+@@ -2607,6 +2687,29 @@ fn requestCliPermission(
      _: ?[]const PermissionGrant,
  ) anyerror!permission_request.OwnedPermissionResponse {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -845,7 +845,7 @@ index 87eda48a3..bc67928b4 100644
      return switch (try promptCliPermissionApproval(ctx, request.label)) {
          .approve => permission_request.OwnedPermissionResponse.init(alloc, .once, null),
          .deny => permission_request.OwnedPermissionResponse.init(alloc, .deny, null),
-@@ -2626,6 +2729,9 @@ fn cliPermissionPromptAllowed(
+@@ -2658,6 +2761,9 @@ fn cliPermissionPromptAllowed(
  }
  
  fn cliContextPermissionPromptAllowed(ctx: *const AskContext) bool {
@@ -855,7 +855,7 @@ index 87eda48a3..bc67928b4 100644
      return cliPermissionPromptAllowed(
          ctx.output_mode,
          ctx.prompt_permissions,
-@@ -2712,6 +2818,7 @@ fn executeToolCallAuthorized(
+@@ -2744,6 +2850,7 @@ fn executeToolCallAuthorized(
      request: agent_runtime.ToolExecutionRequest,
  ) !ToolExecutionResult {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -863,7 +863,7 @@ index 87eda48a3..bc67928b4 100644
      var tool_ctx = ctx.toolContext();
      tool_ctx.root_user_intent_context = request.root_user_intent_context;
      tool_ctx.root_user_messages = request.root_user_messages;
-@@ -2730,11 +2837,130 @@ fn executeToolCallAuthorized(
+@@ -2762,11 +2869,130 @@ fn executeToolCallAuthorized(
      return result;
  }
  
@@ -994,7 +994,7 @@ index 87eda48a3..bc67928b4 100644
      if (ctx.output_mode.capturesJson()) {
          appendToolCallRecordBestEffort(
              ctx,
-@@ -2752,6 +2978,7 @@ fn captureToolExecutionResult(
+@@ -2784,6 +3010,7 @@ fn captureToolExecutionResult(
      request: agent_runtime.ToolExecutionRequest,
      result: ToolExecutionResult,
  ) void {
@@ -1002,7 +1002,7 @@ index 87eda48a3..bc67928b4 100644
      if (ctx.output_mode.capturesJson()) {
          appendToolCallRecordBestEffort(
              ctx,
-@@ -2786,6 +3013,7 @@ fn recordToolCallRejected(
+@@ -2818,6 +3045,7 @@ fn recordToolCallRejected(
      command_result_json: ?[]const u8,
  ) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -1010,7 +1010,7 @@ index 87eda48a3..bc67928b4 100644
      if (!ctx.output_mode.capturesJson()) return;
      appendToolCallRecordBestEffort(
          ctx,
-@@ -2809,6 +3037,7 @@ fn recordToolCallFailed(
+@@ -2841,6 +3069,7 @@ fn recordToolCallFailed(
      command_result_json: ?[]const u8,
  ) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -1018,7 +1018,7 @@ index 87eda48a3..bc67928b4 100644
      if (!ctx.output_mode.capturesJson()) return;
      appendToolCallRecordBestEffort(
          ctx,
-@@ -3116,16 +3345,6 @@ fn appendTurnPiece(raw_ctx: *anyopaque, progress: agent_runtime.TurnProgress) !v
+@@ -3151,16 +3380,6 @@ fn appendTurnPiece(raw_ctx: *anyopaque, progress: agent_runtime.TurnProgress) !v
      ctx.prompt_snapshot_committed = true;
  }
  
@@ -1035,7 +1035,7 @@ index 87eda48a3..bc67928b4 100644
  /// The prompt's images become the session's blobs before its first request
  /// (D89). A failure leaves the rest inline, with no path, as the adapter
  /// does for one image the store refuses.
-@@ -3145,10 +3364,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
+@@ -3180,10 +3399,7 @@ fn pushEvent(raw_ctx: *anyopaque, event: WorkerEvent) !void {
      const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
      defer worker_runtime.freeWorkerEvent(std.heap.c_allocator, event);
      switch (event) {
@@ -1047,7 +1047,7 @@ index 87eda48a3..bc67928b4 100644
          .provider_resolved => |slug| {
              if (ctx.resolved_provider) |old| ctx.alloc.free(old);
              ctx.resolved_provider = try ctx.alloc.dupe(u8, slug);
-@@ -3310,6 +3526,12 @@ fn publishPendingToolProgress(ctx: *AskContext, call_id: []const u8, text: []con
+@@ -3345,6 +3561,12 @@ fn publishPendingToolProgress(ctx: *AskContext, call_id: []const u8, text: []con
          pending.visible = true;
          return;
      }
@@ -1060,7 +1060,7 @@ index 87eda48a3..bc67928b4 100644
      try ctx.writeStderr(text);
      try ctx.writeStderr("\n");
      pending.visible = true;
-@@ -3430,34 +3652,25 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
+@@ -3465,34 +3687,25 @@ fn pushContextNotice(raw_ctx: *anyopaque, text: []const u8) !void {
      try pushSystemNotice(raw_ctx, text);
  }
  
@@ -1107,7 +1107,7 @@ index 87eda48a3..bc67928b4 100644
      var label_buf: [types.RouteRecoveryStatus.label_max_bytes]u8 = undefined;
      try pushSystemNotice(raw_ctx, status.label(&label_buf));
  }
-@@ -3499,9 +3712,20 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const
+@@ -3534,9 +3747,20 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const
      return tool_result_errors.formatToolExecutionErrorJson(arena, tool_name, err);
  }
  
@@ -1129,7 +1129,7 @@ index 87eda48a3..bc67928b4 100644
      try ctx.writeStderr(chunk);
      if (chunk.len > 0) ctx.command_output_line_open = chunk[chunk.len - 1] != '\n';
  }
-@@ -3758,111 +3982,117 @@ fn resolveAskSubagentAuthority(
+@@ -3793,111 +4017,117 @@ fn resolveAskSubagentAuthority(
      );
  }
  
@@ -1344,7 +1344,7 @@ index 87eda48a3..bc67928b4 100644
          }
      }
  
-@@ -3877,35 +4107,6 @@ fn parseAskOptions(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSou
+@@ -3912,35 +4142,6 @@ fn parseAskOptions(alloc: Allocator, args: []const [:0]const u8, stdin: StdinSou
      return opts;
  }
  
@@ -1380,7 +1380,7 @@ index 87eda48a3..bc67928b4 100644
  fn emitHeadlessYoloWarning(alloc: Allocator, options: RunOptions) !void {
      if (options.color_enabled and options.deps.stderr_is_tty(options.deps.stderr_ctx)) {
          try options.deps.write_stderr(
-@@ -4086,15 +4287,11 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
+@@ -4121,15 +4322,11 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
          }
          try out.writer.writeAll("}");
      }
@@ -1401,7 +1401,7 @@ index 87eda48a3..bc67928b4 100644
      if (result.error_code) |error_code| {
          try out.writer.writeAll(",\"error\":");
          try std.json.Stringify.value(error_code, .{}, &out.writer);
-@@ -4104,19 +4301,34 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
+@@ -4139,19 +4336,34 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
          try failure.writeJson(&out.writer);
      }
      if (result.recovery) |recovery| {
@@ -1443,7 +1443,7 @@ index 87eda48a3..bc67928b4 100644
          .assistant_output = &.{},
          .error_code = err_name,
      });
-@@ -4165,18 +4377,17 @@ fn loadStartupStateDefault(
+@@ -4200,18 +4412,17 @@ fn loadStartupStateDefault(
      default_agent_step_limit: usize,
      provider_override: ?model_provider.ProviderId,
      model_override: ?[]const u8,
@@ -1465,7 +1465,7 @@ index 87eda48a3..bc67928b4 100644
      );
  }
  
-@@ -4353,7 +4564,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
+@@ -4388,7 +4599,7 @@ fn testModelPromptOverlay(model: []const u8) ?[]const u8 {
  
  fn testConfig() Config {
      return .{
@@ -1474,7 +1474,7 @@ index 87eda48a3..bc67928b4 100644
          .default_model = "model",
          .default_agent_step_limit = 4,
          .gateway_retry_count = 1,
-@@ -4379,7 +4590,7 @@ fn testConfig() Config {
+@@ -4414,7 +4625,7 @@ fn testConfig() Config {
      };
  }
  
@@ -1483,7 +1483,7 @@ index 87eda48a3..bc67928b4 100644
      var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
      errdefer state.deinit(alloc);
      state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
-@@ -4388,7 +4599,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
+@@ -4423,7 +4634,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
      return state;
  }
  
@@ -1492,7 +1492,7 @@ index 87eda48a3..bc67928b4 100644
      var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
      errdefer state.deinit(alloc);
      state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
-@@ -4401,14 +4612,14 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
+@@ -4436,14 +4647,14 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
      return state;
  }
  
@@ -1511,7 +1511,7 @@ index 87eda48a3..bc67928b4 100644
      errdefer state.deinit(alloc);
      state.config_diagnostics = try alloc.alloc(config_runtime.ConfigDiagnostic, 1);
      state.config_diagnostics[0] = .{
-@@ -4418,8 +4629,8 @@ fn testMissingKeyDiagnosticStartup(alloc: Allocator, transport: oauth_transport.
+@@ -4453,8 +4664,8 @@ fn testMissingKeyDiagnosticStartup(alloc: Allocator, transport: oauth_transport.
      return state;
  }
  
@@ -1522,7 +1522,7 @@ index 87eda48a3..bc67928b4 100644
      errdefer state.deinit(alloc);
      state.configured_model = try alloc.dupe(u8, default_model);
      return state;
-@@ -4440,41 +4651,29 @@ fn testProcessQueuedPrompt(_: *agent_runtime.Agent, deps: *const agent_runtime.A
+@@ -4475,41 +4686,29 @@ fn testProcessQueuedPrompt(_: *agent_runtime.Agent, deps: *const agent_runtime.A
  fn testProcessQueuedPromptRecoveryLifecycle(_: *agent_runtime.Agent, deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, _: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
      try std.testing.expect(semantic_presentation == null);
      try std.testing.expectEqual(hooks.ScopeKind.ask, lifecycle.scope.kind);
@@ -1577,7 +1577,7 @@ index 87eda48a3..bc67928b4 100644
          .diagnostic = types.ModelFailureDiagnostic.init("TestProviderSerializationFailed"),
      });
      return error.TestProviderSerializationFailed;
-@@ -4544,13 +4743,12 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(_: *agent_runtime.Agent, deps:
+@@ -4579,13 +4778,12 @@ fn testProcessQueuedPromptChecksExecOnlyTerminal(_: *agent_runtime.Agent, deps:
      for (advertised_shell.input_schema.properties) |property| {
          try std.testing.expect(!std.mem.eql(u8, property.name, "tty"));
      }
@@ -1593,7 +1593,7 @@ index 87eda48a3..bc67928b4 100644
      try testPushAssistantText(deps, "assistant text");
  }
  
-@@ -4561,8 +4759,7 @@ fn testProcessQueuedPromptChecksFullTerminal(_: *agent_runtime.Agent, deps: *con
+@@ -4596,8 +4794,7 @@ fn testProcessQueuedPromptChecksFullTerminal(_: *agent_runtime.Agent, deps: *con
      const advertised_shell = for (cfg.advertised_functions) |function| {
          if (std.mem.eql(u8, function.name, "shell")) break function;
      } else return error.TestExpectedEqual;
@@ -1603,7 +1603,7 @@ index 87eda48a3..bc67928b4 100644
      try testPushAssistantText(deps, "assistant text");
  }
  
-@@ -4612,9 +4809,9 @@ var test_initialize_session_store_calls: usize = 0;
+@@ -4647,9 +4844,9 @@ var test_initialize_session_store_calls: usize = 0;
  var test_image_preflight_startup_calls: usize = 0;
  var test_image_preflight_process_calls: usize = 0;
  
@@ -1615,7 +1615,7 @@ index 87eda48a3..bc67928b4 100644
  }
  
  fn testCountImagePreflightProcess(agent: *agent_runtime.Agent, deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, job: worker_runtime.QueuedPrompt) !void {
-@@ -4718,8 +4915,8 @@ fn testLoadTruncatedSkillsWithDiagnostic(
+@@ -4753,8 +4950,8 @@ fn testLoadTruncatedSkillsWithDiagnostic(
      };
  }
  
@@ -1626,7 +1626,7 @@ index 87eda48a3..bc67928b4 100644
      state.context_limits.skill_catalog_bytes = .{
          .value = .{ .bytes = 0 },
          .source = .command_line,
-@@ -4873,7 +5070,7 @@ const TestContextRegistryFixture = struct {
+@@ -4894,7 +5091,7 @@ const TestContextRegistryFixture = struct {
          defer messages.deinit(arena);
  
          const append_static = deps.append_static_context orelse return error.TestExpectedEqual;
@@ -1635,7 +1635,7 @@ index 87eda48a3..bc67928b4 100644
          try deps.append_runtime_context(deps.ctx, arena, &messages);
          try std.testing.expectEqual(
              ctx.permission_mode,
-@@ -4903,8 +5100,8 @@ const test_cli_context_registry = context_contract.Registry{ .default_provider =
+@@ -4924,8 +5121,8 @@ const test_cli_context_registry = context_contract.Registry{ .default_provider =
      .append_transient_fn = TestContextRegistryFixture.appendTransient,
  } };
  
@@ -1646,7 +1646,7 @@ index 87eda48a3..bc67928b4 100644
      state.context_enabled = false;
      return state;
  }
-@@ -5069,7 +5266,7 @@ test "CLI prompt projection configures web search then blocks native execution"
+@@ -5090,7 +5287,7 @@ test "CLI prompt projection configures web search then blocks native execution"
      defer messages.deinit(arena);
      const deps = agentRuntimeDeps(&ctx);
      const append_static = deps.append_static_context orelse return error.TestExpectedEqual;
@@ -1655,7 +1655,7 @@ index 87eda48a3..bc67928b4 100644
      try deps.append_runtime_context(deps.ctx, arena, &messages);
  
      try std.testing.expectEqualStrings("stale-key", ctx.web_search_runtime.api_key);
-@@ -5260,6 +5457,7 @@ test "parse options preserves active ask flags and operands" {
+@@ -5281,6 +5478,7 @@ test "parse options preserves active ask flags and operands" {
          "--json",
          "--prompt-permissions",
          "--quiet",
@@ -1663,7 +1663,7 @@ index 87eda48a3..bc67928b4 100644
          "--no-save",
          "--no-color",
          "--timeout",
-@@ -5269,10 +5467,11 @@ test "parse options preserves active ask flags and operands" {
+@@ -5290,10 +5488,11 @@ test "parse options preserves active ask flags and operands" {
      }, .tty);
      defer options.deinit(std.testing.allocator);
  
@@ -1676,7 +1676,7 @@ index 87eda48a3..bc67928b4 100644
      try std.testing.expect(options.no_save);
      try std.testing.expect(options.no_color);
      try std.testing.expectEqual(@as(?usize, 123 * std.time.ms_per_s), options.timeout_ms);
-@@ -5283,36 +5482,32 @@ test "parse options preserves active ask flags and operands" {
+@@ -5304,36 +5503,32 @@ test "parse options preserves active ask flags and operands" {
      try std.testing.expectEqualStrings("hello world", options.prompt);
  }
  
@@ -1724,7 +1724,7 @@ index 87eda48a3..bc67928b4 100644
      try std.testing.expectEqualStrings("--full-access --yolo --auto", literal.prompt);
  
      const cases = [_]struct {
-@@ -5326,7 +5521,7 @@ test "parse options preserves full access aliases after the delimiter as prompt
+@@ -5347,7 +5542,7 @@ test "parse options preserves full access aliases after the delimiter as prompt
      for (cases) |case| {
          var options = try parseOptionsWithStdin(alloc, &.{ case.flag, "--", "--full-access", "--yolo", "--auto" }, .tty);
          defer options.deinit(alloc);
@@ -1733,7 +1733,7 @@ index 87eda48a3..bc67928b4 100644
          try std.testing.expectEqualStrings("--full-access --yolo --auto", options.prompt);
      }
  }
-@@ -5343,45 +5538,24 @@ test "parse options preserves model effort and fast overrides" {
+@@ -5364,45 +5559,24 @@ test "parse options preserves model effort and fast overrides" {
      }, .tty);
      defer options.deinit(alloc);
  
@@ -1787,7 +1787,7 @@ index 87eda48a3..bc67928b4 100644
  }
  
  test "parse options accepts provider routing flags and rejects malformed values" {
-@@ -5389,51 +5563,41 @@ test "parse options accepts provider routing flags and rejects malformed values"
+@@ -5410,51 +5584,41 @@ test "parse options accepts provider routing flags and rejects malformed values"
  
      var options = try parseOptionsWithStdin(alloc, &.{ "--provider-order", "azure,anthropic", "--provider-strict", "hello" }, .tty);
      defer options.deinit(alloc);
@@ -1851,7 +1851,7 @@ index 87eda48a3..bc67928b4 100644
      try std.testing.expectEqualStrings("--model --fast", literal.prompt);
  }
  
-@@ -5737,33 +5901,27 @@ test "preflightAskImages resolves image paths from the workspace" {
+@@ -5758,33 +5922,27 @@ test "preflightAskImages resolves image paths from the workspace" {
      try std.testing.expectEqualStrings(expected_path, options.images.items[0].path);
  }
  
@@ -1897,7 +1897,7 @@ index 87eda48a3..bc67928b4 100644
      try std.testing.expectError(error.MissingPrompt, parseOptionsWithStdin(std.testing.allocator, &.{}, .tty));
  }
  
-@@ -5804,14 +5962,14 @@ test "stdin prompt reader propagates allocation failure" {
+@@ -5825,14 +5983,14 @@ test "stdin prompt reader propagates allocation failure" {
  
  test "stdin prompt errors keep exact structured names" {
      const alloc = std.testing.allocator;
@@ -1914,7 +1914,7 @@ index 87eda48a3..bc67928b4 100644
      defer alloc.free(read_failure);
      try std.testing.expectEqualStrings(
          "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"PromptInputReadFailed\"}\n",
-@@ -5828,7 +5986,7 @@ test "image preparation failure has stable text and JSON contracts" {
+@@ -5849,7 +6007,7 @@ test "image preparation failure has stable text and JSON contracts" {
      try std.testing.expect(askErrorNotice(error.Cancelled) == null);
      try std.testing.expect(askErrorNotice(error.TimedOut) == null);
  
@@ -1923,7 +1923,7 @@ index 87eda48a3..bc67928b4 100644
      defer alloc.free(json);
      try std.testing.expectEqualStrings(
          "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"ImagePreparationFailed\"}\n",
-@@ -5856,7 +6014,6 @@ test "unresolved image capability has actionable text and stable JSON code" {
+@@ -5877,7 +6035,6 @@ test "unresolved image capability has actionable text and stable JSON code" {
      const json = try renderErrorJsonResult(
          alloc,
          @errorName(error.ModelImageCapabilityUnavailable),
@@ -1931,7 +1931,7 @@ index 87eda48a3..bc67928b4 100644
      );
      defer alloc.free(json);
      try std.testing.expectEqualStrings(
-@@ -6101,9 +6258,7 @@ fn testLoadStartupStateWithCancellation(
+@@ -6122,9 +6279,7 @@ fn testLoadStartupStateWithCancellation(
      secret_store: host.SecretStore,
      default_model: []const u8,
      default_agent_step_limit: usize,
@@ -1941,7 +1941,7 @@ index 87eda48a3..bc67928b4 100644
  ) !app_lifecycle.StartupState {
      const state = try testPresentKeyStartup(
          alloc,
-@@ -6112,8 +6267,6 @@ fn testLoadStartupStateWithCancellation(
+@@ -6133,8 +6288,6 @@ fn testLoadStartupStateWithCancellation(
          default_model,
          default_agent_step_limit,
          null,
@@ -1950,7 +1950,7 @@ index 87eda48a3..bc67928b4 100644
      );
      if (test_startup_cancellation_stage == .after_startup_state) {
          requestTestHeadlessInterrupt();
-@@ -7326,11 +7479,11 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
+@@ -7347,11 +7500,11 @@ test "fx ask renders one-off resume denial in text and JSON modes" {
          json: bool,
      }{
          .{
@@ -1964,7 +1964,7 @@ index 87eda48a3..bc67928b4 100644
              .json = true,
          },
      };
-@@ -7611,23 +7764,30 @@ test "parse options rejects model-unsafe prompt text from arguments and stdin" {
+@@ -7632,23 +7785,30 @@ test "parse options rejects model-unsafe prompt text from arguments and stdin" {
      );
  }
  
@@ -2007,7 +2007,7 @@ index 87eda48a3..bc67928b4 100644
      try std.testing.expectError(
          error.NoSaveResumeConflict,
          parseOptionsWithStdin(
-@@ -7640,7 +7800,7 @@ test "parse options keeps the last resume target and rejects no-save resume" {
+@@ -7661,7 +7821,7 @@ test "parse options keeps the last resume target and rejects no-save resume" {
          error.NoSaveResumeConflict,
          parseOptionsWithStdin(
              std.testing.allocator,
@@ -2016,7 +2016,7 @@ index 87eda48a3..bc67928b4 100644
              .tty,
          ),
      );
-@@ -7747,29 +7907,9 @@ test "render final JSON reports the successful recovery attempt" {
+@@ -7768,29 +7928,9 @@ test "render final JSON reports the successful recovery attempt" {
          .exit_code = 0,
          .assistant_output = try alloc.dupe(u8, "recovered"),
          .recovery = .{
@@ -2049,7 +2049,7 @@ index 87eda48a3..bc67928b4 100644
          },
      };
      defer result.deinit(alloc);
-@@ -7779,10 +7919,13 @@ test "render final JSON names what a needs-you status needs" {
+@@ -7800,10 +7940,13 @@ test "render final JSON names what a needs-you status needs" {
      var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
      defer parsed.deinit();
      const recovery = parsed.value.object.get("recovery").?.object;
@@ -2067,7 +2067,7 @@ index 87eda48a3..bc67928b4 100644
  }
  
  test "render final JSON includes the latest terminal recovery diagnostic" {
-@@ -7792,7 +7935,8 @@ test "render final JSON includes the latest terminal recovery diagnostic" {
+@@ -7813,7 +7956,8 @@ test "render final JSON includes the latest terminal recovery diagnostic" {
          .assistant_output = try alloc.dupe(u8, ""),
          .recovery = .{
              .kind = .terminal_provider_error,
@@ -2077,7 +2077,7 @@ index 87eda48a3..bc67928b4 100644
              .cause = .provider_unavailable,
              .diagnostic = types.ModelFailureDiagnostic.init(
                  "HTTP 503 · no_available_providers: No providers are currently available",
-@@ -8472,7 +8616,7 @@ test "json run with session setup failure still emits final object" {
+@@ -8518,7 +8662,7 @@ test "json run with session setup failure still emits final object" {
  
      const exit_code = try runWithDeps(
          alloc,
@@ -2086,7 +2086,7 @@ index 87eda48a3..bc67928b4 100644
          testConfig(),
          deps,
      );
-@@ -8692,38 +8836,13 @@ test "fx ask JSON recovery keeps stdout structured and reports progress on stder
+@@ -8737,38 +8881,13 @@ test "fx ask JSON recovery keeps stdout structured and reports progress on stder
      var parsed = try std.json.parseFromSlice(std.json.Value, alloc, stdout_capture.bytes.items, .{});
      defer parsed.deinit();
      try std.testing.expectEqualStrings("assistant text", parsed.value.object.get("output").?.string);
@@ -2127,7 +2127,7 @@ index 87eda48a3..bc67928b4 100644
  test "fx ask JSON reports the consumed attempt after retry admission failure" {
      const alloc = std.testing.allocator;
      var stdout_capture: TestCapture = .{};
-@@ -8743,12 +8862,12 @@ test "fx ask JSON reports the consumed attempt after retry admission failure" {
+@@ -8788,12 +8907,12 @@ test "fx ask JSON reports the consumed attempt after retry admission failure" {
      const recovery = parsed.value.object.get("recovery").?.object;
      try std.testing.expectEqualStrings("failed", recovery.get("state").?.string);
      try std.testing.expectEqual(@as(i64, 1), recovery.get("attempt").?.integer);
@@ -2143,10 +2143,10 @@ index 87eda48a3..bc67928b4 100644
  }
  
 diff --git a/src/core/cli/cli_surface.zig b/src/core/cli/cli_surface.zig
-index c3c47cab5..58ca59386 100644
+index 5c5e6c4e5..fbc3294d5 100644
 --- a/src/core/cli/cli_surface.zig
 +++ b/src/core/cli/cli_surface.zig
-@@ -2411,11 +2411,11 @@ fn runGithubWorkflow(
+@@ -2442,11 +2442,11 @@ fn runGithubWorkflow(
  
      const workflow_cfg = workflowConfigWithLaunchModifiers(cfg, launch_modifiers);
      if (!opts.create) {
@@ -2616,7 +2616,7 @@ index 000000000..f6e7ecaa6
 +    );
 +}
 diff --git a/src/gateway/chat_completions_protocol.zig b/src/gateway/chat_completions_protocol.zig
-index eaa3bfc2e..2fcbb974e 100644
+index 77fbc6ddf..5c2f776cc 100644
 --- a/src/gateway/chat_completions_protocol.zig
 +++ b/src/gateway/chat_completions_protocol.zig
 @@ -689,7 +689,26 @@ pub const Reducer = struct {
