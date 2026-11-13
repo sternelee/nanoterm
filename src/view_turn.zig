@@ -233,12 +233,13 @@ fn plan(c: *ui.Context, entries: []const agent_mod.PlanEntry) void {
 }
 
 fn permission(c: *ui.Context, app: *App, p: *agent_mod.Permission) void {
-    const box = ui.div(c).column().wFull().p(12).gap(10).bg(theme.background).rounded(8).border(if (p.chosen == null) theme.warning else theme.border);
+    const accent = if (p.question) theme.accent else theme.warning;
+    const box = ui.div(c).column().wFull().p(12).gap(10).bg(theme.background).rounded(8).border(if (p.chosen == null) accent else theme.border);
     defer box.end();
     {
         const r = ui.div(c).row().gap(8).itemsCenter();
         defer r.end();
-        ui.icon(c, "hand.raised", .{ .size = 12, .color = theme.warning });
+        ui.icon(c, if (p.question) "questionmark.circle" else "hand.raised", .{ .size = 12, .color = accent });
         ui.text(c, p.title, .{ .size = 13, .weight = .semibold, .wrap = true });
     }
     if (p.chosen) |i| {
@@ -248,8 +249,10 @@ fn permission(c: *ui.Context, app: *App, p: *agent_mod.Permission) void {
     const r = ui.div(c).row().gap(8);
     defer r.end();
     for (p.options, 0..) |o, i| {
+        // A question's options are all answers, so none of them is the
+        // destructive one; a permission's first allow is the primary action.
         const allow = std.mem.startsWith(u8, o.kind, "allow");
-        const variant: ui.ButtonOptions = .{ .variant = if (allow and i == 0) .primary else if (allow) .secondary else .ghost, .size = 12.5 };
+        const variant: ui.ButtonOptions = .{ .variant = if (p.question) .secondary else if (allow and i == 0) .primary else if (allow) .secondary else .ghost, .size = 12.5 };
         if (ui.button(c, o.name, variant).clicked) if (app.agent) |ag| ag.answer(p, i);
     }
 }

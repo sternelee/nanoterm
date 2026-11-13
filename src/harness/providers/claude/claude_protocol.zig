@@ -330,19 +330,59 @@ fn result(arena: std.mem.Allocator, v: std.json.Value) []const types.HarnessEven
     return out.items;
 }
 
-/// Claude asks the client to allow a tool with `can_use_tool`.
+/// Claude asks the client to allow a tool with `can_use_tool`. Its own
+/// `AskUserQuestion` arrives the same way, but it is a question rather than a
+/// permission: the options are the answers to pick from, not allow or deny.
 fn controlRequest(arena: std.mem.Allocator, v: std.json.Value) []const types.HarnessEvent {
     const request = obj(v, "request") orelse return &.{};
     if (!std.mem.eql(u8, str(request, "subtype") orelse "", "can_use_tool")) return &.{};
     const id = str(v, "request_id") orelse return &.{};
     const tool_name = str(request, "tool_name") orelse "";
     const input = if (obj(request, "input")) |i| std.json.Stringify.valueAlloc(arena, i, .{}) catch null else null;
+    if (std.mem.eql(u8, tool_name, "AskUserQuestion")) {
+        if (questionAsked(arena, id, request)) |q| return q;
+    }
     const title = if (input) |i| std.fmt.allocPrint(arena, "{s} {s}", .{ tool_name, i }) catch tool_name else tool_name;
     return one(arena, .{ .permission_request = .{
         .request_id = @intCast(std.fmt.parseInt(u32, id, 10) catch 0),
         .title = title,
         .tool_name = tool_name,
         .input = input,
+    } });
+}
+
+/// `AskUserQuestion`'s input as a `question_asked`: the first question's text
+/// is the card's title and its options are the answers. Claude sends one
+/// question per call in practice; a second one would need a second card, and
+/// the first is the one the user is looking at.
+fn questionAsked(arena: std.mem.Allocator, id: []const u8, request: std.json.Value) ?[]const types.HarnessEvent {
+    const input = obj(request, "input") orelse return null;
+    const questions = blk: {
+        const q = obj(input, "questions") orelse return null;
+        break :blk if (q == .array) q.array.items else return null;
+    };
+    if (questions.len == 0) return null;
+    const first = questions[0];
+    const title = str(first, "question") orelse str(first, "header") orelse return null;
+    const raw = blk: {
+        const o = obj(first, "options") orelse return null;
+        break :blk if (o == .array) o.array.items else return null;
+    };
+    if (raw.len == 0) return null;
+    const options = arena.alloc(types.QuestionOption, raw.len) catch return null;
+    for (raw, 0..) |o, i| {
+        // The label is what the user picks; the description is the subtitle
+        // Claude wrote for it, so it is not folded into the name.
+        const label = str(o, "label") orelse return null;
+        options[i] = .{
+            .id = label,
+            .name = label,
+        };
+    }
+    return one(arena, .{ .question_asked = .{
+        .request_id = @intCast(std.fmt.parseInt(u32, id, 10) catch 0),
+        .title = title,
+        .options = options,
     } });
 }
 
@@ -425,6 +465,38 @@ test "a permission request names the tool it wants" {
     const ask = mapMessage(a, v)[0].permission_request;
     try std.testing.expectEqual(@as(u32, 7), ask.request_id);
     try std.testing.expectEqualStrings("Bash", ask.tool_name);
+}
+
+test "claude's own question arrives as a question, not a permission" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The shape claude 2.1.128 sends, captured from a live run.
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"type":"control_request","request_id":"9","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Red","description":"Red"},{"label":"Blue","description":"Blue"}],"multiSelect":false}]}}}
+    , .{});
+    const q = mapMessage(a, v)[0].question_asked;
+    try std.testing.expectEqual(@as(u32, 9), q.request_id);
+    try std.testing.expectEqualStrings("Which color do you prefer?", q.title);
+    try std.testing.expectEqual(@as(usize, 2), q.options.len);
+    // The label is both what is shown and what is sent back.
+    try std.testing.expectEqualStrings("Red", q.options[0].name);
+    try std.testing.expectEqualStrings("Red", q.options[0].id);
+    try std.testing.expectEqualStrings("Blue", q.options[1].name);
+}
+
+test "a question with no options stays a permission card" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Nothing to pick from means no question card; the permission path is the
+    // one that still shows the tool and its input.
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"type":"control_request","request_id":"11","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[]}}}
+    , .{});
+    const ev = mapMessage(a, v)[0];
+    try std.testing.expect(ev == .permission_request);
+    try std.testing.expectEqualStrings("AskUserQuestion", ev.permission_request.tool_name);
 }
 
 pub fn str(v: std.json.Value, key: []const u8) ?[]const u8 {

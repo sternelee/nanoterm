@@ -124,6 +124,58 @@ pub const ClaudeProvider = struct {
         live.client.sendRaw(aw.written());
     }
 
+    /// Answers an `AskUserQuestion`. Claude reads the picks out of
+    /// `updatedInput.answers`, keyed by the question's own text, so the stored
+    /// input is re-sent with that map added rather than replaced: the tool
+    /// still needs its `questions` to know what was asked.
+    pub fn respondQuestion(p: *ClaudeProvider, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) void {
+        const live = p.live.get(session_id) orelse return;
+        const stored = live.approvals.fetchRemove(request_id) orelse return;
+        defer p.gpa.free(stored.value);
+        const answer = switch (reply) {
+            .text => |t| t,
+            .choice => |i| blk: {
+                // The card sends the option's index; claude wants the label.
+                const picked = questionLabel(p.gpa, stored.value, i) orelse return;
+                defer p.gpa.free(picked);
+                break :blk picked;
+            },
+        };
+        const question = questionText(p.gpa, stored.value) orelse return;
+        defer p.gpa.free(question);
+        const line = buildQuestionResponse(p.gpa, request_id, stored.value, question, answer) orelse return;
+        defer p.gpa.free(line);
+        live.client.sendRaw(line);
+    }
+
+    /// The `question` text of a stored `AskUserQuestion` input, which is the
+    /// key claude files the answer under.
+    fn questionText(gpa: std.mem.Allocator, input_json: []const u8) ?[]u8 {
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const v = std.json.parseFromSliceLeaky(std.json.Value, arena, input_json, .{}) catch return null;
+        const questions = protocol.obj(v, "questions") orelse return null;
+        if (questions != .array or questions.array.items.len == 0) return null;
+        const first = questions.array.items[0];
+        const text = protocol.str(first, "question") orelse protocol.str(first, "header") orelse return null;
+        return gpa.dupe(u8, text) catch null;
+    }
+
+    /// The label of the option at `index` in a stored `AskUserQuestion` input.
+    fn questionLabel(gpa: std.mem.Allocator, input_json: []const u8, index: u32) ?[]u8 {
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const v = std.json.parseFromSliceLeaky(std.json.Value, arena, input_json, .{}) catch return null;
+        const questions = protocol.obj(v, "questions") orelse return null;
+        if (questions != .array or questions.array.items.len == 0) return null;
+        const options = protocol.obj(questions.array.items[0], "options") orelse return null;
+        if (options != .array or index >= options.array.items.len) return null;
+        const text = protocol.str(options.array.items[index], "label") orelse return null;
+        return gpa.dupe(u8, text) catch null;
+    }
+
     fn destroyLive(p: *ClaudeProvider, live: *Live) void {
         live.client.deinit();
         var ait = live.approvals.iterator();
@@ -272,3 +324,57 @@ pub const ClaudeProvider = struct {
         live.provider.emit(live, .{ .session_ended = code });
     }
 };
+/// The `control_response` that answers an `AskUserQuestion`: the stored
+/// input re-sent with an `answers` map beside its `questions`, because
+/// claude reads the picks out of `updatedInput.answers` and still needs
+/// the questions to know what they answer.
+fn buildQuestionResponse(gpa: std.mem.Allocator, request_id: u32, input_json: []const u8, question: []const u8, answer: []const u8) ?[]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    const w = &aw.writer;
+    w.writeAll("{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"") catch return null;
+    w.print("{d}", .{request_id}) catch return null;
+    w.writeAll("\",\"response\":{\"behavior\":\"allow\",\"updatedInput\":") catch return null;
+    const body = std.mem.trim(u8, input_json, " \t\r\n");
+    if (body.len >= 2 and body[0] == '{' and body[body.len - 1] == '}') {
+        const inner = std.mem.trim(u8, body[1 .. body.len - 1], " \t\r\n");
+        w.writeAll("{") catch return null;
+        if (inner.len > 0) {
+            w.writeAll(inner) catch return null;
+            w.writeAll(",") catch return null;
+        }
+        w.writeAll("\"answers\":{") catch return null;
+        std.json.Stringify.encodeJsonString(question, .{}, w) catch return null;
+        w.writeAll(":") catch return null;
+        std.json.Stringify.encodeJsonString(answer, .{}, w) catch return null;
+        w.writeAll("}}") catch return null;
+    } else {
+        w.writeAll(body) catch return null;
+    }
+    w.writeAll("}}}\n") catch return null;
+    return aw.toOwnedSlice() catch null;
+}
+
+
+test "a question's answer keeps the questions and adds the picks" {
+    const gpa = std.testing.allocator;
+    const input =
+        \\{"questions":[{"question":"Which color do you prefer?","header":"Color","options":[{"label":"Red","description":"Red"},{"label":"Blue","description":"Blue"}],"multiSelect":false}]}
+    ;
+    const line = buildQuestionResponse(gpa, 9, input, "Which color do you prefer?", "Blue") orelse return error.NoLine;
+    defer gpa.free(line);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
+    defer parsed.deinit();
+    const response = parsed.value.object.get("response").?.object;
+    try std.testing.expectEqualStrings("success", response.get("subtype").?.string);
+    try std.testing.expectEqualStrings("9", response.get("request_id").?.string);
+    const inner = response.get("response").?.object;
+    try std.testing.expectEqualStrings("allow", inner.get("behavior").?.string);
+
+    // The tool's own input survives, and the answer is filed under the
+    // question's text, which is the key claude looks it up by.
+    const updated = inner.get("updatedInput").?.object;
+    try std.testing.expectEqual(@as(usize, 1), updated.get("questions").?.array.items.len);
+    try std.testing.expectEqualStrings("Blue", updated.get("answers").?.object.get("Which color do you prefer?").?.string);
+}

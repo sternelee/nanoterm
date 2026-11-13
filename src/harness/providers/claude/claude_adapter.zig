@@ -60,10 +60,8 @@ pub const ClaudeAdapter = struct {
     }
 
     fn respondQuestion(ctx: *anyopaque, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) void {
-        _ = ctx;
-        _ = session_id;
-        _ = request_id;
-        _ = reply;
+        const self: *ClaudeAdapter = @ptrCast(@alignCast(ctx));
+        self.provider.respondQuestion(session_id, request_id, reply);
     }
 
     fn refreshCatalog(ctx: *anyopaque) anyerror!void {

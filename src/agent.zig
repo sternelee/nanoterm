@@ -118,6 +118,9 @@ pub const Permission = struct {
     /// than from an ACP agent. Answering goes back to the worker, not to a
     /// JSON-RPC client.
     native_id: ?u64 = null,
+    /// This card is a question an agent asked (`AskUserQuestion`), not a
+    /// permission. The pick goes back as an answer, not as allow or deny.
+    question: bool = false,
 };
 
 /// A visual the agent showed (`show_visual`), live in its turn.
@@ -1769,9 +1772,14 @@ pub const Agent = struct {
         if (p.harness) {
             const id = harnessIdFor(a.which) orelse return;
             const bridge = a.harness orelse return;
-            const decision: harness_types.ApprovalDecision = if (std.mem.eql(u8, p.options[index].id, "allow")) .allow else .deny;
             const request_id = std.fmt.parseInt(u32, p.rpc_id, 10) catch return;
-            bridge.respondApproval(id, harness_session_key, request_id, decision) catch {};
+            if (p.question) {
+                // A question's pick is the answer itself, not an allow.
+                bridge.respondQuestion(id, harness_session_key, request_id, .{ .choice = @intCast(index) }) catch {};
+            } else {
+                const decision: harness_types.ApprovalDecision = if (std.mem.eql(u8, p.options[index].id, "allow")) .allow else .deny;
+                bridge.respondApproval(id, harness_session_key, request_id, decision) catch {};
+            }
         } else if (a.claude) |c| {
             a.claudeRespond(c, p, index);
         } else {
@@ -2392,7 +2400,7 @@ pub const Agent = struct {
             .tool_result => |r| if (t) |turn| a.harnessToolResult(turn, r),
             .plan => |entries| if (t) |turn| a.harnessPlan(turn, entries),
             .config => {},
-            .question_asked => {},
+            .question_asked => |q| if (t) |turn| a.harnessQuestion(turn, q),
             .permission_request => |p| if (t) |turn| a.harnessPermission(turn, p),
         }
     }
@@ -2495,6 +2503,28 @@ pub const Agent = struct {
             .options = options,
             .input_json = if (p.input) |i| a.gpa.dupe(u8, i) catch null else null,
             .harness = true,
+        } });
+    }
+
+    /// A question an agent asked (`AskUserQuestion`). Its options are the
+    /// answers to pick from, so the card is marked `question` and the answer
+    /// goes back as a choice rather than as an allow.
+    fn harnessQuestion(a: *Agent, t: *Turn, q: harness_types.QuestionAsked) void {
+        if (q.options.len == 0) return;
+        const options = a.gpa.alloc(Option, q.options.len) catch return;
+        for (q.options, 0..) |o, i| {
+            options[i] = .{
+                .id = a.gpa.dupe(u8, o.id) catch return,
+                .name = a.gpa.dupe(u8, o.name) catch return,
+                .kind = a.gpa.dupe(u8, "answer") catch return,
+            };
+        }
+        a.addItem(t, .{ .permission = .{
+            .rpc_id = std.fmt.allocPrint(a.gpa, "{d}", .{q.request_id}) catch return,
+            .title = a.gpa.dupe(u8, q.title) catch return,
+            .options = options,
+            .harness = true,
+            .question = true,
         } });
     }
 

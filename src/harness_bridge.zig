@@ -75,6 +75,12 @@ pub const HarnessBridge = struct {
     pub fn respondApproval(self: *HarnessBridge, id: []const u8, session_id: []const u8, request_id: u32, decision: types.ApprovalDecision) !void {
         try self.built.registry.respondApproval(id, session_id, request_id, decision);
     }
+
+    /// Answers a question an agent asked (`AskUserQuestion`), which is not a
+    /// permission: the reply is the text or the option the user picked.
+    pub fn respondQuestion(self: *HarnessBridge, id: []const u8, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) !void {
+        try self.built.registry.respondQuestion(id, session_id, request_id, reply);
+    }
 };
 
 test "the bridge reads the environment it was given" {

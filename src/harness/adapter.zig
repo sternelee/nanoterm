@@ -127,9 +127,7 @@ pub const HarnessRegistry = struct {
 
     pub fn respondQuestion(r: *HarnessRegistry, harness_id: []const u8, session_id: []const u8, request_id: u32, reply: types.UserQuestionReply) !void {
         const adapter = r.get(harness_id) orelse return error.HarnessNotFound;
-        if (adapter.respond_question) |fn_| {
-            fn_(adapter.ctx, session_id, request_id, reply);
-        }
+        adapter.respond_question(adapter.ctx, session_id, request_id, reply);
     }
 
     pub fn refreshCatalog(r: *HarnessRegistry, harness_id: []const u8) !void {
