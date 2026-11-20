@@ -101,9 +101,12 @@ pub fn chooseModel(s: *Session, value: []const u8) void {
     }
 }
 
-/// Opens the agent so the picker can show what it offers.
+/// Opens the agent so the picker can show what it offers. Codex and pi cannot
+/// report their catalog from a turn, so start a short-lived probe here; the
+/// picker's own render loop collects the answer (`finishCatalogProbe`).
 pub fn prepareModels(s: *Session) void {
-    _ = s.ensureAgent();
+    const ag = s.ensureAgent() orelse return;
+    ag.startCatalogProbe();
 }
 
 // Completion.

@@ -99,6 +99,11 @@ fn row(c: *ui.Context, w: *Workspace, i: usize, r: Row) bool {
 
 fn modelsView(c: *ui.Context, w: *Workspace) void {
     const s = w.focused();
+    // A codex/pi catalog probe runs on a worker thread; collect it here, on
+    // the UI thread, before the list below is built. The next frame shows it.
+    if (s.agent) |ag| {
+        if (ag.finishCatalogProbe()) c.changed = true;
+    }
     // The picker lists the providers' models, so fx is asked for them.
     if (s.shared.agent_store) |store| store.showModels();
     {
@@ -182,6 +187,7 @@ fn modelsView(c: *ui.Context, w: *Workspace) void {
         }
     }
     if (items.len == 0 and s.agent != null and s.agent.?.status == .starting) ui.text(c, c.print("Starting {s} to see its models…", .{s.which.label()}), .{ .size = 12, .color = theme.muted });
+    if (items.len == 0 and s.agent != null and s.agent.?.catalogBusy()) ui.text(c, c.print("Asking {s} for its models…", .{s.which.label()}), .{ .size = 12, .color = theme.muted });
     const value = chosen orelse return;
     // Selecting a provider reloads the store and frees the row's strings.
     const owned_value = c.alloc().dupe(u8, value) catch return;

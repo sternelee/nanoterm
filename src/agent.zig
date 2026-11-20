@@ -15,6 +15,7 @@ const native_agent = @import("agent_native.zig");
 const view_fold = @import("view_fold.zig");
 const harness_types = @import("harness/types.zig");
 const harness_bridge = @import("harness_bridge.zig");
+const catalog = @import("catalog.zig");
 
 /// Agent is built in; the other agents use ACP (`agents.zig` locates them).
 pub const Which = enum {
@@ -197,6 +198,78 @@ pub const Turn = struct {
     diagnostic: std.ArrayList(u8) = .empty,
 };
 
+/// A model catalog fetched off the UI thread. The worker only fills `result`;
+/// the UI thread joins it and moves the answer into the agent's config.
+const CatalogProbe = struct {
+    provider: catalog.Provider,
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    orphan: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    claimed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    result: catalog.List = .{},
+
+    fn start(self: *CatalogProbe, gpa: std.mem.Allocator, io: std.Io, env: []const []const u8, cwd: []const u8) bool {
+        self.thread = std.Thread.spawn(.{}, work, .{self, gpa, io, env, cwd}) catch return false;
+        return true;
+    }
+
+    fn work(self: *CatalogProbe, gpa: std.mem.Allocator, io: std.Io, env: []const []const u8, cwd: []const u8) void {
+        self.result = catalog.fetch(gpa, io, self.provider, env, cwd, &self.cancel);
+        self.done.store(true, .release);
+        // If the pane was destroyed while we were blocked in a read, `stop`
+        // detached us and set `orphan`. Claim cleanup ourselves; otherwise the
+        // UI thread will take the answer via `finishCatalogProbe`.
+        if (self.orphan.load(.acquire) and !self.claimed.swap(true, .acq_rel)) {
+            self.result.deinit(gpa);
+            gpa.destroy(self);
+        }
+    }
+
+    fn finished(self: *CatalogProbe) bool {
+        return self.done.load(.acquire);
+    }
+
+    /// Joins a finished worker and takes its answer. Only the UI thread calls
+    /// this, so `result` is never read while the worker writes it.
+    fn take(self: *CatalogProbe) catalog.List {
+        if (self.thread) |t| {
+            t.join();
+            self.thread = null;
+        }
+        const list = self.result;
+        self.result = .{};
+        return list;
+    }
+
+    /// Returns true if the caller still owns `self` and must destroy it;
+    /// false if the detached worker claimed it and will free itself.
+    fn stop(self: *CatalogProbe, gpa: std.mem.Allocator) bool {
+        self.cancel.store(true, .release);
+        self.orphan.store(true, .release);
+        if (self.thread) |t| {
+            if (self.finished()) {
+                const mine = !self.claimed.swap(true, .acq_rel);
+                t.join();
+                if (mine) self.result.deinit(gpa);
+                self.thread = null;
+                return true;
+            }
+            // A provider that connected but went silent can leave the worker
+            // blocked in a pipe read. Joining would hang the UI thread while
+            // the pane is destroyed. Detach: the worker frees itself when its
+            // read ends and it sees `orphan`.
+            t.detach();
+            self.thread = null;
+            // The worker will claim cleanup when its read ends and it sees
+            // `orphan`. We must not touch `self` again.
+            return false;
+        }
+        if (!self.claimed.swap(true, .acq_rel)) self.result.deinit(gpa);
+        return true;
+    }
+};
+
 /// What the agent needs from the app around it.
 pub const App = struct {
     ctx: *anyopaque,
@@ -277,6 +350,10 @@ pub const Agent = struct {
     harness: ?*harness_bridge.HarnessBridge = null,
     /// The turn the harness's events belong to.
     harness_turn: ?*Turn = null,
+    /// A model list asked for off the UI thread. Codex and pi cannot report
+    /// their catalog from a turn (codex is single-shot, pi answers models
+    /// before state), so the picker asks a short-lived process directly.
+    catalog_probe: ?*CatalogProbe = null,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, app: App, which: Which, cwd: []const u8) !*Agent {
         const a = try gpa.create(Agent);
@@ -297,6 +374,10 @@ pub const Agent = struct {
     }
 
     pub fn destroy(a: *Agent) void {
+        if (a.catalog_probe) |p| {
+            if (p.stop(a.gpa)) a.gpa.destroy(p);
+            a.catalog_probe = null;
+        }
         if (a.on_destroy) |d| d.func(d.ctx, a);
         if (a.harness) |h| h.destroy();
         if (a.remote) |r| r.deinit(a.gpa);
@@ -1577,9 +1658,94 @@ pub const Agent = struct {
     /// The picker's options from what Pi has told us: every model it
     /// offers (`provider/id`, the way `set_model` names one), and its
     /// thinking levels.
+    /// Only codex and pi need a separate catalog probe: fx reads its own,
+    /// claude lists models in its initialize handshake, the rest use ACP.
+    fn catalogProvider(which: Which) ?catalog.Provider {
+        return switch (which) {
+            .codex => .codex,
+            .pi => .pi,
+            else => null,
+        };
+    }
+
+    /// Starts a probe if this agent needs one and none is running. The picker
+    /// calls this when it opens; the answer lands via `finishCatalogProbe`.
+    pub fn startCatalogProbe(a: *Agent) void {
+        const provider = catalogProvider(a.which) orelse return;
+        if (a.catalog_probe != null) return;
+        // Cached answers draw immediately; a probe refreshes them in the
+        // background. The cache lives in catalog.zig, keyed by provider.
+        if (catalog.cached(a.gpa, a.io, provider)) |list| {
+            var owned = list;
+            defer owned.deinit(a.gpa);
+            a.applyCatalog(provider, owned);
+        }
+        const p = a.gpa.create(CatalogProbe) catch return;
+        p.* = .{ .provider = provider };
+        if (!p.start(a.gpa, a.io, a.env, a.cwd)) {
+            a.gpa.destroy(p);
+            return;
+        }
+        a.catalog_probe = p;
+    }
+
+    /// True while a catalog probe is in flight, so the picker can say so.
+    pub fn catalogBusy(a: *Agent) bool {
+        return a.catalog_probe != null and !a.catalog_probe.?.finished();
+    }
+
+    /// Joins a finished probe and puts its models in the config. Called from
+    /// the UI thread's pump; returns true if it consumed an answer.
+    pub fn finishCatalogProbe(a: *Agent) bool {
+        const p = a.catalog_probe orelse return false;
+        if (!p.finished()) return false;
+        var list = p.take();
+        defer list.deinit(a.gpa);
+        a.applyCatalog(p.provider, list);
+        catalog.store(a.gpa, a.io, p.provider, list);
+        a.gpa.destroy(p);
+        a.catalog_probe = null;
+        a.app.changed(a.app.ctx);
+        return true;
+    }
+
+    /// Puts a fetched list where the picker reads it (`config.model.choices`).
+    fn applyCatalog(a: *Agent, provider: catalog.Provider, list: catalog.List) void {
+        if (list.models.len == 0) return;
+        var choices: std.ArrayList(agent_config.Choice) = .empty;
+        defer choices.deinit(a.gpa);
+        for (list.models) |m| choices.append(a.gpa, .{
+            .value = a.gpa.dupe(u8, m.value) catch continue,
+            .name = a.gpa.dupe(u8, m.name) catch continue,
+            .description = a.gpa.dupe(u8, m.description) catch continue,
+        }) catch {};
+        if (choices.items.len == 0) return;
+        // Keep the current model when there is one, so the picker can tick it.
+        // Copy it before removing the old option: that option owns the string.
+        const current_value: []u8 = blk: {
+            switch (provider) {
+                .pi => {
+                    if (a.pi_model) |m|
+                        break :blk std.fmt.allocPrint(a.gpa, "{s}/{s}", .{ m.provider, m.id }) catch &.{};
+                },
+                .codex => {
+                    if (a.config.find("model")) |o|
+                        break :blk a.gpa.dupe(u8, o.current) catch &.{};
+                },
+            }
+            break :blk &.{};
+        };
+        defer if (current_value.len > 0) a.gpa.free(current_value);
+        a.config.removeCategory("model");
+        a.config.append("model", "Model", "model", current_value, choices.toOwnedSlice(a.gpa) catch return) catch return;
+    }
+
     fn buildPiOptions(a: *Agent) void {
         a.config.clearOptions();
-        const model = a.pi_model orelse return;
+        // Pi answers `get_available_models` before `get_state`. Returning when
+        // the current model has not arrived yet would throw away the list we
+        // already have, so only the "current" value depends on `pi_model`.
+        const model = a.pi_model;
         var choices: std.ArrayList(agent_config.Choice) = .empty;
         defer choices.deinit(a.gpa);
         if (a.pi_models.items.len > 0) {
@@ -1588,16 +1754,20 @@ pub const Agent = struct {
                 .name = a.gpa.dupe(u8, m.name) catch continue,
                 .description = a.gpa.dupe(u8, m.description) catch continue,
             }) catch {};
-        } else {
-            const value = std.fmt.allocPrint(a.gpa, "{s}/{s}", .{ model.provider, model.id }) catch return;
+        } else if (model) |m| {
+            const value = std.fmt.allocPrint(a.gpa, "{s}/{s}", .{ m.provider, m.id }) catch return;
             defer a.gpa.free(value);
             choices.append(a.gpa, .{
                 .value = a.gpa.dupe(u8, value) catch return,
-                .name = a.gpa.dupe(u8, model.name) catch return,
-                .description = a.gpa.dupe(u8, model.provider) catch return,
+                .name = a.gpa.dupe(u8, m.name) catch return,
+                .description = a.gpa.dupe(u8, m.provider) catch return,
             }) catch return;
-        }
-        const now = std.fmt.allocPrint(a.gpa, "{s}/{s}", .{ model.provider, model.id }) catch return;
+        } else return;
+        if (choices.items.len == 0) return; // every dupe failed under memory pressure
+        const now = if (model) |m|
+            (std.fmt.allocPrint(a.gpa, "{s}/{s}", .{ m.provider, m.id }) catch return)
+        else
+            (a.gpa.dupe(u8, if (choices.items.len > 0) choices.items[0].value else "") catch return);
         defer a.gpa.free(now);
         a.config.append("model", "Model", "model", now, choices.toOwnedSlice(a.gpa) catch return) catch return;
         if (a.pi_levels.items.len >= 2 and a.pi_level != null) {

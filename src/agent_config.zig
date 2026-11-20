@@ -52,6 +52,30 @@ pub const Config = struct {
         c.options.clearRetainingCapacity();
     }
 
+    /// Forgets one category, so a refreshed catalog replaces its option
+    /// instead of stacking a second one the picker would draw twice.
+    pub fn removeCategory(c: *Config, category: []const u8) void {
+        var i: usize = 0;
+        while (i < c.options.items.len) {
+            const o = &c.options.items[i];
+            if (!std.mem.eql(u8, o.category, category)) {
+                i += 1;
+                continue;
+            }
+            for (o.choices) |ch| {
+                c.gpa.free(ch.value);
+                c.gpa.free(ch.name);
+                c.gpa.free(ch.description);
+            }
+            c.gpa.free(o.choices);
+            c.gpa.free(o.id);
+            c.gpa.free(o.name);
+            c.gpa.free(o.category);
+            c.gpa.free(o.current);
+            _ = c.options.orderedRemove(i);
+        }
+    }
+
     pub fn clearCommands(c: *Config) void {
         for (c.commands.items) |cmd| {
             c.gpa.free(cmd.name);
@@ -102,7 +126,14 @@ pub const Config = struct {
     /// Adds an option built by hand (Pi's model and thinking level): its
     /// strings are copied and its choices are taken.
     pub fn append(c: *Config, id: []const u8, name: []const u8, category: []const u8, current: []const u8, choices: []Choice) !void {
-        errdefer c.gpa.free(choices);
+        errdefer {
+            for (choices) |ch| {
+                c.gpa.free(ch.value);
+                c.gpa.free(ch.name);
+                c.gpa.free(ch.description);
+            }
+            c.gpa.free(choices);
+        }
         try c.options.append(c.gpa, .{
             .id = try c.gpa.dupe(u8, id),
             .name = try c.gpa.dupe(u8, name),
