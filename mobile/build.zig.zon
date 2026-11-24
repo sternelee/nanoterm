@@ -8,10 +8,10 @@
         // build helpers (`@import("nanoui").android`/`.ios`) are used; the
         // source module comes from the fork below.
         .nanoui = .{
-            .url = "git+https://github.com/justrach/nanoui#v0.13.0",
-            .hash = "nanoui-0.13.0-we0KMd1-MQBzJq1VU59oWYKF3KHhSYPj8_qjVe2icq_e",
+            .url = "git+https://github.com/justrach/nanoui#v0.14.9",
+            .hash = "nanoui-0.14.9-we0KMb7fSADTR_rvCwyzJ5NOwsuyX8oI0UBmoDOwHKdi",
         },
-        // The local fork, v0.13.0 plus Android IME text support (input
+        // The local fork, v0.14.9 plus Android IME text support (input
         // methods compose into the hidden EditText; its text mirrors into
         // the focused field). A path dependency: same source, patched.
         .nanoui_fork = .{
