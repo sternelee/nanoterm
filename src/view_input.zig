@@ -13,6 +13,7 @@ const blocks = @import("blocks.zig");
 const assist = @import("assist.zig");
 const complete = @import("complete.zig");
 const attach = @import("attach.zig");
+const motion_input = @import("motion_input.zig");
 const pager = @import("pager.zig");
 const Session = @import("session.zig").Session;
 const Workspace = @import("workspace.zig").Workspace;
@@ -30,7 +31,11 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         if (focused and s.menu.open) menu(c, s);
         // Harness's composer: a rounded pill, the pictures, the text, and
         // a row of controls with the send button at its end, of Liquid
-        // Glass that what scrolls under it shows through.
+        // Glass that what scrolls under it shows through. Its key holds its
+        // id still while the menu above it comes and goes, so the input's
+        // caret, selection and undo are not lost to the tree moving.
+        ui.key(c, "composer");
+        const pill_id = c.peekId(null);
         const pill = ui.div(c).column().wFull().gap(10).px(16).pt(14).pb(10).rounded(26).glass(.{}).border(theme.border.alpha(0.6));
         defer pill.end();
         pictures(c, s);
@@ -54,6 +59,14 @@ pub fn panel(c: *ui.Context, w: *Workspace, s: *Session, focused: bool) void {
         s.caret = result.caret;
         s.input_lines = .{ result.line, result.lines };
         s.vim = if (result.vim_visual) .visual else if (result.vim_normal) .normal else .insert;
+        // What typing left behind: a flash where a glyph landed, and the
+        // ones Backspace took falling away. Drawn over the pill, so the
+        // pill's content corner is where their places are counted from.
+        if (c.focused_text) |ft| {
+            if (ft.id == s.input_id) {
+                if (c.rects.get(pill_id)) |r| motion_input.fx(c, ft, .{ .x = r.x + 16, .y = r.y + 14 }, ft.caret_rect.h);
+            }
+        }
         // Vim's k off the input's first line climbs into the output above
         // (history without output); j steps forward through the history.
         if (result.history < 0) {
@@ -187,7 +200,7 @@ fn modePill(c: *ui.Context, s: *Session) void {
     if (d.clicked() and !input_only) s.toggleMode();
     if (agent) ui.icon(c, "sparkles", .{ .size = 11, .color = color }) else ui.text(c, "❯", .{ .size = 13, .weight = .bold, .color = color, .mono = true });
     ui.text(c, if (input_only) "input" else if (agent) "agent" else if (s.shell.remoteReady()) s.shell.remote.?.host else "shell", .{ .size = 11, .weight = .semibold, .color = color });
-    const why: []const u8 = if (input_only or s.input.text().len == 0 and s.lock == null) "" else if (s.lock != null) "locked" else if (s.decidedByJev()) "jev" else "auto";
+    const why: []const u8 = if (input_only or s.input.text().len == 0 and s.lock == null) "" else if (s.lock != null) "locked" else "auto";
     if (why.len > 0) ui.text(c, why, .{ .size = 9.5, .color = color.alpha(0.7) });
 }
 

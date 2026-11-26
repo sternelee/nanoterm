@@ -28,6 +28,7 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
     account(c, w);
     agentList(c, w);
     look(c, w);
+    motionPage(c, w);
     privacy(c, w);
     updates(c, w);
 }
@@ -152,7 +153,80 @@ pub fn runInTab(w: *Workspace, command: []const u8) void {
     w.closeOverlay();
 }
 
+
+fn indexOfString(options: [][]const u8, want: []const u8) ?usize {
+    for (options, 0..) |option, i| if (std.mem.eql(u8, option, want)) return i;
+    return null;
+}
+
+/// What the select shows a family as: the whole name while it fits, else
+/// as much as does with an ellipsis, so no long family overflows the list.
+pub fn fontOptionLabel(c: *ui.Context, name: []const u8) []const u8 {
+    const max: f32 = 200;
+    const style = ui.TextStyle{ .size = 13 };
+    if (c.text.width(name, style) <= max) return name;
+    const ellipsis = "…";
+    var end = name.len;
+    while (end > 0) {
+        while (end > 0 and (name[end - 1] & 0xc0) == 0x80) end -= 1;
+        if (c.text.width(name[0..end], style) + c.text.width(ellipsis, style) <= max) return c.print("{s}{s}", .{ name[0..end], ellipsis });
+        end -= 1;
+    }
+    return ellipsis;
+}
+
+fn fontOptionLabels(c: *ui.Context, options: [][]const u8) [][]const u8 {
+    const labels = c.alloc().alloc([]const u8, options.len) catch return options;
+    for (options, 0..) |option, i| labels[i] = fontOptionLabel(c, option);
+    return labels;
+}
+
+/// The theme shelf, as Metalterm's settings lay it out: System first —
+/// light or dark, as the system is — then every named theme.
+fn themePicker(c: *ui.Context, w: *Workspace) void {
+    const s = section(c, "Theme");
+    defer s.end();
+    const b = box(c);
+    defer b.end();
+    const prefs = &w.shared.prefs;
+    {
+        const sel = prefs.theme.len == 0;
+        const r = if (sel) ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8);
+        defer r.end();
+        if (r.clicked()) prefs.setTheme("");
+        {
+            const t = ui.div(c).column().grow().gap(2);
+            defer t.end();
+            ui.text(c, "System", .{ .size = 13, .weight = .semibold });
+            ui.text(c, "Light or dark, as the system is.", .{ .size = 11.5, .color = theme.muted });
+        }
+        ui.icon(c, "circle.lefthalf.filled", .{ .size = 14, .color = theme.muted });
+        if (sel) ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = theme.accent });
+    }
+    for (&theme.list) |*e| {
+        const sel = std.mem.eql(u8, prefs.theme, e.id);
+        const r = if (sel) ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8);
+        defer r.end();
+        if (r.clicked()) prefs.setTheme(e.id);
+        {
+            const t = ui.div(c).column().grow().gap(2);
+            defer t.end();
+            ui.text(c, e.name, .{ .size = 13, .weight = .semibold });
+            ui.text(c, e.note, .{ .size = 11.5, .color = theme.muted });
+        }
+        {
+            const dots = ui.div(c).row().gap(5).itemsCenter();
+            defer dots.end();
+            const colors = [5]u24{ e.seeds.background, e.seeds.text, e.seeds.accent, e.seeds.danger, e.seeds.success };
+            for (colors) |col| _ = c.leaf(.{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .radius = 6, .background = ui.Color.hex(col) }, .none, null);
+        }
+        if (sel) ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = theme.accent });
+    }
+    ui.text(c, "The System theme follows the appearance the palette (⌘P) sets.", .{ .size = 11.5, .color = theme.faint, .wrap = true });
+}
+
 fn look(c: *ui.Context, w: *Workspace) void {
+    themePicker(c, w);
     const s = section(c, "Appearance");
     defer s.end();
     const b = box(c);
@@ -160,12 +234,39 @@ fn look(c: *ui.Context, w: *Workspace) void {
     {
         const r = ui.div(c).row().wFull().itemsCenter();
         defer r.end();
-        ui.text(c, "Theme", .{ .size = 13 });
+        ui.text(c, "Appearance", .{ .size = 13 });
         ui.spacer(c);
         const names = [_][]const u8{ "System", "Light", "Dark" };
         const order = [_]@TypeOf(w.shared.appearance){ .system, .light, .dark };
         var picked: usize = std.mem.indexOfScalar(@TypeOf(w.shared.appearance), &order, w.shared.appearance) orelse 0;
         if (ui.segmented(c, &names, &picked)) w.shared.setAppearance(order[picked]);
+    }
+    {
+        const r = ui.div(c).row().wFull().itemsCenter();
+        defer r.end();
+        ui.text(c, "Terminal font", .{ .size = 13 });
+        ui.spacer(c);
+        const kit = nanoui.kit;
+        const options = w.shared.fonts.options.items;
+        const current = w.shared.prefs.terminal_font;
+        var picked: ?usize = if (current.len == 0) 0 else indexOfString(options, current);
+        const labels = fontOptionLabels(c, options);
+        if (kit.select(c, "terminal-font", labels, &picked, .{ .placeholder = "System", .width = 240 })) {
+            if (picked) |index| w.shared.prefs.setTerminalFont(if (index == 0) "" else options[index]);
+        }
+    }
+    ui.text(c, "A Nerd Font (JetBrainsMono Nerd Font, MesloLGS NF) has the glyphs for the file icons below.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        const t = ui.div(c).column().grow().gap(2);
+        {
+            defer t.end();
+            ui.text(c, "File icons in ls", .{ .size = 13 });
+            ui.text(c, "A Nerd Font icon before each file an ls prints: folders, pictures, archives, programs.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
+        var on = w.shared.prefs.file_icons;
+        if (ui.toggle(c, "", &on)) w.shared.prefs.setFileIcons(on);
     }
     {
         const r = ui.div(c).row().wFull().itemsCenter();
@@ -186,6 +287,34 @@ fn look(c: *ui.Context, w: *Workspace) void {
         ui.text(c, c.print("{d:.0}%", .{w.zoom * 100}), .{ .size = 12.5, .mono = true, .color = theme.muted });
         if (ui.button(c, "", .{ .size = 11, .icon = "plus" }).clicked) w.zoomBy(0.1);
         if (ui.button(c, "Reset", .{ .variant = .ghost, .size = 12 }).clicked) w.zoom = 1;
+    }
+}
+
+/// Motion's dials: one speed every effect's timing scales by, one amount
+/// for how far each goes; Reduce Motion turns them off.
+fn motionPage(c: *ui.Context, w: *Workspace) void {
+    const s = section(c, "Motion");
+    defer s.end();
+    const b = box(c);
+    defer b.end();
+    ui.text(c, "How new output settles in, glyph at a time, and the cursor springs between cells. The system's Reduce Motion turns all of it off.", .{ .size = 12, .color = theme.muted, .wrap = true });
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Speed", .{ .size = 13 });
+        ui.spacer(c);
+        var dur = w.shared.prefs.motion_duration;
+        if (ui.slider(c, &dur, .{ .min = 0.25, .max = 2, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(dur, w.shared.prefs.motion_intensity);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_duration}), .{ .size = 12.5, .mono = true, .color = theme.muted });
+    }
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Amount", .{ .size = 13 });
+        ui.spacer(c);
+        var inten = w.shared.prefs.motion_intensity;
+        if (ui.slider(c, &inten, .{ .min = 0, .max = 1.5, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(w.shared.prefs.motion_duration, inten);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_intensity}), .{ .size = 12.5, .mono = true, .color = theme.muted });
     }
 }
 

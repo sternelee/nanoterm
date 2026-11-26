@@ -18,6 +18,7 @@ pub const Jev = @import("jev.zig").Jev;
 pub const Catalog = @import("catalog.zig").Catalog;
 const visual_host = @import("visual_host.zig");
 const ssh = @import("ssh.zig");
+const theme = @import("theme.zig");
 const helpers = @import("session_agent.zig");
 pub const Log = @import("session_log.zig").Log;
 
@@ -69,6 +70,9 @@ pub const Shared = struct {
     ssh_hosts: []const []const u8 = &.{},
     /// Settings (⌘,): the default agent, text size, Codegraff account.
     prefs: @import("settings.zig").Prefs,
+    /// The font families Settings offers for the terminal, loaded when it
+    /// opens; the system's and the installed terminal and Nerd families.
+    fonts: @import("fonts.zig").Registry = .{},
 
     /// Call `wire` once the value is at its final address.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, env: *std.process.Environ.Map) !Shared {
@@ -104,6 +108,7 @@ pub const Shared = struct {
         s.exe = std.process.executablePathAlloc(io, arena) catch "";
         s.ssh_hosts = ssh.hosts(arena, io, home);
         s.visuals = visual_host.Host.create(gpa, io, env.get("TMPDIR") orelse "/tmp") catch null;
+        theme.mono_font = if (s.prefs.terminal_font.len == 0) null else s.prefs.terminal_font;
         return s;
     }
 
@@ -126,6 +131,7 @@ pub const Shared = struct {
         if (@import("view_markdown.zig").pictures == &s.pictures) @import("view_markdown.zig").pictures = null;
         s.commands.deinit();
         s.history.deinit();
+        s.fonts.deinit(s.gpa);
         s.jev.deinit();
         s.catalog.deinit();
         s.prefs.deinit();

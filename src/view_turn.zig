@@ -10,6 +10,7 @@ const view_block = @import("view_block.zig");
 const view_markdown = @import("view_markdown.zig");
 const view_visual = @import("view_visual.zig");
 const view_fold = @import("view_fold.zig");
+const file_icons = @import("file_icons.zig");
 const App = @import("session.zig").Session;
 
 /// The width of an avatar and its gap: the turn's content starts after.
@@ -119,7 +120,7 @@ fn toolIcon(kind: []const u8) []const u8 {
     const table = .{
         .{ "read", "doc.text" },      .{ "edit", "pencil" },     .{ "delete", "trash" },
         .{ "move", "arrow.right" },   .{ "search", "magnifyingglass" }, .{ "execute", "terminal" },
-        .{ "think", "brain" },        .{ "fetch", "globe" },
+        .{ "think", "brain" },        .{ "fetch", "globe" },      .{ "list", "list.bullet" },
     };
     inline for (table) |e| if (std.mem.eql(u8, kind, e[0])) return e[1];
     return "wrench.and.screwdriver";
@@ -145,6 +146,15 @@ fn tool(c: *ui.Context, app: *App, tl: *agent_mod.Tool) void {
     } else if (tl.detail.items.len > 0 and tl.status != .in_progress) {
         const d = tl.detail.items;
         const shown = if (d.len > 400) c.print("{s}…", .{d[0..400]}) else d;
+        // A tool that listed files without a terminal — its output's shape
+        // says so — shows them with their icons, like any listing.
+        if (app.shared.prefs.file_icons) {
+            const cwd = if (app.agent) |ag| ag.cwd else app.cwd();
+            if (file_icons.decorateOutput(c.alloc(), app.shared.io, cwd, shown)) |dec| {
+                ui.richText(c, dec.text, dec.spans, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+                return;
+            }
+        }
         ui.text(c, shown, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
     }
 }

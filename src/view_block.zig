@@ -6,9 +6,11 @@ const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const blocks = @import("blocks.zig");
+const motion = @import("motion.zig");
 const App = @import("session.zig").Session;
 const assist = @import("assist.zig");
 const find = @import("find.zig");
+const file_icons = @import("file_icons.zig");
 const view_markdown = @import("view_markdown.zig");
 
 /// Find, for the panes not searched.
@@ -61,8 +63,15 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
         f.scroll_to = null;
     };
 
-    // The bar on the left: running, failed, done.
-    const bar = if (b.state == .running) theme.accent else if (b.failed()) theme.failure else if (selected) theme.accent else theme.border;
+    // The bar on the left: running, failed, done. While it runs it
+    // breathes for its first seconds, then rests — an animation that
+    // runs forever costs more than it shows.
+    var bar = if (b.state == .running) theme.accent else if (b.failed()) theme.failure else if (selected) theme.accent else theme.border;
+    const since = b.flipped(if (b.state == .running) 1 else 2, c.time);
+    if (b.state == .running) if (motion.pulse(c.time, since)) |a| {
+        bar = theme.accent.alpha(a);
+        c.animationFrame();
+    };
     _ = c.leaf(.{ .absolute = true, .width = .{ .px = 3 }, .height = .fill, .radius = 1.5, .background = bar, .offset = .{ .x = if (nested) -8 else -10 } }, .none, null);
 
     header(c, app, b, it.hovered);
@@ -72,7 +81,7 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
         ui.text(c, if (b.source == .agent) "⚡" else "❯", .{ .size = 13, .weight = .bold, .color = if (b.source == .agent) theme.agent else theme.accent, .mono = true });
         ui.richText(c, b.command, find.spansFor(c.alloc(), f, &.{}, b.id, find.command), .{ .size = 13, .weight = .semibold, .mono = true, .wrap = true });
     }
-    output(c, b, f);
+    output(c, app, b, f);
     if (!nested) @import("view_remote.zig").bar(c, app, b);
     // A failed command: the agent can find out why, or fix it.
     if (!nested and app.shared.prefs.agents and b.state == .done and b.failed() and b.source == .shell) {
@@ -85,14 +94,17 @@ pub fn block(c: *ui.Context, app: *App, b: *blocks.Block, nested: bool) void {
 }
 
 fn header(c: *ui.Context, app: *App, b: *blocks.Block, hovered: bool) void {
-    const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+    // The hover actions are 24px tall; keep the header that tall whether they
+    // are shown or not, so the command under it does not move as the pointer
+    // enters the block.
+    const r = ui.div(c).row().wFull().h(26).gap(8).itemsCenter();
     defer r.end();
-    ui.text(c, blocks.tildePath(c.alloc(), b.cwd, app.home), .{ .size = 11.5, .mono = true, .color = theme.cwd });
+    ui.text(c, blocks.tildePath(c.alloc(), b.cwd, app.home), .{ .size = 13, .mono = true, .color = theme.cwd });
     if (b.git_branch.len > 0) {
-        ui.icon(c, "arrow.triangle.branch", .{ .size = 10, .color = theme.branch });
-        ui.text(c, b.git_branch, .{ .size = 11.5, .mono = true, .color = theme.branch });
+        ui.icon(c, "arrow.triangle.branch", .{ .size = 11, .color = theme.branch });
+        ui.text(c, b.git_branch, .{ .size = 12.5, .mono = true, .color = theme.branch });
     }
-    if (b.source == .agent) ui.badge(c, "agent", theme.agent);
+    if (b.source == .agent) ui.badge(c, "Agent", theme.agent);
     ui.spacer(c);
     if (hovered and b.state == .done and b.source == .shell) {
         // Warp's block actions: run again, ask the agent, copy.
@@ -144,10 +156,13 @@ fn rendersMarkdown(b: *const blocks.Block, f: ?*const find.State) bool {
     return true;
 }
 
-fn output(c: *ui.Context, b: *blocks.Block, f: *const find.State) void {
+fn output(c: *ui.Context, app: *App, b: *blocks.Block, f: *const find.State) void {
     const lines = b.output.lines.items;
     const count = b.output.lineCount();
     if (count == 0) return;
+    // This frame's stamp: what parses between now and the next stamp
+    // reads as one moment of arrival.
+    b.output.stamp = c.time;
     if (rendersMarkdown(b, f)) {
         const text = b.output.plainText(c.alloc()) catch "";
         const box = ui.div(c).column().wFull().pt(4).pb(2);
@@ -163,6 +178,7 @@ fn output(c: *ui.Context, b: *blocks.Block, f: *const find.State) void {
         b.expanded = true;
     };
     const first = if (b.expanded or count <= tail_lines) 0 else count - tail_lines;
+    const listing = if (app.shared.prefs.file_icons) file_icons.listing(b.command) else .none;
     const col = ui.div(c).column().wFull().gap(0);
     defer col.end();
     if (first > 0 or b.output.dropped > 0) {
@@ -173,7 +189,16 @@ fn output(c: *ui.Context, b: *blocks.Block, f: *const find.State) void {
         var style = mono;
         style.wrap = true;
         style.color = theme.text;
-        ui.richText(c, l.text.items, find.spansFor(c.alloc(), f, l.spans.items, b.id, i), style);
+        if (!motion.lineSettled(l.arrived, l.fresh_at, l.fresh_from, c.time)) c.animationFrame();
+        var spans = find.spansFor(c.alloc(), f, l.spans.items, b.id, i);
+        spans = motion.arriveSpans(c.alloc(), l.text.items, spans, theme.text, l.arrived, l.fresh_at, l.fresh_from, c.time);
+        if (listing != .none) {
+            if (file_icons.decorate(c.alloc(), app.shared.io, b.cwd, l.text.items, spans, listing)) |d| {
+                ui.richText(c, d.text, d.spans, style);
+                continue;
+            }
+        }
+        ui.richText(c, l.text.items, spans, style);
     }
     if (b.expanded and count > tail_lines) {
         if (ui.button(c, "Show less", .{ .variant = .ghost, .size = 11.5, .icon = "chevron.down" }).clicked) b.expanded = false;
