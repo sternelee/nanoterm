@@ -7,6 +7,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
+const motion = @import("motion.zig");
 const screen = @import("screen.zig");
 const Screen = screen.Screen;
 const Session = @import("session.zig").Session;
@@ -80,20 +81,47 @@ pub fn draw(c: *ui.Context, s: *Screen, focused: bool) void {
         const text = s.rowText(c.alloc(), y, starts);
         const r = ui.div(c).row().wFull().h(m.h).itemsCenter();
         defer r.end();
-        ui.richText(c, text, spans(c, s.row(y), starts), style());
+        ui.richText(c, text, spans(c, s, y, starts), style());
     }
-    if (s.cursor_visible) {
+    if (s.cursor_visible and (!focused or cursorShown(c))) {
         const color = if (focused) theme.accent.alpha(0.75) else theme.muted.alpha(0.5);
+        // It springs between cells, stretching toward where it goes —
+        // squash and stretch, as a caret that means to be somewhere.
+        const id = @intFromPtr(s);
+        const tx = @as(f32, @floatFromInt(s.cur.x)) * m.w;
+        const ty = @as(f32, @floatFromInt(s.cur.y)) * m.h;
+        const px = ui.spring(c, id, 1, tx, cursor_spring);
+        const py = ui.spring(c, id, 2, ty, cursor_spring);
+        var sx: f32 = 1;
+        if (motion.on()) {
+            const going = @min(@abs(tx - px) / @max(m.w, 1), 1);
+            sx = 1 + 0.25 * motion.intensity * going;
+        }
+        const w = m.w * sx;
+        const h = m.h / sx;
         _ = c.leaf(.{
             .absolute = true,
-            .offset = .{ .x = @as(f32, @floatFromInt(s.cur.x)) * m.w, .y = @as(f32, @floatFromInt(s.cur.y)) * m.h },
-            .width = .{ .px = m.w },
-            .height = .{ .px = m.h },
+            .offset = .{ .x = px - (w - m.w) / 2, .y = py - (h - m.h) / 2 },
+            .width = .{ .px = w },
+            .height = .{ .px = h },
             .background = if (focused) color else null,
             .border = if (focused) null else color,
             .border_width = 1,
         }, .none, null);
     }
+}
+
+/// The caret's spring between cells: quick, a slight overshoot.
+const cursor_spring = ui.Spring{ .response = 0.06, .damping = 0.85 };
+
+/// A terminal's cursor blink: half a second on, half a second off, and
+/// ask for the frame that turns it so an idle screen still blinks.
+fn cursorShown(c: *ui.Context) bool {
+    const period: f64 = 1.0;
+    const phase = @mod(c.time, period);
+    const rem: f32 = @floatCast(if (phase < period / 2) period / 2 - phase else period - phase);
+    c.frameIn(@max(0.01, rem));
+    return phase < period / 2;
 }
 
 /// At most this many of a program's scrolled-off lines show above it.
@@ -115,7 +143,9 @@ pub fn drawInline(c: *ui.Context, lines: []const vt.Line, s: *Screen, focused: b
         for (lines[lines.len -| scrollback..]) |l| {
             const r = ui.div(c).row().wFull().h(m.h).itemsCenter();
             defer r.end();
-            ui.richText(c, l.text.items, l.spans.items, style());
+            if (!motion.lineSettled(l.arrived, l.fresh_at, l.fresh_from, c.time)) c.animationFrame();
+            const arr = motion.arriveSpans(c.alloc(), l.text.items, l.spans.items, theme.text, l.arrived, l.fresh_at, l.fresh_from, c.time);
+            ui.richText(c, l.text.items, arr, style());
         }
     }
     draw(c, s, focused);
@@ -147,7 +177,12 @@ fn backgrounds(c: *ui.Context, s: *Screen, y: usize, m: Metrics) void {
 }
 
 /// Spans for a row's colors and attributes (byte offsets from `starts`).
-fn spans(c: *ui.Context, cells: []const screen.Cell, starts: []const u32) []const ui.Span {
+/// A full-screen program redraws its rows as they move (vim's cursor
+/// line, htop's meters): arrival fades here would flicker at every
+/// redraw, so its rows draw as they are — new output still arrives a
+/// glyph at a time in the blocks and scrollback above it.
+fn spans(c: *ui.Context, s: *Screen, y: usize, starts: []const u32) []const ui.Span {
+    const cells = s.row(y);
     var out: std.ArrayList(ui.Span) = .empty;
     var x: usize = 0;
     while (x < cells.len) {
@@ -199,10 +234,11 @@ pub fn keys(c: *ui.Context, a: *Session, s: *Screen) void {
         },
         else => {},
     };
+    // With no text field focused (a full-screen program like vim hides the
+    // composer), nanoui offers every key as a shortcut first. A bare letter
+    // has no shortcut here: leave it for the chars path below instead of
+    // marking it taken, which would swallow h/j/k/l/:.
     if (c.input.shortcut) |k| if (!k.cmd) {
-        c.shortcut_taken = true;
-        c.input.shortcut = null;
-        c.changed = true;
         const S = ui.Shortcut;
         const bytes: []const u8 = switch (k.key) {
             S.up => modArrow(&buf, s, 'A', k.shift, k.alt, k.ctrl),
@@ -222,8 +258,16 @@ pub fn keys(c: *ui.Context, a: *Session, s: *Screen) void {
             },
             else => "",
         };
-        if (bytes.len > 0) a.shell.input(bytes);
-        return;
+        if (bytes.len > 0) {
+            c.shortcut_taken = true;
+            c.input.shortcut = null;
+            c.changed = true;
+            a.shell.input(bytes);
+            return;
+        }
+        // Not a shortcut the program takes: clear it so the view above does
+        // not also act on it, but let this key continue as typed text.
+        c.input.shortcut = null;
     };
     if (c.input.chars.len > 0) {
         a.shell.input(c.input.chars);

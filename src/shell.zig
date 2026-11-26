@@ -93,6 +93,9 @@ pub const Events = struct {
     changed: *const fn (ctx: *anyopaque) void,
     /// The shell itself ended.
     exited: *const fn (ctx: *anyopaque, code: i32) void,
+    /// A command block ended with its exit status (the 133;D mark), while
+    /// the shell lives on.
+    command_finished: ?*const fn (ctx: *anyopaque, code: i32) void = null,
 };
 
 /// A file URL's path as this machine writes it: /C:/Users/me is C:/Users/me
@@ -206,14 +209,15 @@ pub const Shell = struct {
         s.sendLine(block.command);
     }
 
-    /// Sends a command line and Return. One of several lines goes as a
-    /// paste (bracketed, as zsh asks at its prompt): zsh takes it whole, one
-    /// command and one block, not a line at a time.
+    /// Sends a command line and Return. Several lines, or one longer than
+    /// the terminal's input queue, go as a paste (bracketed, as zsh asks at
+    /// its prompt): zsh takes it whole, one command and one block, rather
+    /// than a line at a time or up to its line editor's limit.
     fn sendLine(s: *Shell, text: []const u8) void {
-        const lines = std.mem.indexOfScalar(u8, text, '\n') != null;
-        if (lines) s.process.send("\x1b[200~");
+        const paste = std.mem.indexOfScalar(u8, text, '\n') != null or text.len > 1024;
+        if (paste) s.process.send("\x1b[200~");
         s.process.send(text);
-        if (lines) s.process.send("\x1b[201~");
+        if (paste) s.process.send("\x1b[201~");
         s.process.send(enter);
     }
 
@@ -400,8 +404,11 @@ pub const Shell = struct {
                     'C' => r.phase = .running,
                     'D' => {
                         const code = if (rest.len > 4) std.fmt.parseInt(i32, rest[2 .. rest.len - 2], 10) catch 0 else 0;
-                        if (r.current) |b| b.finish(code);
-                        r.current = null;
+                        if (r.current) |b| {
+                            b.finish(code);
+                            r.current = null;
+                            if (s.events.command_finished) |f| f(s.events.ctx, code);
+                        }
                         r.phase = .between;
                     },
                     else => {},
@@ -423,8 +430,13 @@ pub const Shell = struct {
                     const code = if (rest.len > 2) std.fmt.parseInt(i32, rest[2..], 10) catch 0 else 0;
                     // The SSH session ended: so did what ran in it.
                     if (s.remote) |r| if (s.current == r.session) s.endRemote(code);
-                    if (s.current) |b| b.finish(code);
-                    s.current = null;
+                    // The prompt's first mark closes nothing: only a command
+                    // that ran tells the session it ended.
+                    if (s.current) |b| {
+                        b.finish(code);
+                        s.current = null;
+                        if (s.events.command_finished) |f| f(s.events.ctx, code);
+                    }
                     s.phase = .between;
                 },
                 else => {},

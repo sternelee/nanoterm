@@ -199,7 +199,10 @@ fn row(w: *Workspace, c: *ui.Context, t: *Tab, i: usize, now: f64) bool {
     {
         const label = ui.div(c).row().grow().clip();
         defer label.end();
-        ui.text(c, name(t), .{ .size = 13.5, .weight = if (unread) .bold else .regular, .color = theme.text });
+        // A long name (an agent's whole first prompt) gives the room back:
+        // it ends in an ellipsis inside the label, leaving the time and the
+        // mark their place at the row's end.
+        ui.text(c, name(t), .{ .size = 13.5, .weight = if (unread) .bold else .regular, .color = theme.text, .truncate = .ellipsis });
     }
     if (st != .idle) {
         var buf: [16]u8 = undefined;
@@ -209,9 +212,10 @@ fn row(w: *Workspace, c: *ui.Context, t: *Tab, i: usize, now: f64) bool {
     return clicked and !active;
 }
 
-/// A row's state as a mark 16 wide.
+/// A row's state as a mark 16 wide, everything it draws kept inside that
+/// box (clip): the turning dots, the ring, the disc and its corner dot.
 fn mark(c: *ui.Context, st: State, unread: bool, now: f64) void {
-    const box = ui.div(c).w(16).h(16).center();
+    const box = ui.div(c).w(16).h(16).center().clip();
     defer box.end();
     switch (st) {
         .idle => {},
@@ -228,7 +232,7 @@ fn mark(c: *ui.Context, st: State, unread: bool, now: f64) void {
                 defer disc.end();
                 ui.icon(c, "checkmark", .{ .size = 8.5, .weight = .bold, .color = theme.background });
             }
-            const dot = ui.div(c).absolute().offset(12, -1).w(5).h(5).roundedFull().bg(theme.muted);
+            const dot = ui.div(c).absolute().offset(10.5, 0.5).w(5).h(5).roundedFull().bg(theme.muted);
             dot.end();
         } else ui.icon(c, "checkmark", .{ .size = 11, .weight = .semibold, .color = theme.faint }),
         .failed => ui.icon(c, "exclamationmark.triangle", .{ .size = 12, .color = theme.failure }),
@@ -236,17 +240,17 @@ fn mark(c: *ui.Context, st: State, unread: bool, now: f64) void {
 }
 
 /// A ring that turns: three quarters of a circle of small discs, its gap
-/// going round once a second.
+/// going round once a second. The dots stay within the mark's 16-point box.
 fn spinner(c: *ui.Context, now: f64) void {
     c.animating = true;
     const n = 14;
-    const r: f32 = 6.2;
+    const r: f32 = 6;
     const turn: f32 = @floatCast(@mod(now, 1.0));
     for (0..n) |k| {
         const at = turn * std.math.tau + @as(f32, @floatFromInt(k)) / n * std.math.tau * 0.78;
         const x = 8 + r * @cos(at) - 1;
         const y = 8 + r * @sin(at) - 1;
-        const d = ui.div(c).absolute().offset(x, y).w(2.1).h(2.1).roundedFull().bg(theme.text);
+        const d = ui.div(c).absolute().offset(x, y).w(2).h(2).roundedFull().bg(theme.text);
         d.end();
     }
 }
