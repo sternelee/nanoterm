@@ -1162,6 +1162,10 @@ pub const Store = struct {
             .removed => |url| if (url) |value| self.gpa.free(value),
             else => {},
         };
+        // fx refuses entries its reader would skip (for example a literal
+        // token in an Authorization header). Treating that as success would
+        // tell the user a server was added when nothing was written.
+        if (updated == .refused) return self.fail(error.McpEntryRefused);
         self.note("MCP server added");
         self.mcp_form_open = false;
         self.mcp_name.clear();
@@ -1397,7 +1401,9 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     try std.testing.expect(std.mem.indexOf(u8, store.mcp_servers.items[0].summary, "--stdio") != null);
     store.mcp_name.set("remote-tools");
     store.mcp_target.set("https://example.com/mcp");
-    store.mcp_headers.set("{\"Authorization\":\"Bearer secret\"}");
+    // fx refuses any Authorization header (tokens go in bearer_token_env or
+    // login instead), so use a plain custom header for the HTTP server.
+    store.mcp_headers.set("{\"X-API-Key\":\"${MCP_KEY}\"}");
     store.addMcp();
     try std.testing.expect(!store.failed);
     try std.testing.expectEqual(@as(usize, 2), store.mcp_servers.items.len);
@@ -1405,8 +1411,8 @@ test "agent settings manage providers, MCP servers, and Skills in an isolated ho
     defer gpa.free(mcp_bytes);
     try std.testing.expect(std.mem.indexOf(u8, mcp_bytes, "\"MCP_TOKEN\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, mcp_bytes, "stdio-secret") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mcp_bytes, "\"Authorization\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mcp_bytes, "Bearer secret") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_bytes, "\"X-API-Key\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_bytes, "${MCP_KEY}") != null);
 
     store.skill_name.set("review-helper");
     store.createSkill();

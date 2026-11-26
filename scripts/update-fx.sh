@@ -39,8 +39,20 @@ if [ "$unexpected" -ne 0 ]; then
 fi
 
 git -C "$fx" fetch origin
-git -C "$fx" checkout -B main origin/main
+
+# The applied patch is about to be discarded, on the strength of the copy in
+# the patch file: it must still be all there is. A reverse check reads the
+# working tree, so a patch that went on at an offset still counts as applied.
+if ! git -C "$fx" apply --check --reverse "$patch_file" >/dev/null 2>&1; then
+    echo "vendor/fx has changes beyond $patch_file; refusing to discard them." >&2
+    echo "Refresh the patch first: git -C vendor/fx diff --cached --binary > $patch_file" >&2
+    exit 1
+fi
+
+# Reset before branching out: a checkout refuses to carry the applied patch
+# onto a main that moved under the files it touches.
 git -C "$fx" reset --hard origin/main
+git -C "$fx" checkout -B main origin/main
 git -C "$fx" apply --3way "$patch_file"
 git -C "$fx" diff --cached --binary --src-prefix=a/ --dst-prefix=b/ > "$patch_file"
 
