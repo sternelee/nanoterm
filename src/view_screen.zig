@@ -234,10 +234,11 @@ pub fn keys(c: *ui.Context, a: *Session, s: *Screen) void {
         },
         else => {},
     };
+    // With no text field focused (a full-screen program like vim hides the
+    // composer), nanoui offers every key as a shortcut first. A bare letter
+    // has no shortcut here: leave it for the chars path below instead of
+    // marking it taken, which would swallow h/j/k/l/:.
     if (c.input.shortcut) |k| if (!k.cmd) {
-        c.shortcut_taken = true;
-        c.input.shortcut = null;
-        c.changed = true;
         const S = ui.Shortcut;
         const bytes: []const u8 = switch (k.key) {
             S.up => modArrow(&buf, s, 'A', k.shift, k.alt, k.ctrl),
@@ -257,8 +258,16 @@ pub fn keys(c: *ui.Context, a: *Session, s: *Screen) void {
             },
             else => "",
         };
-        if (bytes.len > 0) a.shell.input(bytes);
-        return;
+        if (bytes.len > 0) {
+            c.shortcut_taken = true;
+            c.input.shortcut = null;
+            c.changed = true;
+            a.shell.input(bytes);
+            return;
+        }
+        // Not a shortcut the program takes: clear it so the view above does
+        // not also act on it, but let this key continue as typed text.
+        c.input.shortcut = null;
     };
     if (c.input.chars.len > 0) {
         a.shell.input(c.input.chars);

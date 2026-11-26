@@ -83,6 +83,11 @@ test "vim and less draw over the pane and take the keys" {
     try std.testing.expect(until(&t, s, drawn));
     const screen = s.shell.fullScreen().?;
     try std.testing.expect(screen.rows >= 25 and screen.cols >= 90);
+    // With the composer unfocused, nanoui offers a bare letter as a shortcut
+    // before typing it. The terminal must not claim it: doing so swallowed
+    // h/j/k/l/: in vim, where no text field has focus.
+    try std.testing.expect(!t.shortcut(.{ .key = 'h' }));
+    try std.testing.expect(!t.shortcut(.{ .key = ':' }));
     t.typeText("ihello screen");
     try std.testing.expect(until(&t, s, inserting));
     try t.screenshot("/tmp/nanoterm-screen-vim.png");
