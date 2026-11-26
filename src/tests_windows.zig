@@ -15,7 +15,6 @@ test {
     _ = @import("screen_vt.zig");
     _ = @import("markdown.zig");
     _ = @import("classify.zig");
-    _ = @import("graff_logins.zig");
     _ = @import("proc_windows.zig");
     _ = @import("blocks.zig");
 }
@@ -90,7 +89,7 @@ test "programs on pipes: their output, then their exit code; stderr to a tail" {
     var s: Run = .{};
     defer s.out.deinit(std.testing.allocator);
     var q: proc.Process = undefined;
-    try proc.spawnPipes(&q, try proc.cStrings(a, &.{ "sort.exe" }), try env(a), null, true, s.sink());
+    try proc.spawnPipes(&q, try proc.cStrings(a, &.{"sort.exe"}), try env(a), null, true, s.sink());
     defer q.close();
     q.send("pear\r\napple\r\n");
     q.closeInput();

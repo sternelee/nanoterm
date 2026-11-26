@@ -17,8 +17,10 @@ test {
     _ = @import("tests_find.zig");
     _ = @import("tests_visual.zig");
     _ = @import("tests_visual_mcp.zig");
+    _ = @import("tests_relay.zig");
     _ = @import("tests_visual_view.zig");
     _ = @import("tests_fold.zig");
+    _ = @import("tests_copy.zig");
     _ = @import("tests_palette.zig");
     _ = @import("tests_pictures.zig");
     _ = @import("tests_pin.zig");
@@ -37,13 +39,16 @@ test {
     _ = @import("web.zig");
     _ = @import("marks.zig");
     _ = @import("agents.zig");
+    _ = @import("agent_native.zig");
+    _ = @import("agent_settings.zig");
+    _ = @import("agent_fx.zig");
+    _ = @import("agent_launch.zig");
+    _ = @import("pi.zig");
+    _ = @import("tests_agent_native.zig");
     _ = @import("tests_settings.zig");
     _ = @import("tests_onboarding.zig");
     _ = @import("tests_followup.zig");
     _ = @import("tests_pager.zig");
-    _ = @import("view_signins.zig");
-    _ = @import("graff_logins.zig");
-    _ = @import("tests_graff_logins.zig");
     _ = @import("tests_multiline.zig");
     _ = @import("agent_prompt.zig");
     _ = @import("analytics.zig");
@@ -52,9 +57,7 @@ test {
     _ = @import("commands.zig");
     _ = @import("classify.zig");
     _ = @import("history.zig");
-    _ = @import("jev.zig");
     _ = @import("agent_config.zig");
-    _ = @import("catalog.zig");
     _ = @import("complete.zig");
     _ = @import("palette.zig");
     _ = @import("markdown.zig");
@@ -62,16 +65,15 @@ test {
     _ = @import("tests_attach.zig");
     _ = @import("blocks.zig");
     _ = @import("highlight.zig");
+    _ = @import("file_icons.zig");
+    _ = @import("tests_file_icons.zig");
     _ = @import("tests_view.zig");
     _ = @import("tests_sidebar.zig");
     _ = @import("open_files.zig");
     _ = @import("view_sidebar.zig");
-    _ = @import("tests_graff_update.zig");
-    _ = @import("graff_update.zig");
     _ = @import("tests_agent.zig");
     _ = @import("tests_stream.zig");
 }
-
 
 /// Runs the main run loop (and so the dispatch sources) until `done`.
 fn pumpUntil(ctx: anytype, comptime done: fn (@TypeOf(ctx)) bool) !void {
@@ -154,6 +156,98 @@ test "a real zsh, cut into blocks" {
     try std.testing.expect(std.mem.endsWith(u8, sh.cwd.items, "/tmp"));
 }
 
+test "a long command line reaches the shell whole" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = try tempHome(io, arena, "shell-long-line");
+
+    var sh: shell_mod.Shell = .init(gpa, .{ .ctx = undefined, .changed = Noop.changed, .exited = Noop.exited });
+    defer sh.deinit();
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    try sh.start(arena, io, try std.fs.path.join(arena, &.{ home, "zdot" }), home, &env, home, .{ .rows = 24, .cols = 80 });
+    try pumpUntil(&sh, struct {
+        fn f(s: *shell_mod.Shell) bool {
+            return s.phase == .ready;
+        }
+    }.f);
+
+    // More than a terminal's input queue holds: a short write must not
+    // cut the line and leave zsh waiting for the closing quote.
+    const filler = try arena.alloc(u8, 6000);
+    @memset(filler, 'x');
+    const command = try std.fmt.allocPrint(arena, "true '{s}'", .{filler});
+    const b = try blocks.Block.create(gpa, 1, .shell, command, home, "");
+    defer b.destroy(gpa);
+    sh.submit(b);
+    try pumpUntil(b, struct {
+        fn done(x: *blocks.Block) bool {
+            return x.state == .done;
+        }
+    }.done);
+    try std.testing.expectEqual(@as(?i32, 0), b.exit_code);
+}
+
+test "a finished command tells its exit status" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = try tempHome(io, arena, "shell-finished");
+
+    const Finished = struct {
+        codes: [8]i32 = undefined,
+        count: usize = 0,
+        fn f(ctx: *anyopaque, code: i32) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.count < self.codes.len) {
+                self.codes[self.count] = code;
+                self.count += 1;
+            }
+        }
+    };
+    var seen: Finished = .{};
+    var sh: shell_mod.Shell = .init(gpa, .{ .ctx = &seen, .changed = Noop.changed, .exited = Noop.exited, .command_finished = Finished.f });
+    defer sh.deinit();
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    try sh.start(arena, io, try std.fs.path.join(arena, &.{ home, "zdot" }), home, &env, home, .{ .rows = 24, .cols = 80 });
+    try pumpUntil(&sh, struct {
+        fn f(s: *shell_mod.Shell) bool {
+            return s.phase == .ready;
+        }
+    }.f);
+
+    const run = struct {
+        fn f(s: *shell_mod.Shell, g: std.mem.Allocator, id: u64, cmd: []const u8) !*blocks.Block {
+            const b = try blocks.Block.create(g, id, .shell, cmd, "/", "");
+            s.submit(b);
+            try pumpUntil(b, struct {
+                fn done(x: *blocks.Block) bool {
+                    return x.state == .done;
+                }
+            }.done);
+            return b;
+        }
+    }.f;
+
+    const ok = try run(&sh, gpa, 1, "true");
+    defer ok.destroy(gpa);
+    try std.testing.expectEqual(@as(usize, 1), seen.count);
+    try std.testing.expectEqual(@as(i32, 0), seen.codes[0]);
+
+    const fails = try run(&sh, gpa, 2, "false");
+    defer fails.destroy(gpa);
+    try std.testing.expectEqual(@as(usize, 2), seen.count);
+    try std.testing.expectEqual(@as(i32, 1), seen.codes[1]);
+}
+
 const fake_agent =
     \\import json, sys
     \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
@@ -223,7 +317,7 @@ test "an ACP agent: messages, a terminal as a block, a permission" {
         for (host.made.items) |b| b.destroy(gpa);
         host.made.deinit(gpa);
     }
-    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .graff, home);
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .claude, home);
     defer a.destroy();
     a.env = &.{"PATH=/usr/bin:/bin"};
     try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", script }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));

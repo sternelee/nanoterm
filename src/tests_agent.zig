@@ -1,13 +1,11 @@
 //! What an agent lets the user choose, against a fake ACP agent: config
 //! options (model, mode) set through session/set_config_option, slash
-//! commands offered as "/" is typed; and Jev's answers, from a local file
-//! instead of the gateway. Nothing reaches the user's agents or accounts.
+//! commands offered as "/" is typed. Nothing reaches the user's agents.
 const std = @import("std");
 const agent_mod = @import("agent.zig");
 const blocks = @import("blocks.zig");
 const proc = @import("proc.zig");
-const jev_mod = @import("jev.zig");
-
+const session_mod = @import("session.zig");
 
 fn pumpUntil(ctx: anytype, comptime done: fn (@TypeOf(ctx)) bool) !void {
     var waited: f64 = 0;
@@ -42,6 +40,74 @@ const fake_agent =
     \\        if p["configId"] == "mode":
     \\            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"sessionUpdate": "current_mode_update", "currentModeId": p["value"]}}})
     \\
+;
+
+const fake_pi =
+    \\import json, sys
+    \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+    \\model = {"id": "sonnet", "name": "Sonnet", "provider": "anthropic"}
+    \\state = {"model": model, "thinkingLevel": "high", "sessionId": "pi-1", "isStreaming": False}
+    \\def started(): send({"type": "agent_start"})
+    \\def settled(): send({"type": "agent_settled", "aborted": False})
+    \\for line in sys.stdin:
+    \\    m = json.loads(line)
+    \\    kind, rid = m.get("type"), m.get("id")
+    \\    def ok(data=None): send({"id": rid, "type": "response", "command": kind, "success": True, "data": data})
+    \\    if kind == "get_state":
+    \\        ok(state)
+    \\    elif kind == "get_available_models":
+    \\        ok({"models": [model, {"id": "opus", "name": "Opus", "provider": "anthropic"}]})
+    \\    elif kind == "get_available_thinking_levels":
+    \\        ok({"levels": ["off", "high"]})
+    \\    elif kind == "get_commands":
+    \\        ok({"commands": [{"name": "review", "description": "review the changes", "source": "prompt"}]})
+    \\    elif kind == "set_model":
+    \\        if m["modelId"] == "missing":
+    \\            send({"id": rid, "type": "response", "command": kind, "success": False, "error": "no such model"})
+    \\        else:
+    \\            model.update({"provider": m["provider"], "id": m["modelId"]})
+    \\            ok({"id": m["modelId"], "name": m["modelId"].title(), "provider": m["provider"]})
+    \\    elif kind == "set_thinking_level":
+    \\        state["thinkingLevel"] = m["level"]
+    \\        ok({})
+    \\        send({"type": "thinking_level_changed", "level": m["level"]})
+    \\    elif kind == "prompt" and m["message"] == "first":
+    \\        ok({"disposition": "started"})
+    \\        started()
+    \\        send({"type": "turn_start"})
+    \\        send({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "one"}})
+    \\    elif kind == "prompt" and m["message"] == "second":
+    \\        assert m.get("streamingBehavior") == "followUp"
+    \\        ok({"disposition": "queued"})
+    \\        settled()
+    \\        started()
+    \\        send({"type": "turn_start"})
+    \\        send({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "two"}})
+    \\        send({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "two"}], "stopReason": "stop"}})
+    \\        settled()
+    \\    elif kind == "prompt":
+    \\        ok({"disposition": "started"})
+    \\        started()
+    \\        send({"type": "turn_start"})
+    \\        send({"type": "message_start", "message": {"role": "assistant", "content": []}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "thinking: "}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "thinking_start", "contentIndex": 0}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "contentIndex": 0, "delta": "a plan"}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "toolcall_start", "contentIndex": 1, "id": "call_1", "toolName": "bash"}})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "toolcall_end", "contentIndex": 1, "toolCall": {"type": "toolCall", "id": "call_1", "name": "bash", "arguments": {"command": "ls -la"}}}})
+    \\        send({"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "bash", "args": {"command": "ls -la"}})
+    \\        send({"type": "tool_execution_update", "toolCallId": "call_1", "toolName": "bash", "args": {"command": "ls -la"}, "partialResult": {"content": [{"type": "text", "text": "partial"}]}})
+    \\        send({"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "bash", "result": {"content": [{"type": "text", "text": "a.txt"}, {"type": "text", "text": "b.txt"}]}, "isError": False})
+    \\        send({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 2, "delta": "done"}})
+    \\        send({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "thinking: "}, {"type": "thinking", "thinking": "a plan"}, {"type": "text", "text": "done"}], "stopReason": "stop"}})
+    \\        send({"type": "turn_end", "message": {}, "toolResults": []})
+    \\        send({"type": "agent_end", "messages": [], "willRetry": False})
+    \\        settled()
+    \\    elif kind == "abort":
+    \\        ok({})
+    \\        settled()
 ;
 
 const Host = struct {
@@ -89,44 +155,76 @@ test "an agent's models, modes and slash commands" {
     try std.testing.expectEqualStrings("smartest", a.config.find("model").?.choices[1].description);
 }
 
-test "Jev decides what the rules could not, from its answer" {
+test "a new session starts with the default model" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const dir = "/tmp/nanoterm-test-jev";
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-    // curl reads the answer from a file: no network, no account.
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/answer.json", .data = "{\"answers\":{\"q1\":{\"type\":\"choice\",\"choice\":\"agent\",\"confidence\":0.8}}}" });
-    var j: jev_mod.Jev = .{ .gpa = gpa, .key = try gpa.dupe(u8, "test-key"), .endpoint = "file://" ++ dir ++ "/answer.json" };
-    defer j.deinit();
-    j.ask("tidy up the readme", .{});
-    j.ask("tidy up the readme a bit", .{});
-    try pumpUntil(&j, struct {
-        fn f(x: *jev_mod.Jev) bool {
-            return x.answer("tidy up the readme a bit") != null or x.down;
-        }
-    }.f);
-    try std.testing.expect(!j.down);
-    // Typing paused once: one question, about the latest text.
-    try std.testing.expectEqual(@as(usize, 1), j.calls);
-    try std.testing.expectEqual(@import("classify.zig").Kind.agent, j.answer("tidy up the readme a bit").?);
-    try std.testing.expect(j.answer("tidy up the readme") == null);
-
-    // A failed call turns Jev off for the session.
-    var bad: jev_mod.Jev = .{ .gpa = gpa, .key = try gpa.dupe(u8, "test-key"), .endpoint = "file://" ++ dir ++ "/missing.json" };
-    defer bad.deinit();
-    bad.ask("tidy up the readme", .{});
-    try pumpUntil(&bad, struct {
-        fn f(x: *jev_mod.Jev) bool {
-            return x.down;
-        }
-    }.f);
-    bad.ask("something else entirely", .{});
-    try std.testing.expectEqual(@as(usize, 1), bad.calls);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-default-model";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    shared.prefs.setModel("anthropic/claude-sonnet");
+    const s = try session_mod.Session.create(&shared, home);
+    defer s.destroy();
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet", s.model_choice.?);
 }
 
-/// Answers a prompt only once the next one comes, as graff 0.302 does when
-/// its last line sits unflushed: the first answer arrives after the
+/// An ACP agent whose model option is marked when the model chosen before
+/// its session opened arrives.
+const pending_fake =
+    \\import json, sys
+    \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+    \\model = {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sonnet",
+    \\         "options": [{"value": "sonnet", "name": "Sonnet"}, {"value": "opus", "name": "Opus"}]}
+    \\for line in sys.stdin:
+    \\    m = json.loads(line)
+    \\    method = m.get("method")
+    \\    if method == "initialize":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1}})
+    \\    elif method == "session/new":
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1", "configOptions": [model]}})
+    \\    elif method == "session/set_config_option":
+    \\        p = m["params"]
+    \\        if p["configId"] == "model":
+    \\            model["currentValue"] = p["value"]
+    \\            if p["value"] == "opus": model["options"][1]["description"] = "applied at open"
+    \\        send({"jsonrpc": "2.0", "id": m["id"], "result": {"configOptions": [model]}})
+    \\
+;
+
+test "a model chosen before an ACP session opens reaches it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir = "/tmp/nanoterm-test-pending-model";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/agent.py", .data = pending_fake });
+    var host: u8 = 0;
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .claude, dir);
+    defer a.destroy();
+    a.setPendingModel("opus");
+    try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", dir ++ "/agent.py" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            const model = x.config.find("model") orelse return false;
+            return x.status == .ready and std.mem.eql(u8, model.current, "opus") and model.choices[1].description.len > 0;
+        }
+    }.f);
+    try std.testing.expectEqualStrings("applied at open", a.config.find("model").?.choices[1].description);
+}
+
+/// Covers an ACP agent whose last line sits unflushed: the first answer arrives after the
 /// second prompt was sent.
 const lagging_agent =
     \\import json, sys
@@ -152,8 +250,17 @@ const lagging_agent =
 ;
 
 fn turnText(t: *agent_mod.Turn) []const u8 {
+    return turnTextAt(t, 0);
+}
+
+/// The `n`th text item: text either side of a tool call is its own item.
+fn turnTextAt(t: *agent_mod.Turn, n: usize) []const u8 {
+    var i: usize = 0;
     for (t.items.items) |it| switch (it) {
-        .text => |l| return l.items,
+        .text => |l| {
+            if (i == n) return l.items;
+            i += 1;
+        },
         else => {},
     };
     return "";
@@ -195,4 +302,127 @@ test "a late answer ends its own turn, not the one sent after it" {
     try std.testing.expectEqualStrings("one", turnText(a.turns.items[0]));
     try std.testing.expectEqualStrings("two", turnText(a.turns.items[1]));
     try std.testing.expectEqual(agent_mod.Status.ready, a.status);
+}
+
+test "Pi over RPC: state, tools, config and a settled turn" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir = "/tmp/nanoterm-test-pi";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/pi.py", .data = fake_pi });
+
+    var host: u8 = 0;
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .pi, dir);
+    defer a.destroy();
+    try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", dir ++ "/pi.py" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return x.status == .ready and x.config.commands.items.len > 0 and x.config.find("model") != null;
+        }
+    }.f);
+    // Its model, as provider/id, and the levels it offers.
+    try std.testing.expectEqualStrings("anthropic/sonnet", a.config.find("model").?.current);
+    try std.testing.expectEqualStrings("Sonnet", a.config.find("model").?.currentName());
+    try std.testing.expectEqual(@as(usize, 2), a.config.find("model").?.choices.len);
+    try std.testing.expectEqualStrings("high", a.config.find("thought_level").?.current);
+
+    // Choosing one goes as Pi's own set_model, provider and id apart.
+    a.setOption("model", "anthropic/opus");
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return std.mem.eql(u8, x.config.find("model").?.current, "anthropic/opus") and x.pi_client.pending.count() == 0;
+        }
+    }.f);
+    try std.testing.expectEqualStrings("Opus", a.config.find("model").?.currentName());
+    a.setOption("thought_level", "off");
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return std.mem.eql(u8, x.config.find("thought_level").?.current, "off") and x.pi_client.pending.count() == 0;
+        }
+    }.f);
+
+    // A prompt: its text streams, its tool call runs, and the turn settles.
+    try a.promptWith(null, "list the files", &.{});
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return x.turns.items.len == 1 and x.turns.items[0].done;
+        }
+    }.f);
+    const t = a.turns.items[0];
+    try std.testing.expectEqualStrings("thinking: ", turnText(t));
+    try std.testing.expectEqualStrings("done", turnTextAt(t, 1));
+    var tool_text: []const u8 = "";
+    var tool_status: agent_mod.ToolStatus = .pending;
+    var thought: []const u8 = "";
+    for (t.items.items) |it| switch (it) {
+        .tool => |tl| {
+            tool_text = tl.detail.items;
+            tool_status = tl.status;
+        },
+        .thought => |l| thought = l.items,
+        else => {},
+    };
+    try std.testing.expectEqualStrings("a.txt\nb.txt", tool_text);
+    try std.testing.expectEqual(agent_mod.ToolStatus.completed, tool_status);
+    try std.testing.expectEqualStrings("a plan", thought);
+    try std.testing.expectEqual(agent_mod.Status.ready, a.status);
+    try std.testing.expectEqual(@as(usize, 0), a.pi_client.pending.count());
+
+    // A refused model change puts the choice back, and says so on the turn.
+    try std.testing.expectEqualStrings("anthropic/opus", a.config.find("model").?.current);
+    a.setOption("model", "anthropic/missing");
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return x.pi_client.pending.count() == 0 and std.mem.eql(u8, x.config.find("model").?.current, "anthropic/opus");
+        }
+    }.f);
+    var noted = false;
+    for (t.items.items) |it| switch (it) {
+        .note => |n| noted = noted or std.mem.startsWith(u8, n, "the model was not set:"),
+        else => {},
+    };
+    try std.testing.expect(noted);
+}
+
+test "Pi over RPC: a follow-up is queued and settles as its own turn" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir = "/tmp/nanoterm-test-pi-queue";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/pi.py", .data = fake_pi });
+
+    var host: u8 = 0;
+    const a = try agent_mod.Agent.create(gpa, io, .{ .ctx = &host, .changed = Host.changed, .newBlock = Host.newBlock }, .pi, dir);
+    defer a.destroy();
+    try a.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", dir ++ "/pi.py" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return x.status == .ready;
+        }
+    }.f);
+
+    try a.promptWith(null, "first", &.{});
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return x.turns.items.len == 1 and turnText(x.turns.items[0]).len > 0;
+        }
+    }.f);
+    try a.promptWith(null, "second", &.{});
+    try pumpUntil(a, struct {
+        fn f(x: *agent_mod.Agent) bool {
+            return x.turns.items.len == 2 and x.turns.items[0].done and x.turns.items[1].done;
+        }
+    }.f);
+    try std.testing.expectEqualStrings("one", turnText(a.turns.items[0]));
+    try std.testing.expectEqualStrings("two", turnText(a.turns.items[1]));
+    try std.testing.expectEqual(agent_mod.Status.ready, a.status);
+    try std.testing.expectEqual(@as(usize, 0), a.pi_client.pending.count());
 }

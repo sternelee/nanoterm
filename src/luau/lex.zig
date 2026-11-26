@@ -100,7 +100,7 @@ pub const Lexer = struct {
             while (l.pos < l.src.len and (std.ascii.isAlphanumeric(l.src[l.pos]) or l.src[l.pos] == '_')) l.pos += 1;
             const word = l.src[start..l.pos];
             const kw = std.meta.stringToEnum(Tag, word);
-            if (kw) |k| if (@intFromEnum(k) >= @intFromEnum(Tag.@"and") and @intFromEnum(k) <= @intFromEnum(Tag.@"while")) return l.tok(k, start);
+            if (kw) |k| if (@backingInt(k) >= @backingInt(Tag.@"and") and @backingInt(k) <= @backingInt(Tag.@"while")) return l.tok(k, start);
             return l.tok(.name, start);
         }
         if (std.ascii.isDigit(ch) or (ch == '.' and l.pos + 1 < l.src.len and std.ascii.isDigit(l.src[l.pos + 1]))) return l.number();

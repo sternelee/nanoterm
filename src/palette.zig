@@ -23,7 +23,7 @@ fn S(comptime f: fn (*Workspace) void) *const fn (*Workspace) void {
 }
 
 pub const actions = [_]Action{
-    .{ .label = "Settings", .also = "preferences sign in codegraff account agents install update", .keys = binds.label("Cmd+,"), .icon = "gearshape", .run = S(struct {
+    .{ .label = "Settings", .also = "preferences providers mcp skills agents install update", .keys = binds.label("Cmd+,"), .icon = "gearshape", .run = S(struct {
         fn f(w: *Workspace) void {
             w.closeOverlay();
             w.openSettings();
@@ -115,9 +115,9 @@ pub const actions = [_]Action{
             w.shared.setAppearance(.system);
         }
     }.f) },
-    .{ .label = "Use graff", .icon = "sparkles", .run = S(struct {
+    .{ .label = "Use Agent", .icon = "sparkles", .run = S(struct {
         fn f(w: *Workspace) void {
-            w.focused().choose(.graff);
+            w.focused().choose(.agent);
         }
     }.f) },
     .{ .label = "Use Claude Code", .icon = "sparkles", .run = S(struct {

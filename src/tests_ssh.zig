@@ -136,7 +136,7 @@ test "an SSH session: set up, remote blocks, and the agent working there" {
     try std.testing.expectEqual(session_mod.Mode.agent, s.mode());
     s.input.set("ls -la");
     try std.testing.expectEqual(session_mod.Mode.terminal, s.mode());
-    const ag = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = session_mod.Session.agentBlockFn }, .graff, home);
+    const ag = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = session_mod.Session.agentBlockFn }, .claude, home);
     s.agent = ag;
     ag.env = shared.env_list;
     try ag.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", home ++ "/agent.py" }), try proc.cStrings(arena, shared.env_list));

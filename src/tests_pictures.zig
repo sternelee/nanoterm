@@ -63,11 +63,12 @@ test "scrolling past many pictures doesn't decode or pack them again every frame
     const dir = "/tmp/nanoterm-test-pictures-scroll";
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     try std.Io.Dir.cwd().createDirPath(io, dir);
-    // Eight different 1600×1000 pictures: more than the atlas holds at once.
-    const px = try gpa.alloc(u8, 1600 * 1000 * 4);
+    // Eight different 760×475 pictures: more than the atlas holds at once,
+    // within nanoui 0.8's decoded-picture cache.
+    const px = try gpa.alloc(u8, 760 * 475 * 4);
     defer gpa.free(px);
     @memset(px, 200);
-    const png = try ui.png.encode(gpa, .{ .bytes = px, .width = 1600, .height = 1000 });
+    const png = try ui.png.encode(gpa, .{ .bytes = px, .width = 760, .height = 475 });
     defer gpa.free(png);
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(gpa);

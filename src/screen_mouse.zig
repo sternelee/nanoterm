@@ -35,13 +35,13 @@ const At = struct { cell: [2]u16, inside: bool };
 fn at(c: *ui.Context, s: *const Screen) ?At {
     const o = s.origin orelse return null;
     const m = view_screen.metrics(c);
-    const fx = (c.input.mouse.x - o[0]) / m.w;
+    const agent = (c.input.mouse.x - o[0]) / m.w;
     const fy = (c.input.mouse.y - o[1]) / m.h;
     const cols: f32 = @floatFromInt(s.cols);
     const rows: f32 = @floatFromInt(s.rows);
     return .{
-        .cell = .{ @intFromFloat(std.math.clamp(@floor(fx), 0, cols - 1)), @intFromFloat(std.math.clamp(@floor(fy), 0, rows - 1)) },
-        .inside = fx >= 0 and fy >= 0 and fx < cols and fy < rows,
+        .cell = .{ @intFromFloat(std.math.clamp(@floor(agent), 0, cols - 1)), @intFromFloat(std.math.clamp(@floor(fy), 0, rows - 1)) },
+        .inside = agent >= 0 and fy >= 0 and agent < cols and fy < rows,
     };
 }
 

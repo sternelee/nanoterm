@@ -66,9 +66,19 @@ test "a program drawing in place gets a screen, and its last screen stays" {
     try std.testing.expectEqual(@as(u21, 'Y'), s.row(2)[5].cp);
     try std.testing.expectEqual(@as(u21, 'f'), s.row(2)[23].cp);
     // Rows scrolled off its top stay lines.
+    o.stamp = 5;
     try o.feed("a\r\nb\r\nc\r\nd\r\n");
     try std.testing.expectEqualStrings("one", o.lines.items[0].text.items);
+    // Rows that scrolled off while it ran landed now — 5 — so they
+    // fade in; the rows still on it when it left were already visible,
+    // so keeping them settles them at once.
     o.leaveScreen();
+    for (o.lines.items) |l| {
+        if (std.mem.eql(u8, l.text.items, "d") or std.mem.eql(u8, l.text.items, "  2. No"))
+            try std.testing.expectEqual(@as(f64, 0), l.arrived);
+        if (std.mem.eql(u8, l.text.items, "one") or std.mem.startsWith(u8, l.text.items, "> 1."))
+            try std.testing.expectEqual(@as(f64, 5), l.arrived);
+    }
     const plain = try o.plainText(gpa);
     defer gpa.free(plain);
     try std.testing.expectEqualStrings("one\ntwo\n> 1. Yes, I trust this folder\n  2. No\na\nb\nc\nd", plain);
@@ -144,4 +154,26 @@ test "Windows' pseudo console: a repaint from the top doesn't cost a block its l
     const plain = try block.plainText(gpa);
     defer gpa.free(plain);
     try std.testing.expectEqualStrings("    Directory\n\nMode", plain);
+}
+
+test "rewrites settle from where they were rewritten" {
+    const gpa = std.testing.allocator;
+    var o: Output = .init(gpa);
+    defer o.deinit();
+    // One stamp, two writes: the rewrite is fresh from its first byte.
+    o.stamp = 5;
+    try o.feed("50%\r100%\n");
+    try std.testing.expectEqual(@as(f64, 5), o.lines.items[0].fresh_at);
+    try std.testing.expectEqual(@as(u32, 0), o.lines.items[0].fresh_from);
+    // A rewrite further in — the prompt redrawn from mid-line — then
+    // one from the start, in one stamp: the earliest byte it touched
+    // is where the freshness starts.
+    o.stamp = 6;
+    try o.feed("ab");
+    o.stamp = 7;
+    try o.feed("\x1b[3Gx");
+    try std.testing.expectEqual(@as(u32, 2), o.lines.items[1].fresh_from);
+    try o.feed("\ry");
+    try std.testing.expectEqual(@as(u32, 0), o.lines.items[1].fresh_from);
+    try std.testing.expectEqual(@as(f64, 7), o.lines.items[1].fresh_at);
 }

@@ -8,6 +8,7 @@ const ui = nanoui.ui;
 const K = ui.keys.label;
 const binds = @import("binds.zig");
 const theme = @import("theme.zig");
+const motion = @import("motion.zig");
 const split = @import("split.zig");
 const agent_mod = @import("agent.zig");
 const view_pane = @import("view_pane.zig");
@@ -25,16 +26,31 @@ const Tree = ws_mod.Tree;
 const title_height = 40;
 
 pub fn view(w: *Workspace, c: *ui.Context) void {
+    // nanoui 0.12.0 keeps the composer's press block after the press, so
+    // output could never take a selection once the input had been clicked.
+    // A later nanoui clears it at the start of every frame; until this app
+    // moves to one, clear it here so it lasts only the press's frame.
+    c.selection.blocked = false;
+    // What the relay held back at its last change goes out in this frame.
+    if (w.shared.relay) |h| h.tick();
     if (w.tabs.items.len == 0) return;
     focusOnPress(w, c);
-    // Harness's palettes: light, dark, or as the system is.
+    // Harness's palettes: the theme Settings chose, or light and dark as
+    // the system is.
     const want: theme.Appearance = switch (w.shared.appearance) {
         .system => if (nanoui.isDark()) .dark else .light,
         .dark => .dark,
         .light => .light,
     };
-    if (want != theme.appearance) theme.apply(want);
+    theme.select(w.shared.prefs.theme);
+    theme.apply(want);
+    theme.mono_font = if (w.shared.prefs.terminal_font.len == 0) null else w.shared.prefs.terminal_font;
     c.theme = theme.ui();
+    // Motion's dials, as the settings and the system ask for them.
+    motion.apply(w.shared.prefs.motion_duration, w.shared.prefs.motion_intensity, c.reduced_motion);
+    // Settings can change the family during the view build. Apply it now as
+    // well as at the next frame boundary, so text and metrics change at once.
+    c.text.setFamilies(c.theme.font, c.theme.mono_font);
     c.setZoom(w.zoom);
     shortcuts(w, c);
     view_find.prepare(c, w);
@@ -98,7 +114,7 @@ fn shortcuts(w: *Workspace, c: *ui.Context) void {
         if (c.shortcut(.{ .key = S.escape })) w.closeOverlay();
         if (w.overlay == .palette) {
             const all = std.enums.values(@import("palette.zig").Scope);
-            const at = @intFromEnum(w.scope);
+            const at = @backingInt(w.scope);
             if (c.shortcut(.{ .key = S.tab, .shift = true })) {
                 w.scope = all[(at + all.len - 1) % all.len];
                 w.pick = 0;
@@ -127,7 +143,7 @@ fn shortcuts(w: *Workspace, c: *ui.Context) void {
     if (c.shortcut(binds.shortcut("Cmd+K"))) s.clear();
     if (c.shortcut(.{ .key = 'c', .ctrl = true })) s.interrupt();
     // ^D on an empty input: the program's end of input, as in a terminal.
-    if (s.input.len == 0 and program.reading(s) and c.shortcut(.{ .key = 'd', .ctrl = true })) program.eof(s);
+    if (s.input.text().len == 0 and program.reading(s) and c.shortcut(.{ .key = 'd', .ctrl = true })) program.eof(s);
     if (c.shortcut(binds.shortcut("Cmd+Up"))) selectBlock(s, -1);
     if (c.shortcut(binds.shortcut("Cmd+Down"))) selectBlock(s, 1);
     if (s.menu.open) {
@@ -159,7 +175,7 @@ fn shortcuts(w: *Workspace, c: *ui.Context) void {
         if (s.agent) |ag| if (ag.status == .working) return ag.cancel();
         if (s.selected != null) {
             s.selected = null;
-        } else if (s.input.len == 0) s.lock = null;
+        } else if (s.input.text().len == 0) s.lock = null;
     }
 }
 
@@ -262,7 +278,7 @@ fn titleBar(w: *Workspace, c: *ui.Context, side: bool) void {
     ui.spacer(c);
     if (side) {
         if (view_sidebar.statusLine(c, w.tab())) |line| ui.text(c, line, .{ .size = 12, .color = theme.muted });
-    } else if (s.agent) |ag| statusDot(c, ag.status);
+    } else if (s.agent) |ag| statusDot(c, ag.status, @intFromPtr(s));
     if (!side and w.sidebar == .hidden and view_sidebar.anyAgent(w)) {
         // Hidden while agents run: a way back.
         ui.key(c, "sidebar-show");
@@ -319,14 +335,20 @@ fn tabs(w: *Workspace, c: *ui.Context) void {
     if (close) |i| w.closeTab(i);
 }
 
-fn statusDot(c: *ui.Context, status: agent_mod.Status) void {
-    const color: ui.Color = switch (status) {
+fn statusDot(c: *ui.Context, status: agent_mod.Status, id: u64) void {
+    var color: ui.Color = switch (status) {
         .off => theme.faint,
         .starting => theme.warning,
         .ready => theme.success,
         .working => theme.agent,
         .failed => theme.failure,
     };
+    // It breathes while it works, for its first seconds, then rests.
+    const since = motion.flipped(id, @backingInt(status), @floatCast(c.time));
+    if (motion.pulse(c.time, since)) |a| {
+        color = color.alpha(a);
+        c.animationFrame();
+    }
     _ = c.leaf(.{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .radius = 3.5, .background = color }, .none, null);
     ui.text(c, @tagName(status), .{ .size = 11.5, .color = theme.muted });
 }

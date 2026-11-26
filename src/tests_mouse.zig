@@ -8,6 +8,7 @@ const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const ws_mod = @import("workspace.zig");
 const session_mod = @import("session.zig");
+const agent_mod = @import("agent.zig");
 const view = @import("view.zig");
 const view_screen = @import("view_screen.zig");
 const theme = @import("theme.zig");
@@ -93,4 +94,68 @@ test "a program that tracks the mouse gets clicks and the wheel; Shift selects" 
     try std.testing.expect(s.shell.fullScreen() == null);
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("\x1b[<0;3;2M\x1b[<0;3;2m\x1b[<64;3;2M", try std.Io.Dir.cwd().readFile(io, home ++ "/got", &buf));
+}
+
+test "a block's output is selected by a drag and copied" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-output-select";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    const b = try @import("blocks.zig").Block.create(gpa, 1, .shell, "printf", home, "");
+    defer b.destroy(gpa);
+    try b.output.feed("alpha beta\ngamma delta\n");
+    b.finish(0);
+    try s.timeline.append(gpa, .{ .block = b });
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 800, .height = 600, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    // Type in the composer first: its press must not keep the page from
+    // taking a selection afterwards.
+    try t.clickText("Run a command, or ask the agent anything");
+    try std.testing.expect(t.ctx.focus != 0);
+
+    const first = t.findText("alpha beta").?;
+    const second = t.findText("gamma delta").?;
+    t.drag(first.x + 1, first.y + first.h / 2, second.x + 6, second.y + second.h / 2);
+    t.settle(1);
+    try std.testing.expect(std.mem.indexOf(u8, t.ctx.selection.text.items, "alpha beta") != null);
+    t.textOps(&.{.{ .command = .copy }});
+    try std.testing.expect(std.mem.indexOf(u8, t.clipboard.items, "alpha beta") != null);
+
+    // An agent's reply goes through the same timeline and selects too.
+    const ag = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = struct {
+        fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
+            return null;
+        }
+    }.f }, .claude, home);
+    s.agent = ag;
+    try ag.promptAs(null, "what changed?");
+    const turn = ag.current().?;
+    var reply: std.ArrayList(u8) = .empty;
+    try reply.appendSlice(gpa, "the agent reply words");
+    try turn.items.append(gpa, .{ .text = reply });
+    turn.done = true;
+    try s.timeline.append(gpa, .{ .turn = turn });
+    t.settle(1);
+    const answer = t.findText("the agent reply words").?;
+    t.drag(answer.x + 1, answer.y + answer.h / 2, answer.x + answer.w - 1, answer.y + answer.h / 2);
+    t.settle(1);
+    try std.testing.expect(std.mem.indexOf(u8, t.ctx.selection.text.items, "agent reply") != null);
+    t.textOps(&.{.{ .command = .copy }});
+    try std.testing.expect(std.mem.indexOf(u8, t.clipboard.items, "agent reply") != null);
 }

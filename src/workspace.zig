@@ -57,6 +57,10 @@ pub const Workspace = struct {
     /// Where the panes of the active tab were laid out in the last frame.
     placed: std.ArrayList(Tree.Placed) = .empty,
     overlay: Overlay = .none,
+    /// Settings' page: which category its sidebar is on, and the height
+    /// the Agents page gave the panel, held on every other page.
+    settings_page: u8 = 0,
+    settings_height: f32 = 0,
     /// What the palette searches (Tab cycles).
     scope: @import("palette.zig").Scope = .all,
     /// The overlay's search, and its row chosen with ↑↓.
@@ -75,6 +79,8 @@ pub const Workspace = struct {
         for (w.tabs.items) |t| w.freeTab(t);
         w.tabs.deinit(w.shared.gpa);
         w.placed.deinit(w.shared.gpa);
+        w.query.deinit();
+        w.find.deinit();
     }
 
     pub fn zoomBy(w: *Workspace, by: f32) void {
@@ -105,13 +111,22 @@ pub const Workspace = struct {
         if (w.overlay == .models) w.shared.prefs.refresh(w.shared.env);
         w.query.clear();
         w.pick = 0;
-        if (w.overlay == .models) @import("assist.zig").prepareModels(w.focused());
+        if (w.overlay == .models) {
+            @import("assist.zig").prepareModels(w.focused());
+            // A listing that came back empty is looked at again: the picker
+            // may be opening because the provider was signed in since.
+            if (w.shared.agent_store) |store| store.retryModels();
+        }
     }
 
-    /// Settings (⌘,): the agents are looked for again as it opens.
+    /// Settings (⌘,): the agents are looked for again as it opens, and
+    /// the terminal's font choices are loaded.
     pub fn openSettings(w: *Workspace) void {
         w.overlay = if (w.overlay == .settings) .none else .settings;
-        if (w.overlay == .settings) w.shared.prefs.refresh(w.shared.env);
+        if (w.overlay == .settings) {
+            w.shared.prefs.refresh(w.shared.env);
+            w.shared.fonts.ensure(w.shared.gpa, w.shared.io, w.shared.prefs.terminal_font);
+        }
     }
 
     pub fn closeOverlay(w: *Workspace) void {

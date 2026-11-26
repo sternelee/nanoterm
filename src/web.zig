@@ -1,4 +1,4 @@
-//! Requests over HTTPS, as Jev makes them: curl, configured through its
+//! Requests over HTTPS through curl, configured by its
 //! input (so a key never shows in a process list), its answer read on the
 //! main thread when it comes (`proc.zig`), and a callback with the status
 //! and the body, or the file it wrote.

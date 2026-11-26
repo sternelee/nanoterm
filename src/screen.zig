@@ -142,6 +142,12 @@ pub const Screen = struct {
         return s.cells[@as(usize, s.map[y]) * w ..][0..w];
     }
 
+    /// Writes `cell` at `x,y`.
+    fn setCell(s: *Screen, x: u16, y: u16, cell: Cell) void {
+        const i = @as(usize, s.map[y]) * s.cols + x;
+        s.cells[i] = cell;
+    }
+
     /// A cell blanked with the pen's background, as erasing does.
     fn blank(s: *const Screen) Cell {
         return .{ .bg = s.cur.pen.bg };
@@ -194,7 +200,7 @@ pub const Screen = struct {
         if (w == 2 and s.cur.x + 1 >= s.cols) {
             // A wide character does not split: it starts the next line.
             if (!s.autowrap) return;
-            s.row(s.cur.y)[s.cur.x] = s.blank();
+            s.setCell(s.cur.x, s.cur.y, s.blank());
             s.cur.x = 0;
             s.lineFeed();
         }
@@ -206,11 +212,11 @@ pub const Screen = struct {
         var cell = s.cur.pen;
         cell.cp = cp;
         cell.attrs.tail = false;
-        r[s.cur.x] = cell;
+        s.setCell(s.cur.x, s.cur.y, cell);
         if (w == 2) {
             cell.cp = ' ';
             cell.attrs.tail = true;
-            r[s.cur.x + 1] = cell;
+            s.setCell(s.cur.x + 1, s.cur.y, cell);
         }
         if (s.cur.x + w >= s.cols) {
             s.cur.x = s.cols - 1;
@@ -233,7 +239,7 @@ pub const Screen = struct {
                     var cell = s.cur.pen;
                     cell.cp = rest[rest.len - 1];
                     cell.attrs.tail = false;
-                    s.row(s.cur.y)[s.cur.x] = cell;
+                    s.setCell(s.cur.x, s.cur.y, cell);
                     return;
                 }
                 s.pending_wrap = false;

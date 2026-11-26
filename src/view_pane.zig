@@ -212,7 +212,7 @@ fn welcome(c: *ui.Context, s: *Session) void {
             }
         }
     }
-    ui.text(c, "Agents speak ACP (graff, Claude Code). A failed command offers a fix; full-screen programs (vim, htop) draw in the pane.", .{ .size = 12, .color = theme.faint, .wrap = true });
+    ui.text(c, "Use built-in Agent or ACP agents like Claude Code. A failed command offers a fix; full-screen programs (vim, htop) draw in the pane.", .{ .size = 12, .color = theme.faint, .wrap = true });
     if (s.shell_exited) ui.text(c, "The shell exited.", .{ .size = 13, .color = theme.failure });
 }
 

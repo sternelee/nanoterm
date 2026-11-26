@@ -55,6 +55,11 @@ pub fn attached(s: *Session) ?*blocks.Block {
 
 /// Sends `text` to the agent, with the selected block as its context.
 pub fn ask(s: *Session, text: []const u8) void {
+    // The built-in Agent's own commands nanoterm runs for it; the others
+    // keep their block context below.
+    if (s.which == .agent and text.len > 1 and text[0] == '/') {
+        if (@import("agent_fx.zig").route(s, text)) return;
+    }
     const b = attached(s) orelse return s.ask(text);
     var full: std.ArrayList(u8) = .empty;
     defer full.deinit(s.gpa);
@@ -71,18 +76,18 @@ pub fn ask(s: *Session, text: []const u8) void {
 pub fn modelLabel(s: *Session) []const u8 {
     if (s.agent) |ag| if (ag.config.find("model")) |o| return o.currentName();
     if (s.model_choice) |m| return m;
-    if (s.which == .graff and s.shared.graff_model.len > 0) return s.shared.graff_model;
+    if (s.which == .agent) if (s.shared.agent_store) |store| if (store.currentModel().len > 0) return store.currentModel();
     return "default model";
 }
 
-/// Chooses `value` as the model: an agent's own model option when it has
-/// one; for graff, its `/model` command in a conversation, else `--model`
-/// for its next start.
+/// Chooses `value` as the model: native agent applies it to the next turn;
+/// external agents use their own model option or restart as needed.
 pub fn chooseModel(s: *Session, value: []const u8) void {
     if (s.agent) |ag| if (ag.config.find("model")) |o| return ag.setOption(o.id, value);
     if (s.model_choice) |m| s.gpa.free(m);
     s.model_choice = s.gpa.dupe(u8, value) catch null;
     if (s.agent) |ag| {
+        if (s.which == .agent) return ag.setOption("model", value);
         if (ag.turns.items.len > 0 and ag.session != null and ag.config.hasCommand("model")) {
             var buf: [256]u8 = undefined;
             const cmd = std.fmt.bufPrint(&buf, "/model {s}", .{value}) catch return;
@@ -99,7 +104,6 @@ pub fn chooseModel(s: *Session, value: []const u8) void {
 /// Opens the agent so the picker can show what it offers.
 pub fn prepareModels(s: *Session) void {
     _ = s.ensureAgent();
-    if (s.which == .graff) s.shared.loadCatalog();
 }
 
 // Completion.
@@ -111,6 +115,9 @@ fn context(s: *Session) complete.Context {
         .home = s.home,
         .commands = &s.shared.commands,
         .slash = if (s.mode() == .agent) if (s.agent) |ag| ag.config.commands.items else &.{} else null,
+        .fx_args = s.mode() == .agent and s.which == .agent,
+        .mention = s.mode() == .agent,
+        .files = &s.files,
     };
 }
 
@@ -160,7 +167,7 @@ pub fn reachable(here: Here, cmd: []const u8) bool {
 pub fn tab(s: *Session, caret: usize) void {
     if (s.menu.open) return accept(s);
     const sug = suggestion(s);
-    if (sug.len > 0 and caret == s.input.len) {
+    if (sug.len > 0 and caret == s.input.text().len) {
         var buf: [1024]u8 = undefined;
         s.input.set(std.fmt.bufPrint(&buf, "{s}{s}", .{ s.input.text(), sug }) catch return);
         return;
@@ -175,13 +182,17 @@ pub fn tab(s: *Session, caret: usize) void {
     s.menu.open = true;
 }
 
-/// Opens the slash commands as "/" is typed in agent mode, and keeps an
-/// open menu up to date as the word changes.
+/// Opens the slash commands as "/" is typed in agent mode, the working
+/// folder as "@" is, and keeps an open menu up to date as the word changes.
 pub fn typed(s: *Session, caret: usize) void {
     s.menu.dismissed = false;
     const text = s.input.text();
     const slash = slashing(s);
-    if (!s.menu.open and !slash) return;
+    const mention = mentioning(s, caret);
+    if (!s.menu.open and !slash and !mention) return;
+    // A new "@" opens the menu: the working folder is walked again, so a
+    // file made since the last mention is in the list.
+    if (mention and !s.menu.open) s.files.ensure(s.io, s.cwd(), true);
     if (text.len == 0 or (text[text.len - 1] == ' ' and !slash)) return s.menu.close();
     const selected = s.menu.selected;
     complete.compute(&s.menu, text, caret, context(s));
@@ -192,6 +203,17 @@ pub fn typed(s: *Session, caret: usize) void {
 fn slashing(s: *Session) bool {
     const text = s.input.text();
     return s.mode() == .agent and text.len > 0 and text[0] == '/' and std.mem.indexOfScalar(u8, text, ' ') == null;
+}
+
+/// The word at the caret is a mention: "@" followed by a path being written,
+/// anywhere in a prompt (fx reads "@src/main.zig" itself; the others read
+/// the path in the text).
+fn mentioning(s: *Session, caret: usize) bool {
+    if (s.mode() != .agent) return false;
+    const text = s.input.text();
+    const upto = text[0..@min(caret, text.len)];
+    const start = if (std.mem.lastIndexOfScalar(u8, upto, ' ')) |i| i + 1 else 0;
+    return upto.len > start and upto[start] == '@';
 }
 
 /// Each frame: opens the slash commands once the agent has told them,
@@ -208,16 +230,36 @@ pub fn accept(s: *Session) void {
     const items = s.menu.items.items;
     if (items.len == 0) return s.menu.close();
     const it = items[@min(s.menu.selected, items.len - 1)];
-    // A folder keeps completing; anything else is a whole word.
+    // A folder keeps completing — a mention's menu follows straight into it —
+    // and a slash command stands unspaced so the menu turns straight to its
+    // arguments.
+    const command = it.kind == .slash and it.word.len > 0 and it.word[0] == '/';
+    if (command or it.kind == .folder) {
+        replaceWord(s, it.word, false);
+        typed(s, s.menu.end);
+        return;
+    }
     replaceWord(s, it.word, it.kind != .folder);
     s.menu.close();
+    // A value argument (a level, a mode, a provider) completes the command:
+    // taking one sends it, as fx's own menu does.
+    if (it.kind == .slash) {
+        const text = s.input.text();
+        const before = text[0..@min(s.menu.start, text.len)];
+        var name = before[1..];
+        if (std.mem.indexOfScalar(u8, name, ' ')) |space| name = name[0..space];
+        if (@import("agent_fx.zig").sendsArg(name)) s.submit();
+    }
 }
 
 fn replaceWord(s: *Session, word: []const u8, space: bool) void {
     const text = s.input.text();
     var buf: [1024]u8 = undefined;
-    const out = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}", .{ text[0..s.menu.start], word, if (space) " " else "", text[@min(s.menu.end, text.len)..] }) catch return;
-    s.menu.end = s.menu.start + word.len;
+    // Appending at the very end (a command's argument behind its command)
+    // keeps a space between the two words.
+    const gap = if (s.menu.start == text.len and text.len > 0 and text[text.len - 1] != ' ' and word.len > 0 and word[0] != '/') " " else "";
+    const out = std.fmt.bufPrint(&buf, "{s}{s}{s}{s}{s}", .{ text[0..s.menu.start], gap, word, if (space) " " else "", text[@min(s.menu.end, text.len)..] }) catch return;
+    s.menu.end = s.menu.start + gap.len + word.len;
     s.input.set(out);
     s.input.want_caret = s.menu.start + word.len + @intFromBool(space);
 }

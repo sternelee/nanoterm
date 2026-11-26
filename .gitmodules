@@ -1,0 +1,4 @@
+[submodule "vendor/fx"]
+	path = vendor/fx
+	url = https://github.com/vercel-labs/fx.git
+	branch = main

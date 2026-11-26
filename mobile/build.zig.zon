@@ -1,0 +1,26 @@
+.{
+    .name = .nanoterm_mobile,
+    .version = "0.1.0",
+    .fingerprint = 0x733dbed852eeefca,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // The same nanoui nanoterm builds against, by the same commit. Its
+        // build helpers (`@import("nanoui").android`/`.ios`) are used; the
+        // source module comes from the fork below.
+        .nanoui = .{
+            .url = "git+https://github.com/justrach/nanoui#v0.14.9",
+            .hash = "nanoui-0.14.9-we0KMb7fSADTR_rvCwyzJ5NOwsuyX8oI0UBmoDOwHKdi",
+        },
+        // The local fork, v0.14.9 plus Android IME text support (input
+        // methods compose into the hidden EditText; its text mirrors into
+        // the focused field). A path dependency: same source, patched.
+        .nanoui_fork = .{
+            .path = "../../nanoui",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -83,7 +83,7 @@ fn checkProperties(vm: *luau.Vm, t: *luau.value.Table, kind: Kind) Error!void {
 
 /// `ui.<kind>{…}`: checks the table and marks what it is.
 fn construct(vm: *luau.Vm, args: []const Value) Error![]const Value {
-    const kind: Kind = @enumFromInt(@as(u8, @intFromFloat(vm.bound.number)));
+    const kind: Kind = @fromBackingInt(@intCast(@as(u8, @intFromFloat(vm.bound.number))));
     const a = lib.arg(args, 0);
     const t = switch (a) {
         .table => |t| t,
@@ -148,7 +148,7 @@ pub const Visual = struct {
         const ui = try v.vm.heap.table();
         ui.obj.fixed = true;
         for (std.enums.values(Kind)) |k| {
-            const fun = try v.vm.heap.function(.{ .kind = .{ .native = .{ .f = lib.wrap(construct), .name = @tagName(k), .bound = .{ .number = @floatFromInt(@intFromEnum(k)) } } } });
+            const fun = try v.vm.heap.function(.{ .kind = .{ .native = .{ .f = lib.wrap(construct), .name = @tagName(k), .bound = .{ .number = @floatFromInt(@backingInt(k)) } } } });
             fun.obj.fixed = true;
             try v.vm.heap.setStr(ui, @tagName(k), .{ .function = fun });
         }

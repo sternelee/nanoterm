@@ -77,7 +77,7 @@ test "after a cd the agent hears where the terminal is; \"go on\" stays with it"
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, s.cwd());
+    }.f }, .claude, s.cwd());
     s.agent = ag;
     try ag.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", home ++ "/agent.py", home }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
 

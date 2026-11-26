@@ -35,7 +35,7 @@ pub const readme =
     "- Inside: motions, / search, v and V select, y copies\r\n" ++
     "- Emacs: M-v goes in; C-s searches, M-w copies\r\n\r\n" ++
     "## Agents\r\n\r\n" ++
-    "- Sign in with Codegraff, or bring your own agent\r\n" ++
+    "- Use built-in Agent, or bring your own ACP agent\r\n" ++
     "- Each tab keeps one conversation\r\n\r\n" ++
     "## Engine\r\n\r\n" ++
     "- 315 MB/s for full-screen programs, measured in bench/\r\n" ++

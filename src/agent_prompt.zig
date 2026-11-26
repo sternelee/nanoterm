@@ -2,12 +2,12 @@
 //! the text, with a trailer naming each picture's file, and for an agent
 //! that takes images each picture as an `image` block with its `uri`. The
 //! trailer always goes: an agent that takes images may still be running a
-//! model that can't see them, and it drops the blocks (graff does), so
-//! the file's name is all the model has to open it by.
+//! model that can't see them and drops the blocks, so the file's name
+//! is all the model has to open it by.
 const std = @import("std");
 const Image = @import("agent.zig").Image;
 
-/// The largest picture sent inline: graff's own limit (Harness's is 5 MiB).
+/// The largest picture sent inline: agent's own limit (Harness's is 5 MiB).
 /// A bigger one goes by its path only.
 pub const max_inline_bytes = 3_700_000;
 

@@ -169,7 +169,7 @@ test "an agent shows a visual, and it works in the conversation" {
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, home);
+    }.f }, .claude, home);
     s.agent = ag;
     s.offerVisuals(ag);
     try ag.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", home ++ "/agent.py", home ++ "/visual.luau" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));

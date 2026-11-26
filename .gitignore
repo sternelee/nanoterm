@@ -1,8 +1,14 @@
 .zig-cache/
 zig-out/
-.graff/
 .harness/
 .claude/
 codedb.snapshot
 .DS_Store
 zig-pkg/
+.pi
+.rpi
+.context
+.codex
+.perch/
+vendor/*
+!vendor/fx

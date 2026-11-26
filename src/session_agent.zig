@@ -33,6 +33,7 @@ pub fn followShell(a: *Session, ag: *agent_mod.Agent, text: []const u8) []const 
     const dupe = a.gpa.dupe(u8, now) catch return text;
     a.gpa.free(ag.cwd);
     ag.cwd = dupe;
+    if (ag.native) |native| native.setCwd(now) catch {};
     return said;
 }
 
@@ -79,5 +80,8 @@ pub fn finished(ctx: *anyopaque, t: *agent_mod.Turn) void {
         .session = a.id,
         .turn = t,
     });
+    // A /compact asked for this handoff: continue it in a fresh session.
+    if (a.compact_pending) if (t.title) |title| {
+        if (std.mem.eql(u8, title, "/compact")) @import("agent_fx.zig").carry(a, reply.items);
+    };
 }
-

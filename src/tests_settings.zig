@@ -1,136 +1,16 @@
-//! Settings: "Sign in with Codegraff" through the device flow against a
-//! fake gateway on this machine (a script: start, two polls, the account's
-//! summary, revoke), keeping the key where graff keeps it, only for this
-//! user; signing out revokes and removes it. And the page itself, drawn.
-//! Nothing reaches Codegraff, and HOME is a temporary folder.
+//! Settings: built-in Agent provider, MCP and Skills controls, external ACP
+//! agents, appearance and updates. HOME is a temporary folder.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
-const codegraff = @import("codegraff.zig");
 const ws_mod = @import("workspace.zig");
 const session_mod = @import("session.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
+const engine = @import("fx");
+const Store = @import("agent_settings.zig").Store;
 
-const fake_gateway =
-    \\import http.server, json, sys
-    \\polls = []
-    \\class H(http.server.BaseHTTPRequestHandler):
-    \\    def log_message(self, *a): pass
-    \\    def reply(self, body):
-    \\        data = json.dumps(body).encode()
-    \\        self.send_response(200); self.send_header("Content-Type", "application/json")
-    \\        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
-    \\    def do_POST(self):
-    \\        n = int(self.headers.get("Content-Length") or 0); body = self.rfile.read(n)
-    \\        with open(sys.argv[1] + "/seen", "a") as f: f.write(self.path + " " + (self.headers.get("Authorization") or "") + "\n")
-    \\        if self.path == "/v1/device/start":
-    \\            self.reply({"device_code": "dc", "user_code": "ABCD-EFGH", "verification_uri": "https://codegraff.com/cli/auth", "verification_uri_complete": "https://codegraff.com/cli/auth?code=ABCD-EFGH", "expires_in": 600, "interval": 1})
-    \\        elif self.path == "/v1/device/poll":
-    \\            polls.append(1)
-    \\            self.reply({"status": "pending"} if len(polls) < 2 else {"status": "ok", "api_key": "cg_sk_test", "email": "me@codegraff.dev"})
-    \\        else: self.reply({"ok": True})
-    \\    def do_GET(self):
-    \\        if self.path == "/v1/usage/summary" and self.headers.get("Authorization") == "Bearer cg_sk_test":
-    \\            self.reply({"email": "me@codegraff.dev", "tier": "pro", "credits_micro_usd": 5000000})
-    \\        else: self.send_response(401); self.end_headers()
-    \\s = http.server.HTTPServer(("127.0.0.1", 0), H)
-    \\open(sys.argv[1] + "/port", "w").write(str(s.server_address[1]))
-    \\s.serve_forever()
-    \\
-;
-
-var opened: [128]u8 = undefined;
-var opened_len: usize = 0;
-fn recordOpen(url: []const u8) void {
-    @memcpy(opened[0..url.len], url);
-    opened_len = url.len;
-}
-
-var jev_key: ?[]const u8 = null;
-fn keyChanged(_: *anyopaque, key: ?[]const u8) void {
-    jev_key = if (key) |k| (if (std.mem.eql(u8, k, "cg_sk_test")) "cg_sk_test" else "other") else null;
-}
-
-fn until(a: *codegraff.Account, comptime ok: fn (*codegraff.Account) bool) !void {
-    var waited: f64 = 0;
-    while (!ok(a)) : (waited += 0.05) {
-        if (waited > 15) return error.Timeout;
-        nanoui.runFor(0.05);
-    }
-}
-
-test "sign in with Codegraff: the device flow keeps graff's key, and signing out revokes it" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const dir = "/tmp/nanoterm-test-codegraff";
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, dir ++ "/home");
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/gateway.py", .data = fake_gateway });
-    var server = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/python3", "-I", dir ++ "/gateway.py", dir } });
-    defer server.kill(io);
-    var buf: [16]u8 = undefined;
-    var port: []const u8 = "";
-    for (0..100) |_| {
-        port = std.Io.Dir.cwd().readFile(io, dir ++ "/port", &buf) catch "";
-        if (port.len > 0) break;
-        nanoui.runFor(0.05);
-    }
-    try std.testing.expect(port.len > 0);
-
-    var env: std.process.Environ.Map = .init(arena);
-    try env.put("NANOTERM_CODEGRAFF_GATEWAY", try std.fmt.allocPrint(arena, "http://127.0.0.1:{s}", .{port}));
-    var a: codegraff.Account = .init(gpa, io, dir ++ "/home", &env);
-    defer a.deinit();
-    a.open = recordOpen;
-    var host: u8 = 0;
-    a.key_changed = .{ .ctx = &host, .func = keyChanged };
-    a.load();
-    try std.testing.expectEqual(codegraff.State.signed_out, a.state);
-
-    a.signIn();
-    try until(&a, struct {
-        fn f(x: *codegraff.Account) bool {
-            return x.state == .signed_in and x.credits_micro_usd != null;
-        }
-    }.f);
-    try std.testing.expectEqualStrings("https://codegraff.com/cli/auth?code=ABCD-EFGH", opened[0..opened_len]);
-    try std.testing.expectEqualStrings("me@codegraff.dev", a.email.?);
-    try std.testing.expectEqualStrings("pro", a.tier.?);
-    try std.testing.expectEqual(@as(?i64, 5_000_000), a.credits_micro_usd);
-    try std.testing.expectEqualStrings("cg_sk_test", jev_key.?);
-    // In graff's file, for this user only.
-    const file = dir ++ "/home/" ++ codegraff.key_file;
-    var kb: [256]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, try std.Io.Dir.cwd().readFile(io, file, &kb), "\"api_key\": \"cg_sk_test\"") != null);
-    const st = try std.Io.Dir.cwd().statFile(io, file, .{});
-    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(st.permissions) & 0o777)));
-
-    // A new launch finds it.
-    var again: codegraff.Account = .init(gpa, io, dir ++ "/home", &env);
-    defer again.deinit();
-    again.load();
-    try std.testing.expectEqual(codegraff.State.signed_in, again.state);
-
-    a.signOut();
-    try std.testing.expectEqual(codegraff.State.signed_out, a.state);
-    try std.testing.expect(jev_key == null);
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, file, .{}));
-    var waited: f64 = 0;
-    var seen: []const u8 = "";
-    var sb: [1024]u8 = undefined;
-    while (waited < 5) : (waited += 0.05) {
-        seen = std.Io.Dir.cwd().readFile(io, dir ++ "/seen", &sb) catch "";
-        if (std.mem.indexOf(u8, seen, "/v1/keys/revoke Bearer cg_sk_test") != null) break;
-        nanoui.runFor(0.05);
-    }
-    try std.testing.expect(std.mem.indexOf(u8, seen, "/v1/keys/revoke Bearer cg_sk_test") != null);
-}
-
-test "the Settings page: account, agents, appearance, updates" {
+test "the Settings page: built-in Agent, agents, appearance, updates" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -138,9 +18,7 @@ test "the Settings page: account, agents, appearance, updates" {
     const arena = arena_state.allocator();
     const home = "/tmp/nanoterm-test-settings-view";
     std.Io.Dir.cwd().deleteTree(io, home) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.local/bin");
-    // graff installed (a stand-in), wherever the test runs.
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/.local/bin/graff", .data = "#!/bin/sh\n", .flags = .{ .permissions = .executable_file } });
+    try std.Io.Dir.cwd().createDirPath(io, home);
     var env: std.process.Environ.Map = .init(arena);
     try env.put("HOME", home);
     try env.put("PATH", "/usr/bin:/bin");
@@ -151,19 +29,55 @@ test "the Settings page: account, agents, appearance, updates" {
     defer w.deinit();
     _ = try w.newTab(home);
     var t: ui.Tester = undefined;
-    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 1400, .theme = theme.ui() });
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 2400, .theme = theme.ui() });
     defer t.deinit();
     t.settle(1);
     w.openSettings();
     t.settle(1);
-    try std.testing.expect(t.hasText("Sign in with Codegraff"));
+    try std.testing.expect(t.hasText("Agents"));
+    try std.testing.expect(t.hasText("Coding agents"));
+    try std.testing.expect(t.hasText("Agent · built in"));
+    const agents_row = t.findText("Coding agents").?;
+    const agent_config_row = t.findText("Agent · built in").?;
+    try std.testing.expect(agents_row.y < agent_config_row.y);
+    try std.testing.expect(!t.hasText("Providers"));
+    try t.clickText("Agent · built in");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Providers"));
+    try std.testing.expect(t.hasText("Add provider") and t.hasText("Add MCP server") and t.hasText("Add Skill"));
     try std.testing.expect(t.hasText("Codex") and t.hasText("opencode") and t.hasText("Hermes"));
+    try std.testing.expect(t.hasText("Pi"));
     try std.testing.expect(t.hasText("Default"));
-    // graff installed: its providers, as Harness lists them.
-    try std.testing.expect(t.hasText("graff providers"));
-    try std.testing.expect(t.hasText("ChatGPT") and t.hasText("xAI") and t.hasText("Kimi") and t.hasText("Z.AI"));
-    try std.testing.expect(t.hasText("Continue with ChatGPT") and t.hasText("Not signed in"));
-    try std.testing.expect(t.containsText("doesn't update itself"));
+    try std.testing.expect(t.hasText("MCP servers") and t.hasText("Skills"));
+    // fx's own dials, for the pane the panel is over.
+    try std.testing.expect(t.hasText("Sign in"));
+    try std.testing.expect(t.hasText("Permissions"));
+    try std.testing.expect(t.hasText("Reasoning effort"));
+    try std.testing.expect(t.hasText("Additional workspaces"));
+    try std.testing.expect(t.hasText("Project instructions"));
+    // A permission mode picked here is written to fx's own settings.
+    try t.clickText("Full access");
+    t.settle(1);
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(65536));
+        defer gpa.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "full-access") != null);
+    }
+    // New configurations hide in expandable panels until their title is clicked.
+    // They sit below fx's dials now: scroll the page to reach them.
+    t.scroll(600, 500, -1200);
+    t.settle(1);
+    try t.clickText("Add provider");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Base URL, including /v1/"));
+    try t.clickText("Add MCP server");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Space-separated arguments for stdio command (optional)"));
+    t.scroll(600, 500, -1200);
+    t.settle(1);
+    try t.clickText("Add Skill");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Install from git URL or local path"));
     try t.screenshot("/tmp/nanoterm-settings.png");
 }
 
@@ -173,6 +87,52 @@ fn printed(_: *ui.Tester, s: *session_mod.Session) bool {
         .block => |b| b.state == .done and b.output.lineCount() > 0,
         else => false,
     };
+}
+
+test "the theme shelf: a named theme takes, and keeps across launches" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-settings-theme";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    var t: ui.Tester = undefined;
+    _ = try w.newTab(home);
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 800, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Appearance");
+    t.settle(1);
+    // The shelf is there: System, the house pair, and the named themes.
+    try std.testing.expect(t.hasText("System"));
+    try std.testing.expect(t.hasText("Soot"));
+    try std.testing.expect(t.hasText("Palenight"));
+    // A click takes a theme — the palette moves with it.
+    try t.clickText("Phosphor");
+    t.settle(1);
+    try std.testing.expectEqualStrings("phosphor", w.shared.prefs.theme);
+    try std.testing.expect(t.hasText("a green tube in a dark room"));
+    // Kept: a fresh workspace reads it back.
+    var again: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer again.deinit();
+    _ = try again.newTab(home);
+    var t2: ui.Tester = undefined;
+    try t2.init(gpa, .init(&again, view.view), .{ .width = 1000, .height = 800, .theme = theme.ui() });
+    defer t2.deinit();
+    t2.settle(1);
+    try std.testing.expectEqualStrings("phosphor", again.shared.prefs.theme);
 }
 
 test "a command run in a new tab (an installer, a sign-in) waits for its shell's first prompt" {
@@ -211,13 +171,13 @@ test "a command run in a new tab (an installer, a sign-in) waits for its shell's
     try std.testing.expectEqualStrings("signed in", text);
 }
 
-test "the model picker: graff's models by provider, plans first, with their makers' marks" {
+test "Settings' Relay page: off by default, and LAN turns the relay on" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const home = "/tmp/nanoterm-test-models";
+    const home = "/tmp/nanoterm-test-relay-settings";
     std.Io.Dir.cwd().deleteTree(io, home) catch {};
     try std.Io.Dir.cwd().createDirPath(io, home);
     var env: std.process.Environ.Map = .init(arena);
@@ -226,39 +186,77 @@ test "the model picker: graff's models by provider, plans first, with their make
     var shared = try session_mod.Shared.init(gpa, io, arena, &env);
     shared.wire();
     defer shared.deinit();
-    // As graff/models answers: signed-in providers, each row's maker and cost.
-    const json =
-        \\{"models":[
-        \\ {"provider":"codegraff","name":"claude-opus-5-5","maker":"anthropic","context":1000000,"authenticated":true,"cost":"credits"},
-        \\ {"provider":"codegraff","name":"kimi-k3","maker":"moonshot","context":262144,"authenticated":true,"cost":"credits"},
-        \\ {"provider":"anthropic","name":"claude-sonnet-5-5","maker":"anthropic","context":1000000,"authenticated":true,"cost":"api"},
-        \\ {"provider":"chatgpt-new","name":"gpt-6.1-sol","maker":"openai","context":272000,"authenticated":true,"cost":"plan","current":true},
-        \\ {"provider":"xai","name":"grok-5","maker":"xai","context":2000000,"authenticated":true,"cost":"plan"},
-        \\ {"provider":"mlx","name":"mlx-community/Qwen3.6-27B","context":262144,"authenticated":true,"cost":"local"}]}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
-    defer parsed.deinit();
-    try shared.catalog.fromAcp(parsed.value);
-    shared.catalog.acp = .answered;
+    // A port of its own, so a relay left running by another test cannot
+    // take this one's.
+    shared.prefs.relay_port = 4799;
     var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
     defer w.deinit();
     _ = try w.newTab(home);
     var t: ui.Tester = undefined;
-    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 760, .theme = theme.ui() });
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 2400, .theme = theme.ui() });
     defer t.deinit();
-    w.openModels();
     t.settle(1);
-    try std.testing.expect(t.hasText("ChatGPT · your plan"));
-    try std.testing.expect(t.hasText("xAI · your plan"));
-    try std.testing.expect(t.hasText("MLX · local"));
-    try std.testing.expect(t.hasText("Codegraff · credits"));
-    // Your plans lead (the one in use first); your own keys come last.
-    try std.testing.expect(t.findText("ChatGPT · your plan").?.y < t.findText("xAI · your plan").?.y);
-    try std.testing.expect(t.findText("xAI · your plan").?.y < t.findText("Codegraff · credits").?.y);
-    var marks: usize = 0;
-    for (t.ctx.nodes.items) |n| if (n.content == .image) {
-        marks += 1;
-    };
-    try std.testing.expect(marks >= 5);
-    try t.screenshot("/tmp/nanoterm-models.png");
+    w.openSettings();
+    t.settle(1);
+    try t.clickText("Relay");
+    t.settle(1);
+    try std.testing.expect(t.hasText("Phone · relay"));
+    try std.testing.expect(t.hasText("The relay is off."));
+    try std.testing.expect(shared.relay == null);
+    // A LAN relay starts listening and shows its address and token.
+    try t.clickText("LAN");
+    t.settle(1);
+    try std.testing.expect(shared.relay != null);
+    try std.testing.expect(shared.prefs.relay == .lan);
+    try std.testing.expect(t.containsText("Token"));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        home ++ "/Library/Application Support/nanoterm/relay-token",
+        gpa,
+        .limited(64),
+    );
+    defer gpa.free(bytes);
+    try std.testing.expect(bytes.len == 32);
+    try t.screenshot("/tmp/nanoterm-settings-relay.png");
+    // Turning it off again stops it.
+    try t.clickText("Off");
+    t.settle(1);
+    try std.testing.expect(shared.relay == null);
+    try std.testing.expect(t.hasText("The relay is off."));
+}
+
+test "a saved provider is one fx itself can read back" {
+    // fx parses the `providers` map strictly: an entry without `protocol` and
+    // `auth` fails the whole settings file, so every other provider (and the
+    // saved permission mode) goes with it. Save one and read it back with fx's
+    // own loader, the way the agent does at startup.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const home = "/tmp/nanoterm-test-settings-provider";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+
+    var store = try Store.init(gpa, io, home, null);
+    defer store.deinit();
+    store.provider_name.set("local-smoke");
+    store.provider_url.set("http://127.0.0.1:11434/v1");
+    store.provider_model.set("smoke-model");
+    store.provider_auth_env.set("");
+    store.saveProvider();
+    try std.testing.expectEqualStrings("Provider saved and selected", store.status);
+
+    // A second write, so the file also carries a value a failed parse would
+    // take down with the providers map.
+    var outcome = try engine.provider_settings.setUserPreferencesAtHome(gpa, home, .{ .permission_mode = .yolo });
+    outcome.deinit(gpa);
+
+    // fx parses its own settings from a HOME, as it does at startup.
+    var settings = engine.provider_settings.loadMergedSettingsFromHome(gpa, home, home) catch
+        return error.ProviderSettingsUnreadable;
+    defer settings.deinit(gpa);
+    const providers = settings.providers orelse return error.NoProviders;
+    try std.testing.expect(providers.get("local-smoke") != null);
+    // The provider is the one that was saved, bound to its name.
+    try std.testing.expectEqualStrings("local-smoke", settings.provider.?.label());
 }

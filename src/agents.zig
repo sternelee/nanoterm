@@ -1,7 +1,5 @@
-//! The agents nanoterm can talk to, as Harness ships them: those that
-//! speak ACP over stdio. For each: its name, the CLI that shows it is
-//! installed, where installers put it, and the installer Harness runs
-//! (from each vendor's documented one-liner).
+//! The built-in Agent and external ACP agents. External entries carry
+//! their CLI, installer and sign-in command; Agent needs none of them.
 const std = @import("std");
 const Which = @import("agent.zig").Which;
 
@@ -17,13 +15,14 @@ pub const Info = struct {
 };
 
 pub const all = [_]Info{
-    .{ .which = .graff, .cli = "graff", .blurb = "Codegraff's agent: any model, Codegraff's credits or your own keys", .install = "curl -fsSL https://github.com/justrach/codegraff/releases/latest/download/install.sh | sh", .login = "graff login" },
+    .{ .which = .agent, .cli = "", .blurb = "Built in: Agent runtime, custom providers, MCP and Skills", .install = "" },
     .{ .which = .claude, .cli = "claude", .blurb = "Anthropic's Claude Code, through its ACP adapter", .install = "curl -fsSL https://claude.ai/install.sh | bash", .login = "claude /login" },
     .{ .which = .codex, .cli = "codex", .blurb = "OpenAI's Codex, through its ACP adapter", .install = "curl -fsSL https://chatgpt.com/codex/install.sh | sh", .login = "codex login" },
     .{ .which = .opencode, .cli = "opencode", .blurb = "SST's opencode", .install = "curl -fsSL https://opencode.ai/install | bash", .login = "opencode auth login" },
     .{ .which = .grok, .cli = "grok", .blurb = "xAI's Grok Build", .install = "curl -fsSL https://x.ai/cli/install.sh | bash" },
     .{ .which = .devin, .cli = "devin", .blurb = "Cognition's Devin", .install = "curl -fsSL https://cli.devin.ai/install.sh | bash" },
     .{ .which = .hermes, .cli = "hermes", .blurb = "Nous Research's Hermes Agent", .install = "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" },
+    .{ .which = .pi, .cli = "pi", .blurb = "Earendil Works' Pi, through its own RPC mode", .install = "curl -fsSL https://pi.dev/install.sh | sh", .login = "" },
 };
 
 pub fn info(which: Which) Info {
@@ -35,7 +34,7 @@ pub fn info(which: Which) Info {
 pub const extra_dirs = if (@import("builtin").os.tag == .windows)
     [_][]const u8{ "~/.local/bin", "~/AppData/Roaming/npm", "~/.bun/bin", "~/scoop/shims", "~/.cargo/bin" }
 else
-    [_][]const u8{ "~/.local/bin", "~/bin", "~/.harness/bin", "~/.opencode/bin", "~/.grok/bin", "~/.hermes/bin", "~/.claude/local", "~/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin" };
+    [_][]const u8{ "~/.local/bin", "~/bin", "~/.harness/bin", "~/.opencode/bin", "~/.grok/bin", "~/.hermes/bin", "~/.pi/agent/bin", "~/.claude/local", "~/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin" };
 
 /// PATH with the installers' folders after it, in `arena`.
 pub fn searchPath(arena: std.mem.Allocator, path: []const u8, home: []const u8) []const u8 {
@@ -56,7 +55,9 @@ test "every agent is listed once, with its installer" {
         var n: usize = 0;
         for (all) |i| if (i.which == w) {
             n += 1;
-            try std.testing.expect(i.install.len > 0 and i.cli.len > 0);
+            if (w == .agent) {
+                try std.testing.expect(i.install.len == 0 and i.cli.len == 0);
+            } else try std.testing.expect(i.install.len > 0 and i.cli.len > 0);
         };
         try std.testing.expectEqual(@as(usize, 1), n);
     }

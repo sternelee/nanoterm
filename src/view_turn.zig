@@ -10,6 +10,7 @@ const view_block = @import("view_block.zig");
 const view_markdown = @import("view_markdown.zig");
 const view_visual = @import("view_visual.zig");
 const view_fold = @import("view_fold.zig");
+const file_icons = @import("file_icons.zig");
 const App = @import("session.zig").Session;
 
 /// The width of an avatar and its gap: the turn's content starts after.
@@ -19,8 +20,9 @@ pub fn turn(c: *ui.Context, app: *App, t: *agent_mod.Turn) void {
     ui.key(c, c.print("turn-{x}", .{@intFromPtr(t)}));
     const d = ui.div(c).column().wFull().px(16).py(14).gap(12);
     defer d.end();
+    const it = d.interaction();
     // The palette jumped here: say where, for the timeline to scroll.
-    if (app.reveal == t) if (d.interaction().rect) |r| {
+    if (app.reveal == t) if (it.rect) |r| {
         app.shared.find.target_y = r.y;
         app.reveal = null;
     };
@@ -40,8 +42,10 @@ pub fn turn(c: *ui.Context, app: *App, t: *agent_mod.Turn) void {
         }
     }
     {
-        // …and the agent answered.
-        const h = ui.div(c).row().wFull().gap(12).itemsCenter();
+        // …and the agent answered. The hover action is 24px tall; keep the
+        // row that tall whether it shows or not, so the reply under it does
+        // not move as the pointer enters the turn.
+        const h = ui.div(c).row().wFull().h(26).gap(12).itemsCenter();
         defer h.end();
         avatar(c, "sparkles", theme.agent);
         ui.text(c, t.agent.label(), .{ .size = 12.5, .weight = .semibold, .color = theme.agent });
@@ -52,6 +56,12 @@ pub fn turn(c: *ui.Context, app: *App, t: *agent_mod.Turn) void {
         } else if (t.ended > 0) {
             ui.text(c, view_block.duration(c, t.ended - t.started), .{ .size = 11.5, .color = theme.muted, .mono = true });
         }
+        // The reply, copied whole, on hover as a block's actions are: its
+        // messages, in order, a blank line between them. Not just "Copy":
+        // a code block in the answer has its own.
+        if (it.hovered) if (replyText(c.alloc(), t)) |text| {
+            if (ui.button(c, "Copy reply", .{ .variant = .ghost, .size = 11.5, .icon = "doc.on.doc" }).clicked) c.clipboard.write(c.clipboard.ctx, text);
+        };
     }
     const body = ui.div(c).column().wFull().pl(gutter).gap(12);
     defer body.end();
@@ -107,6 +117,26 @@ pub fn shownByTool(t: *agent_mod.Turn, b: *@import("blocks.zig").Block) bool {
     return false;
 }
 
+/// The agent's reply as one text — its messages, in order, a blank line
+/// between them — for the clipboard; null when it has said nothing.
+pub fn replyText(gpa: std.mem.Allocator, t: *const agent_mod.Turn) ?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var wrote = false;
+    for (t.items.items) |it| switch (it) {
+        .text => |l| {
+            const text = std.mem.trim(u8, l.items, " \n");
+            if (text.len == 0) continue;
+            if (wrote) out.appendSlice(gpa, "\n\n") catch return null;
+            out.appendSlice(gpa, text) catch return null;
+            wrote = true;
+        },
+        else => {},
+    };
+    if (!wrote) return null;
+    return out.toOwnedSlice(gpa) catch null;
+}
+
 fn thought(c: *ui.Context, text: []const u8) void {
     const r = ui.div(c).row().wFull().gap(8);
     defer r.end();
@@ -119,7 +149,7 @@ fn toolIcon(kind: []const u8) []const u8 {
     const table = .{
         .{ "read", "doc.text" },      .{ "edit", "pencil" },     .{ "delete", "trash" },
         .{ "move", "arrow.right" },   .{ "search", "magnifyingglass" }, .{ "execute", "terminal" },
-        .{ "think", "brain" },        .{ "fetch", "globe" },
+        .{ "think", "brain" },        .{ "fetch", "globe" },     .{ "list", "list.bullet" },
     };
     inline for (table) |e| if (std.mem.eql(u8, kind, e[0])) return e[1];
     return "wrench.and.screwdriver";
@@ -142,11 +172,50 @@ fn tool(c: *ui.Context, app: *App, tl: *agent_mod.Tool) void {
     }
     if (tl.block) |b| {
         view_block.block(c, app, b, true);
-    } else if (tl.detail.items.len > 0 and tl.status != .in_progress) {
-        const d = tl.detail.items;
-        const shown = if (d.len > 400) c.print("{s}…", .{d[0..400]}) else d;
-        ui.text(c, shown, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+    } else {
+        // A tool that ran a command itself: say what it ran and how it ended,
+        // then what it printed. No block holds it — the built-in Agent's shell
+        // runs in the agent's own process, not nanoterm's terminal.
+        if (tl.command.items.len > 0) commandLine(c, tl);
+        // A streamed call shows what it has printed while it runs, so a long
+        // command is visible as it works rather than only once it ends.
+        if (tl.detail.items.len > 0 and (tl.status != .in_progress or tl.streamed)) {
+            // A tool that listed files without a terminal — its output's shape
+            // says so — shows them with their icons, like any listing.
+            const d = tl.detail.items;
+            if (app.shared.prefs.file_icons) {
+                const shown = if (d.len > 400)
+                    (if (std.mem.lastIndexOfScalar(u8, d[0..400], '\n')) |nl| d[0..nl] else "")
+                else
+                    d;
+                const cwd = if (app.agent) |ag| ag.cwd else app.cwd();
+                if (file_icons.decorateOutput(c.alloc(), app.shared.io, cwd, shown)) |dec| {
+                    ui.richText(c, dec.text, dec.spans, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+                    if (shown.len < d.len) ui.text(c, "…", .{ .size = 11.5, .mono = true, .color = theme.faint });
+                    return;
+                }
+            }
+            // The output fx already cut to a preview; show all of it, and say
+            // when more was dropped rather than silently ending mid-line.
+            ui.text(c, d, .{ .size = 11.5, .mono = true, .color = theme.faint, .wrap = true });
+            if (tl.truncated) ui.text(c, "… output truncated", .{ .size = 11.5, .mono = true, .color = theme.faint });
+        }
     }
+}
+
+/// What a tool that ran a command itself ran, and how it ended: the command
+/// on one line, its exit code beside it when it has one.
+fn commandLine(c: *ui.Context, tl: *agent_mod.Tool) void {
+    const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+    defer r.end();
+    ui.icon(c, "chevron.right", .{ .size = 9, .weight = .semibold, .color = theme.faint });
+    ui.text(c, tl.command.items, .{ .size = 11.5, .mono = true, .color = theme.muted, .wrap = true });
+    ui.spacer(c);
+    if (tl.exit_code) |code| {
+        const failed = code != 0;
+        ui.text(c, c.print("exit {d}", .{code}), .{ .size = 11, .mono = true, .color = if (failed) theme.failure else theme.faint });
+    }
+    if (tl.duration_ms) |ms| ui.text(c, view_block.duration(c, @as(f64, @floatFromInt(ms)) / 1000.0), .{ .size = 11, .mono = true, .color = theme.faint });
 }
 
 fn plan(c: *ui.Context, entries: []const agent_mod.PlanEntry) void {

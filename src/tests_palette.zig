@@ -23,7 +23,7 @@ test "⌘P: sessions, history across launches, scopes, jumping back" {
     const dir = home ++ "/Library/Application Support/nanoterm";
     try std.Io.Dir.cwd().createDirPath(io, dir);
     // An earlier launch's conversation.
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/sessions.jsonl", .data = "{\"t\":1700000000,\"cwd\":\"/tmp/old-project\",\"agent\":\"graff\",\"prompt\":\"why does the release build take so long?\",\"reply\":\"LTO is on for every target.\"}\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/sessions.jsonl", .data = "{\"t\":1700000000,\"cwd\":\"/tmp/old-project\",\"agent\":\"agent\",\"prompt\":\"why does the release build take so long?\",\"reply\":\"LTO is on for every target.\"}\n" });
     var env: std.process.Environ.Map = .init(arena);
     try env.put("HOME", home);
     try env.put("PATH", "/usr/bin:/bin");
@@ -40,7 +40,7 @@ test "⌘P: sessions, history across launches, scopes, jumping back" {
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, home);
+    }.f }, .claude, home);
     first.agent = ag;
     try ag.promptAs(null, "explain the split tree");
     const turn = ag.current().?;

@@ -1,7 +1,7 @@
-//! Settings (⌘,): the Codegraff account (one sign-in for nanoterm and
-//! graff), the agents Harness ships (installed or not, the one new tabs
-//! start with, an installer run in a new tab), appearance, text size,
-//! updates, and about.
+//! Settings (⌘,): a sidebar of categories — Agents (built-in Agent
+//! providers, MCP and Skills, the agents nanoterm ships, installed or
+//! not, the one new tabs start with), Appearance (the theme shelf,
+//! font, icons, keys, text size), Motion, Privacy, and Updates.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -9,9 +9,13 @@ const theme = @import("theme.zig");
 const agents = @import("agents.zig");
 const agent_mod = @import("agent.zig");
 const Workspace = @import("workspace.zig").Workspace;
+const settings = @import("settings.zig");
+const relay = @import("relay.zig");
+
+const Page = enum(u8) { agents = 0, appearance = 1, motion = 2, privacy = 3, updates = 4, relay = 5 };
 
 pub fn card(c: *ui.Context, w: *Workspace) void {
-    const panel = ui.div(c).column().w(@min(680, c.size.w - 40)).bg(theme.panel).rounded(14).border(theme.border).shadowLg().clip();
+    const panel = ui.div(c).column().w(@min(720, c.size.w - 40)).bg(theme.panel).rounded(14).border(theme.border).shadowLg().clip();
     defer panel.end();
     // Clicks inside stay inside.
     _ = panel.interaction();
@@ -22,14 +26,55 @@ pub fn card(c: *ui.Context, w: *Workspace) void {
         ui.spacer(c);
         if (ui.button(c, "", .{ .variant = .ghost, .size = 11, .icon = "xmark" }).clicked) w.closeOverlay();
     }
-    // As tall as it is, up to the window's room; then it scrolls.
-    const body = ui.div(c).column().wFull().scrollY().maxH(c.size.h - 170).px(20).pb(20).gap(18);
+    // As tall as the Agents page is: the panel keeps that height on
+    // every other page, each of which scrolls its own content. The
+    // Agents page is content-sized (up to the window's room); its
+    // height is remembered and the other pages are held to it.
+    const body_id = c.peekId(null);
+    var body = ui.div(c).row().wFull().itemsStretch().maxH(c.size.h - 170);
+    const on_agents = w.settings_page == @backingInt(Page.agents);
+    if (!on_agents and w.settings_height > 0) body = body.h(@min(w.settings_height, c.size.h - 170));
     defer body.end();
-    account(c, w);
-    agentList(c, w);
-    look(c, w);
-    privacy(c, w);
-    updates(c, w);
+    if (on_agents) {
+        if (c.rects.get(body_id)) |r| w.settings_height = r.h;
+    }
+    {
+        const side = ui.div(c).column().w(168).px(8).py(10).gap(2).maxH(c.size.h - 210);
+        defer side.end();
+        sideItem(c, w, .agents, "person.2", "Agents");
+        sideItem(c, w, .appearance, "paintpalette", "Appearance");
+        sideItem(c, w, .motion, "waveform", "Motion");
+        sideItem(c, w, .privacy, "hand.raised", "Privacy");
+        sideItem(c, w, .updates, "arrow.down.circle", "Updates");
+        sideItem(c, w, .relay, "globe", "Relay");
+    }
+    _ = c.leaf(.{ .width = .{ .px = 1 }, .background = theme.border }, .none, null);
+    {
+        const page = ui.div(c).column().grow().scrollY().maxH(c.size.h - 210).px(20).py(16).gap(18);
+        defer page.end();
+        switch (w.settings_page) {
+            @backingInt(Page.agents) => {
+                agentList(c, w);
+                account(c, w);
+            },
+            @backingInt(Page.appearance) => appearance(c, w),
+            @backingInt(Page.motion) => motionPage(c, w),
+            @backingInt(Page.privacy) => privacy(c, w),
+            @backingInt(Page.updates) => updates(c, w),
+            @backingInt(Page.relay) => relayPage(c, w),
+            else => {},
+        }
+    }
+}
+
+/// A category on Settings' sidebar, lit while its page is the one shown.
+fn sideItem(c: *ui.Context, w: *Workspace, page: Page, icon: []const u8, label: []const u8) void {
+    const sel = w.settings_page == @backingInt(page);
+    const d = if (sel) ui.div(c).row().wFull().gap(8).itemsCenter().px(9).py(6).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(8).itemsCenter().px(9).py(6).rounded(8);
+    defer d.end();
+    if (d.clicked()) w.settings_page = @backingInt(page);
+    ui.icon(c, icon, .{ .size = 12, .color = if (sel) theme.accent else theme.muted });
+    ui.text(c, label, .{ .size = 12.5, .weight = if (sel) .semibold else .regular, .color = if (sel) theme.text else theme.muted });
 }
 
 fn section(c: *ui.Context, title: []const u8) ui.Div {
@@ -43,46 +88,301 @@ fn box(c: *ui.Context) ui.Div {
 }
 
 pub fn account(c: *ui.Context, w: *Workspace) void {
-    const s = section(c, "Codegraff");
-    defer s.end();
-    const b = box(c);
-    defer b.end();
-    const a = &w.shared.prefs.account;
-    const r = ui.div(c).row().wFull().gap(12).itemsCenter();
-    defer r.end();
-    ui.icon(c, if (a.state == .signed_in) "person.crop.circle.fill.badge.checkmark" else "person.crop.circle", .{ .size = 26, .color = if (a.state == .signed_in) theme.success else theme.muted });
-    {
-        const t = ui.div(c).column().grow().gap(3);
-        defer t.end();
-        switch (a.state) {
-            .signed_out => {
-                ui.text(c, "Sign in with Codegraff", .{ .size = 14, .weight = .semibold });
-                ui.text(c, "One sign-in for nanoterm and graff: Codegraff's models and credits, and Jev telling commands from questions.", .{ .size = 12, .color = theme.muted, .wrap = true });
-            },
-            .starting => ui.text(c, "Opening Codegraff…", .{ .size = 14, .weight = .semibold }),
-            .waiting => {
-                ui.text(c, "Approve the sign-in in your browser", .{ .size = 14, .weight = .semibold });
-                if (a.code) |code| ui.text(c, c.print("Your code: {s}", .{code}), .{ .size = 12.5, .mono = true, .color = theme.muted });
-            },
-            .signed_in => {
-                ui.text(c, a.email orelse "Signed in", .{ .size = 14, .weight = .semibold });
-                if (a.credits_micro_usd) |cr| {
-                    const dollars = @as(f64, @floatFromInt(cr)) / 1_000_000;
-                    ui.text(c, c.print("${d:.2} in credits{s}{s}", .{ dollars, if (a.tier != null) " · " else "", a.tier orelse "" }), .{ .size = 12, .color = theme.muted });
-                } else ui.text(c, "graff uses this sign-in too", .{ .size = 12, .color = theme.muted });
-            },
+    const kit = nanoui.kit;
+    const store = w.shared.agent_store orelse {
+        const s = section(c, "Agent · built in");
+        defer s.end();
+        ui.text(c, "Agent configuration needs a home directory.", .{ .color = theme.failure });
+        return;
+    };
+    if (kit.collapsible(c, "agent-builtin", "Agent · built in", &store.config_open)) |config| {
+        defer config.end();
+        {
+            const b = box(c);
+            defer b.end();
+            ui.text(c, "Providers", .{ .size = 14, .weight = .semibold });
+            ui.text(c, "fx's own providers, and custom OpenAI-compatible ones with their model and optional bearer token variable.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            for (store.providers.items) |*provider| {
+                const name = @import("agent_settings.zig").label(provider.name);
+                const open = kit.collapsible(
+                    c,
+                    c.print("provider-{s}", .{provider.name}),
+                    if (provider.selected) c.print("{s} · selected", .{name}) else name,
+                    &provider.open,
+                ) orelse continue;
+                defer open.end();
+                ui.text(c, if (provider.models.items.len > 1)
+                    c.print("{s} · {s} +{d}", .{ provider.detail(), provider.models.items[0], provider.models.items.len - 1 })
+                else
+                    c.print("{s} · {s}", .{ provider.detail(), provider.model }), .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                if (provider.auth_env.len > 0) ui.text(c, c.print("Token variable: {s}", .{provider.auth_env}), .{ .size = 11, .color = theme.faint });
+                const listing = store.models_thread != null and std.mem.eql(u8, store.models_query, provider.name);
+                {
+                    const actions = ui.div(c).row().wFull().gap(8);
+                    defer actions.end();
+                    if (!provider.selected and ui.button(c, "Select", .{ .size = 12 }).clicked) {
+                        store.selectProvider(provider.*);
+                        syncAgentModel(w);
+                        // selectProvider reloads the list this loop borrows from.
+                        break;
+                    }
+                    const fetch_label = if (listing)
+                        "Listing…"
+                    else if (provider.builtin)
+                        "List models"
+                    else if (store.models_call.running and store.models_for != null and std.mem.eql(u8, store.models_for.?, provider.name))
+                        "Fetching…"
+                    else
+                        "Fetch models";
+                    if (ui.button(c, fetch_label, .{ .variant = .ghost, .size = 12 }).clicked) {
+                        store.fetchModels(provider.*, if (provider.auth_env.len > 0) w.shared.env.get(provider.auth_env) else null);
+                    }
+                    // fx's own providers cannot be removed: fx always has them.
+                    if (!provider.builtin) if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                        const owned = c.gpa.dupe(u8, provider.name) catch break;
+                        defer c.gpa.free(owned);
+                        store.removeProvider(owned);
+                        syncAgentModel(w);
+                        break;
+                    };
+                }
+                // Why this provider's models could not be listed, if they
+                // could not: said here, under the provider it is about.
+                if (store.modelsNote(provider.name)) |said| ui.text(c, said.text, .{ .size = 11.5, .color = if (said.failed) theme.failure else theme.muted, .wrap = true });
+            }
+            if (kit.collapsible(c, "provider-add", "Add provider", &store.provider_form_open)) |open| {
+                defer open.end();
+                _ = ui.textField(c, &store.provider_name, .{ .placeholder = "Provider id (for example local)", .width = .fill });
+                _ = ui.textField(c, &store.provider_url, .{ .placeholder = "Base URL, including /v1/", .width = .fill });
+                _ = ui.textField(c, &store.provider_model, .{ .placeholder = "Models, comma-separated (qwen3-coder, llama-x)", .width = .fill });
+                _ = ui.textField(c, &store.provider_auth_env, .{ .placeholder = "Bearer token environment variable (optional)", .width = .fill });
+                if (ui.button(c, "Save and select provider", .{ .variant = .primary, .size = 12 }).clicked) {
+                    store.saveProvider();
+                    syncAgentModel(w);
+                }
+            }
         }
-        if (a.failure) |why| ui.text(c, why, .{ .size = 12, .color = theme.failure, .wrap = true });
+        // fx's own dials: sign-in, permissions, effort, directories, and
+        // the instructions it reads — for the pane the panel is over.
+        {
+            const focused = w.focused();
+            const cwd = focused.cwd();
+            store.ensureRuntime(cwd);
+            // The panel shows the providers' models, so fx is asked for them.
+            store.showModels();
+            // Sign-in state, as fx sees it, once each time the panel opens.
+            if (!store.signed_checked and !store.checking) {
+                store.refreshSignIn(w.shared.env.get("PATH") orelse "/usr/bin:/bin");
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Sign in", .{ .size = 14, .weight = .semibold });
+                const provider_label: []const u8 = if (std.mem.eql(u8, store.selected_provider, "gateway")) "AI Gateway" else store.selected_provider;
+                const state = if (store.checking) "checking…" else if (store.auth_label.len > 0) store.auth_label else "not signed in";
+                ui.text(c, c.print("Provider: {s} · {s}. Sign-in runs in the terminal, as fx does.", .{ provider_label, state }), .{ .size = 12, .color = theme.muted, .wrap = true });
+                const SignIn = struct { label: []const u8, note: []const u8, name: []const u8, sign_in: []const u8, sign_out: []const u8 };
+                const rows = [_]SignIn{
+                    .{ .label = "Codex", .note = "ChatGPT subscription", .name = "codex", .sign_in = "fx login codex", .sign_out = "fx logout codex" },
+                    .{ .label = "Grok", .note = "Grok subscription", .name = "grok", .sign_in = "fx login grok", .sign_out = "fx logout grok" },
+                    .{ .label = "AI Gateway", .note = "Vercel account or API key", .name = "gateway", .sign_in = "fx setup", .sign_out = "fx logout vercel" },
+                };
+                for (rows) |row| {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    ui.text(c, row.label, .{ .size = 13, .weight = .semibold });
+                    if (store.signedIn(row.name)) ui.icon(c, "checkmark.circle.fill", .{ .size = 12, .color = theme.accent });
+                    ui.text(c, row.note, .{ .size = 11.5, .color = theme.muted });
+                    ui.spacer(c);
+                    const label: []const u8 = if (store.signedIn(row.name)) "Sign out" else "Sign in";
+                    if (ui.button(c, label, .{ .size = 12 }).clicked) {
+                        const line = c.gpa.dupe(u8, if (store.signedIn(row.name)) row.sign_out else row.sign_in) catch continue;
+                        defer c.gpa.free(line);
+                        focused.input.clear();
+                        focused.run(line);
+                        w.closeOverlay();
+                    }
+                }
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Permissions", .{ .size = 14, .weight = .semibold });
+                const names = [_][]const u8{ "Ask", "Auto", "Full access" };
+                const values = [_][]const u8{ "ask", "auto", "full-access" };
+                var selected: usize = 1;
+                for (values, 0..) |value, i| if (std.mem.eql(u8, store.perm_mode, value)) {
+                    selected = i;
+                };
+                {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    if (ui.segmented(c, names[0..], &selected)) store.setPermissionMode(cwd, values[selected]);
+                    ui.spacer(c);
+                    ui.text(c, store.perm_mode, .{ .size = 11.5, .color = theme.muted });
+                }
+                ui.text(c, "What fx may do without asking. The built-in agent, fx in the terminal, and its new sessions all follow this.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Reasoning effort", .{ .size = 14, .weight = .semibold });
+                const names = [_][]const u8{ "Default", "Minimal", "Low", "Medium", "High" };
+                const values = [_][]const u8{ "auto", "minimal", "low", "medium", "high" };
+                var selected: usize = 0;
+                for (values, 0..) |value, i| if (std.mem.eql(u8, store.effort, value)) {
+                    selected = i;
+                };
+                if (ui.segmented(c, names[0..], &selected)) store.setEffortLevel(cwd, values[selected]);
+                ui.text(c, "How much room the model is given to reason; higher takes longer. Applies from the next turn, and to fx in the terminal.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Additional workspaces", .{ .size = 14, .weight = .semibold });
+                ui.text(c, "Other directories this workspace's fx may work in.", .{ .size = 12, .color = theme.muted, .wrap = true });
+                for (store.dirs.items) |dir| {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    ui.text(c, dir, .{ .size = 12.5, .mono = true });
+                    ui.spacer(c);
+                    if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                        const path = c.gpa.dupe(u8, dir) catch continue;
+                        defer c.gpa.free(path);
+                        store.removeWorkspaceDir(cwd, path);
+                        break;
+                    }
+                }
+                const add = ui.div(c).row().wFull().gap(8).itemsCenter();
+                defer add.end();
+                _ = ui.textField(c, &store.workspace_dir, .{ .placeholder = "/another/project", .width = .fill });
+                if (ui.button(c, "Add", .{ .variant = .primary, .size = 12 }).clicked) store.addWorkspaceDir(cwd);
+            }
+            {
+                const b = box(c);
+                defer b.end();
+                ui.text(c, "Project instructions", .{ .size = 14, .weight = .semibold });
+                if (store.agents_files.items.len == 0) {
+                    ui.text(c, "No AGENTS.md found; fx reads one at the project's root, and nested ones beside the files it works on.", .{ .size = 11.5, .color = theme.faint, .wrap = true });
+                }
+                for (store.agents_files.items) |path| {
+                    const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+                    defer r.end();
+                    ui.text(c, path, .{ .size = 12.5, .mono = true });
+                    ui.spacer(c);
+                    if (ui.button(c, "Open", .{ .variant = .ghost, .size = 12 }).clicked) {
+                        const line = std.fmt.allocPrint(c.gpa, "open \"{s}\"", .{path}) catch continue;
+                        defer c.gpa.free(line);
+                        focused.input.clear();
+                        focused.run(line);
+                        w.closeOverlay();
+                    }
+                }
+            }
+        }
+        {
+            const b = box(c);
+            defer b.end();
+            ui.text(c, "MCP servers", .{ .size = 14, .weight = .semibold });
+            ui.text(c, "stdio and HTTP servers in Agent's own MCP profile.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            for (store.mcp_servers.items) |*server| {
+                const open = kit.collapsible(c, c.print("mcp-{s}", .{server.name}), server.name, &server.open) orelse continue;
+                defer open.end();
+                ui.text(c, server.summary, .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                const actions = ui.div(c).row().wFull().gap(8);
+                defer actions.end();
+                if (ui.button(c, if (store.mcp_query_thread == null) "List tools" else "Listing…", .{ .size = 12 }).clicked) {
+                    store.startMcpQuery(server.name);
+                    pollMcpTools(w);
+                }
+                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 12 }).clicked) {
+                    const name = c.gpa.dupe(u8, server.name) catch break;
+                    defer c.gpa.free(name);
+                    store.removeMcp(name);
+                    break;
+                }
+                if (store.mcp_query_thread != null and std.mem.eql(u8, store.mcp_query_server, server.name)) {
+                    ui.text(c, "Starting the server and asking for its tools…", .{ .size = 11, .color = theme.faint });
+                }
+                if (std.mem.eql(u8, store.mcp_tools_server, server.name)) {
+                    if (store.mcp_tools_note.len > 0) {
+                        ui.text(c, store.mcp_tools_note, .{ .size = 11, .color = if (store.mcp_tools_failed) theme.failure else theme.muted, .wrap = true });
+                    }
+                    if (store.mcp_tools.items.len > 0) {
+                        ui.text(c, c.print("{d} tools", .{store.mcp_tools.items.len}), .{ .size = 11.5, .weight = .semibold, .color = theme.muted });
+                        for (store.mcp_tools.items) |tool| {
+                            const row = ui.div(c).row().wFull().gap(6).itemsCenter();
+                            defer row.end();
+                            ui.icon(c, "wrench.and.screwdriver", .{ .size = 11, .color = theme.agent });
+                            ui.text(c, tool, .{ .size = 12 });
+                        }
+                    }
+                }
+            }
+            if (store.mcp_servers.items.len == 0) ui.text(c, "No MCP servers yet.", .{ .size = 11.5, .color = theme.faint });
+            if (kit.collapsible(c, "mcp-add", "Add MCP server", &store.mcp_form_open)) |open| {
+                defer open.end();
+                _ = ui.textField(c, &store.mcp_name, .{ .placeholder = "Server name", .width = .fill });
+                _ = ui.textField(c, &store.mcp_target, .{ .placeholder = "https://… or executable command", .width = .fill });
+                _ = ui.textField(c, &store.mcp_args, .{ .placeholder = "Space-separated arguments for stdio command (optional)", .width = .fill });
+                _ = ui.textField(c, &store.mcp_env, .{ .placeholder = "stdio environment JSON (optional)", .width = .fill });
+                _ = ui.textField(c, &store.mcp_headers, .{ .placeholder = "HTTP headers JSON (optional)", .width = .fill });
+                ui.text(c, "Environment and headers are JSON objects, for example {\"TOKEN\":\"…\"}.", .{ .size = 11, .color = theme.faint });
+                if (ui.button(c, "Add MCP server", .{ .size = 12 }).clicked) store.addMcp();
+            }
+        }
+        {
+            const b = box(c);
+            defer b.end();
+            ui.text(c, "Skills", .{ .size = 14, .weight = .semibold });
+            ui.text(c, "Procedures Agent can load from its Skills roots.", .{ .size = 12, .color = theme.muted, .wrap = true });
+            for (store.skills.items) |skill| {
+                const r = ui.div(c).row().wFull().gap(8).itemsCenter();
+                defer r.end();
+                ui.icon(c, "puzzlepiece", .{ .size = 13, .color = theme.agent });
+                ui.text(c, skill.name, .{ .size = 12.5 });
+                ui.spacer(c);
+                if (ui.button(c, "Remove", .{ .variant = .ghost, .size = 11.5 }).clicked) {
+                    const name = c.gpa.dupe(u8, skill.name) catch break;
+                    defer c.gpa.free(name);
+                    store.removeSkill(name);
+                    break;
+                }
+            }
+            if (store.skills.items.len == 0) ui.text(c, "No Skills yet.", .{ .size = 11.5, .color = theme.faint });
+            if (kit.collapsible(c, "skill-add", "Add Skill", &store.skill_form_open)) |open| {
+                defer open.end();
+                ui.text(c, "Install a git repository, or start a new Skill from nanoterm's template.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+                _ = ui.textField(c, &store.skill_source, .{ .placeholder = "Install from git URL or local path", .width = .fill });
+                if (ui.button(c, "Install Skill", .{ .size = 12 }).clicked) store.installSkill();
+                _ = ui.textField(c, &store.skill_name, .{ .placeholder = "New Skill name", .width = .fill });
+                if (ui.button(c, "Create Skill template", .{ .size = 12 }).clicked) store.createSkill();
+            }
+        }
     }
-    switch (a.state) {
-        .signed_out => if (ui.button(c, "Sign in", .{ .variant = .primary, .size = 12.5 }).clicked) a.signIn(),
-        .starting => {},
-        .waiting => {
-            if (ui.button(c, "Open again", .{ .size = 12 }).clicked) if (a.url) |u| a.open(u);
-            if (ui.button(c, "Cancel", .{ .variant = .ghost, .size = 12 }).clicked) a.cancel();
-        },
-        .signed_in => if (ui.button(c, "Sign out", .{ .size = 12 }).clicked) a.signOut(),
-    }
+    if (store.status.len > 0) ui.text(c, store.status, .{ .size = 11.5, .color = if (store.failed) theme.failure else theme.success });
+}
+
+fn pollMcpTools(w: *Workspace) void {
+    nanoui.App.after(30, w, struct {
+        fn step(context: ?*anyopaque) callconv(.c) void {
+            const workspace: *Workspace = @ptrCast(@alignCast(context));
+            const store = workspace.shared.agent_store orelse return;
+            if (!store.mcpQueryDone()) {
+                nanoui.App.after(30, workspace, step);
+                return;
+            }
+            store.finishMcpQuery();
+            workspace.shared.redraw();
+        }
+    }.step);
+}
+
+fn syncAgentModel(w: *Workspace) void {
+    const s = w.focused();
+    if (s.which != .agent) return;
+    const store = s.shared.agent_store orelse return;
+    @import("assist.zig").chooseModel(s, store.currentModel());
 }
 
 pub fn agentList(c: *ui.Context, w: *Workspace) void {
@@ -126,7 +426,7 @@ pub fn agentList(c: *ui.Context, w: *Workspace) void {
             if (ui.button(c, "Install", .{ .size = 12, .icon = "arrow.down.circle" }).clicked) runInTab(w, info.install);
             continue;
         }
-        if (info.login.len > 0 and info.which != .graff) {
+        if (info.login.len > 0 and info.which != .agent) {
             if (ui.button(c, "Sign in", .{ .variant = .ghost, .size = 12 }).clicked) runInTab(w, info.login);
         }
         if (prefs.agent == info.which) {
@@ -141,8 +441,6 @@ pub fn agentList(c: *ui.Context, w: *Workspace) void {
     }
     ui.text(c, "New tabs start with the default agent; ⌘⇧M switches the one a pane uses.", .{ .size = 11.5, .color = theme.faint });
     b.end();
-    // graff's own sign-ins, as Harness lists them.
-    if (prefs.installed.get(.graff)) @import("view_signins.zig").section(c, w, box);
 }
 
 /// Runs `command` in a new tab (an installer, a sign-in), and closes Settings.
@@ -152,20 +450,65 @@ pub fn runInTab(w: *Workspace, command: []const u8) void {
     w.closeOverlay();
 }
 
-fn look(c: *ui.Context, w: *Workspace) void {
-    const s = section(c, "Appearance");
+fn indexOfString(options: [][]const u8, want: []const u8) ?usize {
+    for (options, 0..) |option, i| if (std.mem.eql(u8, option, want)) return i;
+    return null;
+}
+
+/// What the select shows a family as: the whole name while it fits, else
+/// as much as does with an ellipsis, so no long family overflows the list.
+pub fn fontOptionLabel(c: *ui.Context, name: []const u8) []const u8 {
+    const max: f32 = 200;
+    const style = ui.TextStyle{ .size = 13 };
+    if (c.text.width(name, style) <= max) return name;
+    const ellipsis = "…";
+    var end = name.len;
+    while (end > 0) {
+        while (end > 0 and (name[end - 1] & 0xc0) == 0x80) end -= 1;
+        if (c.text.width(name[0..end], style) + c.text.width(ellipsis, style) <= max) return c.print("{s}{s}", .{ name[0..end], ellipsis });
+        end -= 1;
+    }
+    return ellipsis;
+}
+
+fn fontOptionLabels(c: *ui.Context, options: [][]const u8) [][]const u8 {
+    const labels = c.alloc().alloc([]const u8, options.len) catch return options;
+    for (options, 0..) |option, i| labels[i] = fontOptionLabel(c, option);
+    return labels;
+}
+
+fn appearance(c: *ui.Context, w: *Workspace) void {
+    themePicker(c, w);
+    const s = section(c, "Terminal");
     defer s.end();
     const b = box(c);
     defer b.end();
     {
         const r = ui.div(c).row().wFull().itemsCenter();
         defer r.end();
-        ui.text(c, "Theme", .{ .size = 13 });
+        ui.text(c, "Terminal font", .{ .size = 13 });
         ui.spacer(c);
-        const names = [_][]const u8{ "System", "Light", "Dark" };
-        const order = [_]@TypeOf(w.shared.appearance){ .system, .light, .dark };
-        var picked: usize = std.mem.indexOfScalar(@TypeOf(w.shared.appearance), &order, w.shared.appearance) orelse 0;
-        if (ui.segmented(c, &names, &picked)) w.shared.setAppearance(order[picked]);
+        const kit = nanoui.kit;
+        const options = w.shared.fonts.options.items;
+        const current = w.shared.prefs.terminal_font;
+        var picked: ?usize = if (current.len == 0) 0 else indexOfString(options, current);
+        const labels = fontOptionLabels(c, options);
+        if (kit.select(c, "terminal-font", labels, &picked, .{ .placeholder = "System", .width = 240 })) {
+            if (picked) |index| w.shared.prefs.setTerminalFont(if (index == 0) "" else options[index]);
+        }
+    }
+    ui.text(c, "A Nerd Font (JetBrainsMono Nerd Font, MesloLGS NF) has the glyphs for the file icons below.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        const t = ui.div(c).column().grow().gap(2);
+        {
+            defer t.end();
+            ui.text(c, "File icons in ls", .{ .size = 13 });
+            ui.text(c, "A Nerd Font icon before each file an ls prints: folders, pictures, archives, programs.", .{ .size = 11.5, .color = theme.muted, .wrap = true });
+        }
+        var on = w.shared.prefs.file_icons;
+        if (ui.toggle(c, "", &on)) w.shared.prefs.setFileIcons(on);
     }
     {
         const r = ui.div(c).row().wFull().itemsCenter();
@@ -186,6 +529,80 @@ fn look(c: *ui.Context, w: *Workspace) void {
         ui.text(c, c.print("{d:.0}%", .{w.zoom * 100}), .{ .size = 12.5, .mono = true, .color = theme.muted });
         if (ui.button(c, "", .{ .size = 11, .icon = "plus" }).clicked) w.zoomBy(0.1);
         if (ui.button(c, "Reset", .{ .variant = .ghost, .size = 12 }).clicked) w.zoom = 1;
+    }
+}
+
+/// The theme shelf, as Metalterm's settings lay it out: System first —
+/// light or dark, as the system is — then every named theme, a row of
+/// its name, its line, and a row of its colors.
+fn themePicker(c: *ui.Context, w: *Workspace) void {
+    const s = section(c, "Theme");
+    defer s.end();
+    const b = box(c);
+    defer b.end();
+    const prefs = &w.shared.prefs;
+    // System: follows the appearance the palette sets.
+    {
+        const sel = prefs.theme.len == 0;
+        const r = if (sel) ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8);
+        defer r.end();
+        if (r.clicked()) prefs.setTheme("");
+        {
+            const t = ui.div(c).column().grow().gap(2);
+            defer t.end();
+            ui.text(c, "System", .{ .size = 13, .weight = .semibold });
+            ui.text(c, "Light or dark, as the system is.", .{ .size = 11.5, .color = theme.muted });
+        }
+        ui.icon(c, "circle.lefthalf.filled", .{ .size = 14, .color = theme.muted });
+        if (sel) ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = theme.accent });
+    }
+    for (&theme.list) |*e| {
+        const sel = std.mem.eql(u8, prefs.theme, e.id);
+        const r = if (sel) ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8).bg(theme.block_selected) else ui.div(c).row().wFull().gap(10).itemsCenter().px(4).py(3).rounded(8);
+        defer r.end();
+        if (r.clicked()) prefs.setTheme(e.id);
+        {
+            const t = ui.div(c).column().grow().gap(2);
+            defer t.end();
+            ui.text(c, e.name, .{ .size = 13, .weight = .semibold });
+            ui.text(c, e.note, .{ .size = 11.5, .color = theme.muted });
+        }
+        {
+            const dots = ui.div(c).row().gap(5).itemsCenter();
+            defer dots.end();
+            const colors = [5]u24{ e.seeds.background, e.seeds.text, e.seeds.accent, e.seeds.danger, e.seeds.success };
+            for (colors) |col| _ = c.leaf(.{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .radius = 6, .background = ui.Color.hex(col) }, .none, null);
+        }
+        if (sel) ui.icon(c, "checkmark", .{ .size = 11, .weight = .bold, .color = theme.accent });
+    }
+    ui.text(c, "The System theme follows the appearance the palette (⌘P) sets.", .{ .size = 11.5, .color = theme.faint, .wrap = true });
+}
+
+/// Motion's page: one speed every effect's timing scales by, one amount
+/// for how far each goes; Reduce Motion turns them off.
+fn motionPage(c: *ui.Context, w: *Workspace) void {
+    const s = section(c, "Motion");
+    defer s.end();
+    const b = box(c);
+    defer b.end();
+    ui.text(c, "How new output settles in, glyph at a time, and the cursor springs between cells. The system's Reduce Motion turns all of it off.", .{ .size = 12, .color = theme.muted, .wrap = true });
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Speed", .{ .size = 13 });
+        ui.spacer(c);
+        var dur = w.shared.prefs.motion_duration;
+        if (ui.slider(c, &dur, .{ .min = 0.25, .max = 2, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(dur, w.shared.prefs.motion_intensity);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_duration}), .{ .size = 12.5, .mono = true, .color = theme.muted });
+    }
+    {
+        const r = ui.div(c).row().wFull().gap(10).itemsCenter();
+        defer r.end();
+        ui.text(c, "Amount", .{ .size = 13 });
+        ui.spacer(c);
+        var inten = w.shared.prefs.motion_intensity;
+        if (ui.slider(c, &inten, .{ .min = 0, .max = 1.5, .width = .{ .px = 180 } })) w.shared.prefs.setMotion(w.shared.prefs.motion_duration, inten);
+        ui.text(c, c.print("{d:.2}×", .{w.shared.prefs.motion_intensity}), .{ .size = 12.5, .mono = true, .color = theme.muted });
     }
 }
 
@@ -215,6 +632,53 @@ fn privacy(c: *ui.Context, w: *Workspace) void {
     defer links.end();
     if (ui.button(c, "Privacy Policy", .{ .variant = .ghost, .size = 11.5, .icon = "hand.raised" }).clicked) _ = nanoui.shell.openUrl(an.privacy_url);
     if (ui.button(c, "Terms", .{ .variant = .ghost, .size = 11.5, .icon = "doc.text" }).clicked) _ = nanoui.shell.openUrl(an.terms_url);
+}
+
+/// The phone's relay: off, on the LAN, or over Tailscale — the addresses a
+/// phone must be told, and the token it has to say when it connects.
+fn relayPage(c: *ui.Context, w: *Workspace) void {
+    const p = &w.shared.prefs;
+    const s = section(c, "Phone · relay");
+    defer s.end();
+    {
+        const b = box(c);
+        defer b.end();
+        ui.text(c, "A phone reads this machine's tabs through the relay, and runs in them too.", .{ .size = 12, .color = theme.muted, .wrap = true });
+
+        const order = [_][]const u8{ "Off", "LAN", "Tailscale" };
+        var picked: usize = @backingInt(p.relay);
+        if (ui.segmented(c, &order, &picked)) {
+            p.relay = @as(settings.Relay, @fromBackingInt(@intCast(picked)));
+            w.shared.setRelay(p.relay, p.relay_port) catch |err| {
+                ui.text(c, c.print("The relay did not start: {s}", .{@errorName(err)}), .{ .size = 11, .color = theme.failure, .wrap = true });
+            };
+        }
+
+        const h = w.shared.relay;
+        const port = if (h) |x| x.port() else p.relay_port;
+        ui.text(c, c.print("Port   {d}", .{port}), .{ .size = 12.5 });
+
+        const addr = if (h) |hub|
+            if (p.relay == .lan) hub.lan else hub.ts
+        else
+            "";
+        if (addr.len > 0) {
+            const line = c.print("{s}:{d}", .{ addr, port });
+            ui.text(c, c.print("Open     {s}", .{line}), .{ .size = 12.5, .weight = .semibold });
+            if (ui.button(c, "Copy", .{ .size = 12 }).clicked) c.clipboard.write(c.clipboard.ctx, line);
+        } else if (p.relay != .off) {
+            ui.text(c, "No address found yet.", .{ .size = 12, .color = theme.muted });
+        }
+
+        if (h) |hub| {
+            const token = relay.Hub.tokenHex(hub);
+            ui.text(c, c.print("Token   {s}", .{token}), .{ .size = 12.5, .weight = .semibold });
+            if (ui.button(c, "Copy", .{ .size = 12 }).clicked) c.clipboard.write(c.clipboard.ctx, token);
+            ui.text(c, "Paste it into the phone's Connect screen.", .{ .size = 11, .color = theme.muted });
+        } else if (p.relay == .off) {
+            ui.text(c, "The relay is off.", .{ .size = 12, .color = theme.muted });
+        }
+    }
 }
 
 fn updates(c: *ui.Context, w: *Workspace) void {

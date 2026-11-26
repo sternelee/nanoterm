@@ -10,6 +10,8 @@ const session_mod = @import("session.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
 const binds = @import("binds.zig");
+const screen_mod = @import("screen.zig");
+const view_screen = @import("view_screen.zig");
 
 test "the smart input, through the real view" {
     const gpa = std.testing.allocator;
@@ -52,7 +54,7 @@ test "the smart input, through the real view" {
     t.frame();
     t.typeText("why is the build failing");
     try std.testing.expectEqual(session_mod.Mode.agent, s.mode());
-    try std.testing.expect(t.hasText("agent"));
+    try std.testing.expect(t.hasText("Agent"));
     try std.testing.expect(t.hasText("auto"));
     try t.screenshot("/tmp/nanoterm-view-agent.png");
     // ⌘I chooses the shell, and it stays chosen.
@@ -92,6 +94,66 @@ test "the smart input, through the real view" {
     try t.screenshot("/tmp/nanoterm-view-models.png");
     try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.escape }));
     try std.testing.expectEqual(ws_mod.Overlay.none, w.overlay);
+}
+
+test "the Gateway's models reach the picker, and the chosen one is fx's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-picker-models";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/.fx");
+    // What a signed-in Gateway leaves in fx's profile.
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = home ++ "/.fx/settings.json",
+        .data = "{\"provider\":\"gateway\",\"model\":\"anthropic/claude-sonnet-4\"}",
+    });
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("FX_DISABLE_KEYCHAIN", "1");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    // What fx listed for the Gateway, as the store's worker publishes it.
+    // showModels() does not fetch under test, so the rows are handed them.
+    const store = shared.agent_store.?;
+    const gateway = &store.providers.items[0];
+    try std.testing.expectEqualStrings("gateway", gateway.name);
+    for ([_][]const u8{ "anthropic/claude-sonnet-4", "openai/gpt-5" }) |id| {
+        try gateway.models.append(gpa, try gpa.dupe(u8, id));
+    }
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+
+    // ⌘⇧M lists the Gateway's own models under its name.
+    try std.testing.expect(t.shortcut(binds.shortcut("Cmd+Shift+M")));
+    t.settle(1);
+    try std.testing.expect(t.hasText("AI Gateway"));
+    try std.testing.expect(t.hasText("anthropic/claude-sonnet-4"));
+    try std.testing.expect(t.hasText("openai/gpt-5"));
+    try t.screenshot("/tmp/nanoterm-view-gateway-models.png");
+
+    // Choosing one closes the picker, hands it to the session, and saves it
+    // where fx reads its preference.
+    try t.clickText("openai/gpt-5");
+    try std.testing.expectEqual(ws_mod.Overlay.none, w.overlay);
+    try std.testing.expectEqualStrings("openai/gpt-5", s.model_choice.?);
+    try std.testing.expectEqualStrings("gateway", store.selected_provider);
+    try std.testing.expectEqualStrings("openai/gpt-5", store.currentModel());
+    const settings = try std.Io.Dir.cwd().readFileAlloc(io, home ++ "/.fx/settings.json", gpa, .limited(64 * 1024));
+    defer gpa.free(settings);
+    try std.testing.expect(std.mem.indexOf(u8, settings, "\"openai/gpt-5\"") != null);
 }
 
 const agent_mod = @import("agent.zig");
@@ -148,7 +210,7 @@ test "an agent's answer, in Markdown" {
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, home);
+    }.f }, .claude, home);
     s.agent = ag;
     try ag.promptAs("Why does the build fail?", "Why does the build fail?");
     const t = ag.current().?;
@@ -212,4 +274,469 @@ test "a ready update shows in the title bar; one that can't install keeps nanote
     t.settle(1);
     try std.testing.expect(!t.hasText("nanoterm 9.9.9 is ready"));
     try std.testing.expect(t.hasText("Restart to update to 9.9.9"));
+}
+
+test "a failed agent's error stays inside the model picker" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-picker-error";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    // Several agents installed, hermes chosen but not starting: the
+    // picker's header carries the failure in red, on its right.
+    shared.prefs.installed.set(.codex, true);
+    shared.prefs.installed.set(.opencode, true);
+    shared.prefs.installed.set(.grok, true);
+    shared.prefs.installed.set(.devin, true);
+    s.which = .hermes;
+    const ag = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = struct {
+        fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
+            return null;
+        }
+    }.f }, .hermes, home);
+    s.agent = ag;
+    ag.status = .failed;
+    ag.error_text = try gpa.dupe(u8, "could not start hermes: zsh:1: command not found: hermes-agent --mode acp --stdio");
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 800, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    try std.testing.expect(t.shortcut(binds.shortcut("Cmd+Shift+M")));
+    t.settle(1);
+    // The picker's card: as wide as the window allows, centered.
+    const card_w: f32 = @min(680, 800 - 40);
+    const card_right = (800 - card_w) / 2 + card_w;
+    // The header carries only the word; the failure's words are a line of
+    // their own, wrapped inside the card.
+    try std.testing.expect(t.hasText("failed"));
+    var err_right: f32 = -1;
+    for (t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| {
+            if (std.mem.indexOf(u8, tx.str, "could not start hermes") != null) err_right = n.rect.x + n.rect.w;
+        },
+        else => {},
+    };
+    try std.testing.expect(err_right >= 0);
+    // The wrapped line fills the card's width, so the card is as wide as
+    // it should be, and no wider than the window's edge.
+    try std.testing.expect(err_right >= card_right - 20);
+    try std.testing.expect(err_right <= card_right + 0.5);
+    try t.screenshot("/tmp/nanoterm-picker-error.png");
+}
+
+test "a message starts an agent that is not running" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-restart";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    s.which = .hermes;
+    const dead = try agent_mod.Agent.create(gpa, io, .{ .ctx = s, .changed = session_mod.Session.changed, .newBlock = struct {
+        fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
+            return null;
+        }
+    }.f }, .hermes, home);
+    s.agent = dead;
+    dead.error_text = try gpa.dupe(u8, "the agent stopped");
+
+    // A message is what opens the next agent: the one that never started
+    // is retired, not left to answer with "not running".
+    s.ask("hello");
+    try std.testing.expect(s.agent != null);
+    try std.testing.expect(s.agent.? != dead);
+    try std.testing.expectEqual(@as(usize, 1), s.retired.items.len);
+    try std.testing.expect(s.retired.items[0] == dead);
+
+    // A stopped one is the same: the next message starts a fresh turn.
+    const stopped = s.agent.?;
+    stopped.status = .failed;
+    s.ask("again");
+    try std.testing.expect(s.agent.? != stopped);
+    try std.testing.expectEqual(@as(usize, 2), s.retired.items.len);
+    try std.testing.expect(s.retired.items[1] == stopped);
+}
+
+test "a block's header keeps its height when its hover actions appear" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-block-hover";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    s.run("printf hover\\n");
+    var waited: f64 = 0;
+    while (s.timeline.items.len == 0 or s.timeline.items[s.timeline.items.len - 1].block.state == .running) : (waited += 0.02) {
+        if (waited > 10) return error.Timeout;
+        nanoui.runFor(0.02);
+        t.frame();
+    }
+    t.settle(1);
+    const output = t.findText("hovern") orelse return error.OutputNotFound;
+    const path = t.findText("~") orelse return error.PathNotFound;
+    const y_before = output.y;
+    t.moveTo(path.x + path.w / 2, path.y + path.h / 2);
+    t.settle(1);
+    const hovered_output = t.findText("hovern") orelse return error.OutputNotFound;
+    try std.testing.expectApproxEqAbs(y_before, hovered_output.y, 0.01);
+    try t.screenshot("/tmp/nanoterm-block-hover-actions.png");
+}
+
+test "new output arrives a glyph at a time, then rests" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-arrival";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    s.run("printf arriving\n");
+    var waited: f64 = 0;
+    while (s.timeline.items.len == 0 or s.timeline.items[s.timeline.items.len - 1].block.state == .running) : (waited += 0.02) {
+        if (waited > 10) return error.Timeout;
+        nanoui.runFor(0.02);
+        t.frame();
+    }
+    // It just landed: the line is still fading in, so the view keeps
+    // asking for frames while it settles.
+    try std.testing.expect(t.hasText("arriving"));
+    t.frame();
+    try std.testing.expect(t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-arrival-fading.png");
+    // A moment later it has all arrived and rests: no more frames asked for.
+    t.advance(1);
+    t.frame();
+    try std.testing.expect(!t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-arrival-settled.png");
+}
+
+test "typing flashes, and Backspace's glyph decays away, then rests" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-input-fx";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 900, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    // What lands in the input flashes, so frames are asked for while it fades.
+    t.typeText("hi");
+    t.frame();
+    try std.testing.expect(t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-input-flash.png");
+    t.settle(2);
+    t.frame();
+    try std.testing.expect(!t.ctx.animating);
+    // ⌫ takes its glyph with it: it decays in place instead, then rests.
+    t.key(.backspace);
+    t.frame();
+    try std.testing.expectEqualStrings("h", s.input.text());
+    try std.testing.expect(t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-input-decay.png");
+    t.settle(2);
+    t.frame();
+    try std.testing.expect(!t.ctx.animating);
+    try t.screenshot("/tmp/nanoterm-input-rest.png");
+}
+
+test "typing a slash in the Agent's input keeps the caret after it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("HOME", "/tmp/nanoterm-test-caret");
+    try env.put("PATH", "/usr/bin:/bin");
+    std.Io.Dir.cwd().deleteTree(io, "/tmp/nanoterm-test-caret") catch {};
+    try std.Io.Dir.cwd().createDirPath(io, "/tmp/nanoterm-test-caret");
+    defer std.Io.Dir.cwd().deleteTree(io, "/tmp/nanoterm-test-caret") catch {};
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    var shared = try session_mod.Shared.init(gpa, io, arena_state.allocator(), &env);
+    defer shared.deinit();
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab("/tmp/nanoterm-test-caret");
+    s.lock = .agent;
+    _ = s.ensureAgent();
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+    t.typeText("/");
+    t.frame();
+    {
+        var listed: usize = 0;
+        for (s.menu.items.items) |item| {
+            if (std.mem.eql(u8, item.word, "/compact") or std.mem.eql(u8, item.word, "/permissions") or std.mem.eql(u8, item.word, "/effort")) listed += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), listed);
+    }
+    // As an input method sends it: marked "/" with no selection inside.
+    // The caret still belongs after what was composed.
+    s.input.clear();
+    t.frame();
+    t.textOps(&.{ .{ .set_marked = .{ .text = "/", .sel_start = 1, .sel_len = 0 } }, .unmark });
+    t.frame();
+    try std.testing.expectEqualStrings("/", s.input.text());
+    try std.testing.expectEqual(@as(usize, 1), s.caret);
+    try std.testing.expectEqualStrings("/", s.input.text());
+    try std.testing.expectEqual(@as(usize, 1), s.caret);
+    t.typeText("c");
+    t.frame();
+    try std.testing.expectEqualStrings("/c", s.input.text());
+    try std.testing.expectEqual(@as(usize, 2), s.caret);
+
+    // A whole command opens straight onto its arguments, and taking one
+    // leaves the input ready to send.
+    s.input.clear();
+    t.frame();
+    t.typeText("/permissions");
+    t.frame();
+    try std.testing.expect(s.menu.open);
+    {
+        var modes: usize = 0;
+        for (s.menu.items.items) |item| {
+            if (std.mem.eql(u8, item.word, "ask") or std.mem.eql(u8, item.word, "auto") or std.mem.eql(u8, item.word, "full-access")) modes += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), modes);
+    }
+    t.key(.enter);
+    t.frame();
+    // A value argument sends the command (fx writes its own settings).
+    t.settle(1);
+    try std.testing.expectEqual(@as(usize, 0), s.input.text().len);
+    {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "/tmp/nanoterm-test-caret/.fx/settings.json", std.testing.allocator, .limited(65536));
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"permission_mode\":\"ask\"") != null);
+    }
+    // The note lands in the timeline (the pane's own record of it).
+    {
+        // The note lands in the timeline as its own finished turn.
+        const last = s.timeline.items[s.timeline.items.len - 1];
+        try std.testing.expect(last == .turn);
+        try std.testing.expect(last.turn.done);
+        try std.testing.expectEqual(@as(usize, 1), last.turn.items.items.len);
+        try std.testing.expect(last.turn.items.items[0] == .note);
+        try std.testing.expect(std.mem.indexOf(u8, last.turn.items.items[0].note, "permission mode set to ask") != null);
+    }
+    if (s.agent) |ag| {
+        s.agent = null;
+        ag.destroy();
+    }
+}
+
+test "an @ in the prompt names files and folders" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-mention";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/src/ui");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/src/main.zig", .data = "// the app\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/src/ui/panel.zig", .data = "// a panel\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/README.md", .data = "# readme\n" });
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+
+    // A prompt, and "@" anywhere in it: the working folder's files and
+    // folders, as the agent's own menu offers them.
+    s.lock = .agent;
+    t.frame();
+    t.typeText("read @s");
+    t.settle(1);
+    try std.testing.expect(s.menu.open);
+    try std.testing.expect(t.hasText("@src/"));
+    try t.screenshot("/tmp/nanoterm-view-mention.png");
+    // A folder is taken and the menu follows straight into it.
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/", s.input.text());
+    try std.testing.expect(s.menu.open);
+    // Typing narrows it; a file is taken as a whole word, spaced off.
+    t.typeText("m");
+    t.settle(1);
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/main.zig ", s.input.text());
+    try std.testing.expect(!s.menu.open);
+    // However deep it sits: "@pan" names src/ui/panel.zig straight away,
+    // as fx's own picker does.
+    s.input.clear();
+    t.frame();
+    t.typeText("read @pan");
+    t.settle(1);
+    try std.testing.expect(s.menu.open);
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/ui/panel.zig ", s.input.text());
+}
+
+test "the caret stays at the typing point when the menu opens" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const home = "/tmp/nanoterm-test-caret";
+    std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, home ++ "/src");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = home ++ "/src/main.zig", .data = "// the app\n" });
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    var env: std.process.Environ.Map = .init(arena);
+    try env.put("HOME", home);
+    try env.put("PATH", "/usr/bin:/bin");
+    var shared = try session_mod.Shared.init(gpa, io, arena, &env);
+    shared.wire();
+    defer shared.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    var w: ws_mod.Workspace = .{ .shared = &shared, .nanoapp = undefined };
+    defer w.deinit();
+    const s = try w.newTab(home);
+
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&w, view.view), .{ .width = 1000, .height = 640, .theme = theme.ui() });
+    defer t.deinit();
+    t.settle(1);
+
+    // The menu opens over the composer as "@" is typed; the input's own
+    // place in the tree must not move with it, or its caret and selection
+    // are lost and the next key lands where they were.
+    s.lock = .agent;
+    t.frame();
+    t.typeText("read ");
+    t.settle(1);
+    t.typeText("@"); // the menu opens on this frame
+    t.settle(1);
+    t.typeText("x");
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @x", s.input.text());
+    try std.testing.expectEqual(@as(usize, 7), s.caret);
+    // The word still completes from where the caret is: the stray x goes,
+    // and "@s" completes the folder, the menu following into it.
+    t.key(.backspace);
+    t.settle(1);
+    t.typeText("s");
+    t.settle(1);
+    try std.testing.expect(s.menu.open);
+    t.key(.enter);
+    t.settle(1);
+    try std.testing.expectEqualStrings("read @src/", s.input.text());
+    try std.testing.expect(s.menu.open);
+}
+
+const CursorView = struct {
+    s: *screen_mod.Screen,
+    fn view(k: *@This(), c: *ui.Context) void {
+        view_screen.draw(c, k.s, true);
+    }
+};
+
+/// The block cursor: the only wide, tall quad a screen of blank cells draws.
+fn cursorQuads(t: *ui.Tester) usize {
+    var n: usize = 0;
+    for (t.instances.items) |inst| {
+        if (inst.kind == 0 and inst.rect[2] > 1 and inst.rect[2] < 30 and inst.rect[3] > 5 and inst.rect[3] < 30) n += 1;
+    }
+    return n;
+}
+
+test "a full-screen program's cursor blinks while its pane has focus" {
+    const gpa = std.testing.allocator;
+    const s = try screen_mod.Screen.create(gpa, 10, 3);
+    defer s.destroy();
+    var k: CursorView = .{ .s = s };
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&k, CursorView.view), .{ .width = 300, .height = 200 });
+    defer t.deinit();
+    try std.testing.expectEqual(@as(usize, 1), cursorQuads(&t));
+    t.advance(0.6);
+    try std.testing.expectEqual(@as(usize, 0), cursorQuads(&t));
+    t.advance(0.5);
+    try std.testing.expectEqual(@as(usize, 1), cursorQuads(&t));
 }

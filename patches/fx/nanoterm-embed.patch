@@ -1,0 +1,1229 @@
+diff --git a/src/builtins/mcp.zig b/src/builtins/mcp.zig
+index 2a55ddc93..18dc2c440 100644
+--- a/src/builtins/mcp.zig
++++ b/src/builtins/mcp.zig
+@@ -154,14 +154,45 @@ fn skipUnprintableNames(alloc: Allocator, loaded: *NativeConfigs) Allocator.Erro
+ /// The MCP host for the workspace, or null when no server is configured and
+ /// there is nothing to report. Its servers start when the model first needs
+ /// them.
++pub const ExtraStdioServer = struct {
++    name: []const u8,
++    command: []const u8,
++    args: []const []const u8,
++};
++
+ pub fn loadHost(
+     alloc: Allocator,
+     workspace_root: []const u8,
+     builtins: tool_dispatch.Registry,
+     extras: mcp_host.Extras,
++) !?*mcp_host.Host {
++    return loadHostWithExtra(alloc, workspace_root, builtins, extras, null);
++}
++
++/// `loadHost`, plus one host-issued stdio server (nanoterm's show_visual
++/// endpoint) that joins the profile and workspace servers for this run.
++pub fn loadHostWithExtra(
++    alloc: Allocator,
++    workspace_root: []const u8,
++    builtins: tool_dispatch.Registry,
++    extras: mcp_host.Extras,
++    extra: ?ExtraStdioServer,
+ ) !?*mcp_host.Host {
+     var loaded = try loadNativeConfigs(alloc, workspace_root);
+     defer loaded.deinit(alloc);
++    if (extra) |server| {
++        // A host-issued server replaces a profile entry using its name.
++        var i: usize = 0;
++        while (i < loaded.configs.items.len) {
++            if (std.mem.eql(u8, loaded.configs.items[i].name, server.name)) {
++                var removed = loaded.configs.orderedRemove(i);
++                removed.deinit(alloc);
++                continue;
++            }
++            i += 1;
++        }
++        try loaded.configs.append(alloc, try cloneExtraServer(alloc, server));
++    }
+     const home = io_mod.homeDir() orelse return null;
+     // Read only while the host starts.
+     var inherited = try io_mod.cloneEnvironMap(alloc);
+@@ -181,14 +212,9 @@ pub fn loadHost(
+         for (notes) |note| alloc.free(note);
+         alloc.free(notes);
+     }
+-    // Servers shared with other fx sessions live under the profile's folder;
+-    // when it can't be named, each server stays in this process.
+-    const fx_home: ?[]u8 = profile_paths.rootDir(alloc, home) catch |err| blk: {
+-        debug_trace.logf("mcp", "MCP servers run in this session reason=no fx home err={s}", .{@errorName(err)});
+-        if (err == error.OutOfMemory) return error.OutOfMemory;
+-        break :blk null;
+-    };
+-    defer if (fx_home) |path| alloc.free(path);
++    // No sharing through an owner process. fx starts one by running its own
++    // binary again as `--fx-internal-mcp-owner`, and in nanoterm that binary
++    // opens a window instead of answering: every server runs in this session.
+     const h = try mcp_host.Host.create(alloc, io_mod.getIo(), loaded.configs.items, &inherited, .{
+         .client_version = build_options.app_version,
+         .credentials = .{ .detect = home },
+@@ -197,12 +223,37 @@ pub fn loadHost(
+         .notify = extras.notify,
+         .slash_commands = extras.slash_commands,
+         .idle_ms = mcp_host.idleMs(),
+-        .share = if (fx_home) |path| .{ .fx_home = path } else null,
++        .share = null,
+     }, builtins);
+     h.notes = notes;
+     return h;
+ }
+ 
++fn cloneExtraServer(alloc: Allocator, server: ExtraStdioServer) !McpServerConfig {
++    const name = try alloc.dupe(u8, server.name);
++    errdefer alloc.free(name);
++    const command = try alloc.dupe(u8, server.command);
++    errdefer alloc.free(command);
++    const args = try alloc.alloc([]const u8, server.args.len);
++    var initialized: usize = 0;
++    errdefer {
++        for (args[0..initialized]) |arg| alloc.free(arg);
++        alloc.free(args);
++    }
++    for (server.args, args) |arg, *owned| {
++        owned.* = try alloc.dupe(u8, arg);
++        initialized += 1;
++    }
++    return .{
++        .name = name,
++        .source = .acp,
++        .scope = .acp_session,
++        .always_loaded = true,
++        .command = command,
++        .args = args,
++    };
++}
++
+ /// Each diagnostic in a sentence, owned by `alloc`.
+ /// The notes as a host holds them, in `alloc`; the caller or the host frees each and the list.
+ pub fn renderNotes(alloc: Allocator, diagnostics: []const project_config.WorkspaceDiagnostic) ![]const []const u8 {
+diff --git a/src/builtins/skills.zig b/src/builtins/skills.zig
+index eab73bd6a..04989e457 100644
+--- a/src/builtins/skills.zig
++++ b/src/builtins/skills.zig
+@@ -13,26 +13,18 @@ const Allocator = std.mem.Allocator;
+ const RootSpec = skill_contract.RootSpec;
+ 
+ /// Roots scanned at the workspace root and each ancestor directory below
+-/// home, in precedence order. `.fx/skills` and `skills/` belong to the product;
+-/// the rest are compatibility roots for other agent installs.
++/// home, in precedence order. `.fx/skills` and `skills/` belong to the product.
++/// nanoterm's embedding patch trims the compatibility roots for other agent
++/// installs (opencode, codex, claude, agents, claw): its agent sees only the
++/// product's own skills.
+ const workspace_roots = [_]RootSpec{
+     .{ .source = .workspace_fx, .path = ".fx/skills" },
+     .{ .source = .workspace_shared, .path = "skills" },
+-    .{ .source = .workspace_opencode, .path = ".opencode/skills" },
+-    .{ .source = .workspace_codex, .path = ".codex/skills" },
+-    .{ .source = .workspace_claude, .path = ".claude/skills" },
+-    .{ .source = .workspace_agents, .path = ".agents/skills" },
+-    .{ .source = .workspace_claw, .path = ".claw/skills" },
+ };
+ 
+-/// Home-relative compatibility roots scanned after the managed install root.
+-const global_roots = [_]RootSpec{
+-    .{ .source = .global_opencode, .path = ".config/opencode/skills" },
+-    .{ .source = .global_codex, .path = ".codex/skills" },
+-    .{ .source = .global_claude, .path = ".claude/skills" },
+-    .{ .source = .global_agents, .path = ".agents/skills" },
+-    .{ .source = .global_claw, .path = ".claw/skills" },
+-};
++/// None for nanoterm's embedded agent: skills install into the managed root
++/// (`~/.fx/skills`, `managed_root_source`) and nowhere else is scanned.
++const global_roots = [_]RootSpec{};
+ 
+ pub const root_policy: skill_contract.RootPolicy = .{
+     .workspace_roots = &workspace_roots,
+@@ -1171,15 +1163,10 @@ test "copySkillDir preserves the installed skill across allocation failures" {
+     }
+ }
+ 
+-test "workspace skill roots scan the product root before compatibility roots" {
++test "workspace skill roots scan the product root only" {
+     const expected = [_]RootSpec{
+         .{ .source = .workspace_fx, .path = ".fx/skills" },
+         .{ .source = .workspace_shared, .path = "skills" },
+-        .{ .source = .workspace_opencode, .path = ".opencode/skills" },
+-        .{ .source = .workspace_codex, .path = ".codex/skills" },
+-        .{ .source = .workspace_claude, .path = ".claude/skills" },
+-        .{ .source = .workspace_agents, .path = ".agents/skills" },
+-        .{ .source = .workspace_claw, .path = ".claw/skills" },
+     };
+ 
+     try std.testing.expectEqual(expected.len, workspace_roots.len);
+@@ -1194,20 +1181,9 @@ test "workspace skill roots scan the product root before compatibility roots" {
+ }
+ 
+ test "global skill roots cover compatibility installs only" {
+-    const expected = [_]RootSpec{
+-        .{ .source = .global_opencode, .path = ".config/opencode/skills" },
+-        .{ .source = .global_codex, .path = ".codex/skills" },
+-        .{ .source = .global_claude, .path = ".claude/skills" },
+-        .{ .source = .global_agents, .path = ".agents/skills" },
+-        .{ .source = .global_claw, .path = ".claw/skills" },
+-    };
+-
+-    try std.testing.expectEqual(expected.len, global_roots.len);
+-    for (expected, global_roots) |exp, actual| {
+-        try std.testing.expectEqual(exp.source, actual.source);
+-        try std.testing.expectEqualStrings(exp.path, actual.path);
+-    }
+-
++    // nanoterm's embedded agent scans no compatibility root: the managed
++    // install root (`managed_root_source`) is the only home-relative root.
++    try std.testing.expectEqual(@as(usize, 0), global_roots.len);
+     for (global_roots) |spec| {
+         try std.testing.expect(spec.source != .global_fx);
+     }
+diff --git a/src/core/agent/runtime/orchestrator.zig b/src/core/agent/runtime/orchestrator.zig
+index 961a9fb9c..1d6d1a86e 100644
+--- a/src/core/agent/runtime/orchestrator.zig
++++ b/src/core/agent/runtime/orchestrator.zig
+@@ -9955,10 +9955,14 @@ fn processQueuedPromptLoop(
+                             reset_stream_for_next_attempt = true;
+                             continue;
+                         }
+-                        stream_ctx.drop_staged_response_language_candidate();
+-                        try deps.push_system_notice(deps.ctx, response_language_failure_notice);
+-                        finish_trace.finish("response_language_mismatch");
+-                        return error.ResponseLanguageMismatch;
++                        // nanoterm: a correction that still comes back in
++                        // another language is delivered, not discarded. The
++                        // strict path returned ResponseLanguageMismatch and
++                        // halted the whole turn (losing the answer) whenever an
++                        // injected English prompt — e.g. /compact's handoff —
++                        // met a conversation actually written in another
++                        // language. Keep what the model wrote and finish.
++                        try stream_ctx.accept_staged_response_language();
+                     },
+                 }
+             }
+diff --git a/src/core/cli/cli_ask.zig b/src/core/cli/cli_ask.zig
+index 5ec8f0ba0..df4629e51 100644
+--- a/src/core/cli/cli_ask.zig
++++ b/src/core/cli/cli_ask.zig
+@@ -55,6 +55,7 @@ const mcp_elicitation_interaction = @import("../mcp/elicitation_interaction.zig"
+ const mcp_elicitation = @import("../mcp/elicitation.zig");
+ const mcp_access_policy = @import("../mcp/access_policy.zig");
+ const mcp_host = @import("../mcp_host/host.zig");
++const builtin_mcp = @import("../../builtins/mcp.zig");
+ const mcp_verbs = @import("../mcp_host/verbs.zig");
+ const mcp_contract = @import("../mcp/mcp_contract.zig");
+ const mode_registry = @import("../modes/mode_registry.zig");
+@@ -96,6 +97,7 @@ const tool_dispatch = @import("../tooling/tool_dispatch.zig");
+ const command_output_content = @import("../tooling/command_output_content.zig");
+ const tool_mcp_runtime = @import("../tooling/tool_mcp_runtime.zig");
+ const tool_presentation = @import("../tooling/tool_presentation.zig");
++const acp_tool_presentation = @import("../../acp/tool_call_presentation.zig");
+ const tool_result_errors = @import("../tooling/tool_result_errors.zig");
+ const tool_runtime = @import("../tooling/tool_runtime.zig");
+ const tool_set_contract = @import("../tooling/tool_set.zig");
+@@ -111,7 +113,7 @@ const url_opener = @import("../hosts/url_opener.zig");
+ const Allocator = std.mem.Allocator;
+ const ChatMessage = types.ChatMessage;
+ const HistoryTurn = types.HistoryTurn;
+-const ImageAttachment = types.ImageAttachment;
++pub const ImageAttachment = types.ImageAttachment;
+ const PermissionGrant = types.PermissionGrant;
+ const PermissionMode = types.PermissionMode;
+ const SessionRuntime = session_runtime.SessionRuntime;
+@@ -368,7 +370,7 @@ test "prompt result failure writer preserves exact error type and identity" {
+ }
+ 
+ /// Resume selector parsed from fx ask --resume.
+-const ResumeTarget = session_store.ResumeTarget;
++pub const ResumeTarget = session_store.ResumeTarget;
+ 
+ const AskOptions = struct {
+     prompt: []u8,
+@@ -483,6 +485,60 @@ const PermissionApprovalPromptResult = enum {
+ const NotifyAttentionFn = *const fn (?*anyopaque) void;
+ const PermissionApprovalPromptFn = *const fn (?*anyopaque, ?*anyopaque, WriteFn, []const u8, ?*anyopaque, NotifyAttentionFn) anyerror!PermissionApprovalPromptResult;
+ const IsTtyFn = *const fn (?*anyopaque) bool;
++/// One tool call as an in-process host sees it. The host draws a row per call,
++/// so these are what such a row needs rather than fx's internal types: what the
++/// tool is, what it is doing in a human's words, and what it printed.
++pub const EmbeddedToolEvent = struct {
++    /// The call's own id: a start event and its completion share it, so a host
++    /// updates one row rather than drawing two.
++    id: []const u8,
++    name: []const u8,
++    /// "start", "completed" or "failed".
++    status: []const u8,
++    /// read | edit | delete | move | search | execute | think | fetch | other.
++    kind: []const u8,
++    /// A human-readable action, such as "Reading src/main.zig".
++    label: []const u8,
++    /// The command a shell call runs, when it runs one.
++    command: []const u8 = "",
++    /// The call's exit code, when it has one.
++    exit_code: ?i64 = null,
++    /// How long the call took, in milliseconds.
++    duration_ms: ?u64 = null,
++    /// What the tool printed, for the host to show: a command's output rather
++    /// than its JSON result envelope. Empty for a start event.
++    output: []const u8 = "",
++    /// Whether `output` is the head of more output the host did not get.
++    truncated: bool = false,
++};
++const EmbeddedToolFn = *const fn (?*anyopaque, EmbeddedToolEvent) anyerror!void;
++/// One permission question as an in-process host sees it: what fx means to do,
++/// in a person's words, and nothing of fx's internal request type. The host
++/// draws a card from it and blocks the worker until it answers.
++pub const EmbeddedPermissionRequest = struct {
++    /// The question's own id. A host answers with it, so an answer that
++    /// arrives after its turn was cancelled is dropped rather than applied to
++    /// the next question.
++    id: u64,
++    /// What the tool is about to do, as fx words it ("Write src/main.zig").
++    label: []const u8,
++    /// The command a shell call would run; empty for every other tool.
++    command: []const u8 = "",
++    /// Why fx asks, when it has a reason worth giving.
++    explanation: []const u8 = "",
++    /// The call's arguments, when the label alone does not say enough.
++    arguments_preview: []const u8 = "",
++};
++
++/// What the host decided. `always` keeps a session grant, so fx stops asking
++/// for the same tool and target.
++pub const EmbeddedPermissionAnswer = enum { once, always, deny };
++const EmbeddedPermissionFn = *const fn (?*anyopaque, EmbeddedPermissionRequest) anyerror!EmbeddedPermissionAnswer;
++
++/// A command's output as it arrives, rather than only when the call ends.
++/// `call_id` names the row the host already has for the call; the bytes are
++/// borrowed for the length of the call and must be copied to outlive it.
++const EmbeddedOutputFn = *const fn (?*anyopaque, []const u8, command_output_content.Stream, []const u8) anyerror!void;
+ /// The final `?[]const u8` is the run's --model, which stands in for a provider without a saved model.
+ const LoadStartupStateFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, usize, ?model_provider.ProviderId, ?[]const u8, []const config_runtime.SettingOverride) anyerror!app_lifecycle.StartupState;
+ const LoadStartupStateWithAuthModeFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, usize, credentials.AuthMode, ?model_provider.ProviderId, ?[]const u8, []const config_runtime.SettingOverride) anyerror!app_lifecycle.StartupState;
+@@ -513,10 +569,32 @@ const RunDeps = struct {
+     context_registry: context_contract.Registry,
+     tool_set: tool_set_contract.ToolSet,
+     load_mcp_host: ?mcp_host.LoadFn = null,
++    embedded_extra_mcp: ?builtin_mcp.ExtraStdioServer = null,
+     process_queued_prompt: ProcessQueuedPromptFn = processQueuedPromptDefault,
+     persist_yolo_acknowledgment: PersistYoloAcknowledgmentFn = persistYoloAcknowledgmentDefault,
+     install_headless_interrupt: bool = false,
+     stdin_source: StdinSource = .real,
++    cancel_flag: ?*std.atomic.Value(bool) = null,
++    embedded_tool_ctx: ?*anyopaque = null,
++    embedded_tool: ?EmbeddedToolFn = null,
++    /// The host draws its own rows for tool calls from the events
++    /// `embedded_tool` delivers. The progress lines and command output fx would
++    /// otherwise stream to stderr would then be a second copy of the same call,
++    /// so they are left to the host's rows instead.
++    embedded_tool_rows: bool = false,
++    /// The host answers permission questions itself. With it set, `ask` needs
++    /// no terminal: the question goes to the host, which draws it and blocks
++    /// until a person answers.
++    embedded_permission_ctx: ?*anyopaque = null,
++    embedded_permission: ?EmbeddedPermissionFn = null,
++    /// The host takes a running command's output as it arrives. Without it the
++    /// bytes go to stderr, as a plain reader expects.
++    embedded_output_ctx: ?*anyopaque = null,
++    embedded_output: ?EmbeddedOutputFn = null,
++    /// The host stays in one long-lived process: `embedded.zig` runs here,
++    /// unlike `fx ask`, whose next line is the end of the program. The run
++    /// then stops the MCP servers it started; `ask` only signals them.
++    embedded: bool = false,
+ };
+ 
+ const OutputMode = enum {
+@@ -545,6 +623,7 @@ const RunOptions = struct {
+     color_enabled: bool = true,
+     provider_override: ?model_provider.ProviderId = null,
+     model_override: ?[]const u8 = null,
++    workspace_root: ?[]const u8 = null,
+     /// `--config key=value` values, applied as the top settings layer.
+     settings_overrides: []const config_runtime.SettingOverride = &.{},
+     effort_override: ?types.ReasoningEffort = null,
+@@ -795,8 +874,11 @@ const AskContext = struct {
+         self.session.deinit(self.alloc);
+         if (self.skills_dir.len > 0) self.alloc.free(self.skills_dir);
+         self.context_snapshot.deinit(self.alloc);
+-        // `fx ask` exits next, so nothing waits for its servers.
+-        if (self.mcp_host != null) mcp_host.signalServersForExit();
++        if (self.mcp_host) |h| {
++            // `fx ask` exits next, so nothing waits for its servers. A run
++            // inside the host stops the ones it started and frees them.
++            if (self.deps.embedded) h.stop() else mcp_host.signalServersForExit();
++        }
+         if (self.image_snapshot_temp_dir) |path| {
+             image_attachments.cleanupSnapshotDir(path);
+             self.alloc.free(path);
+@@ -829,6 +911,7 @@ const AskContext = struct {
+     }
+ 
+     fn cancelFlag(self: *AskContext) *std.atomic.Value(bool) {
++        if (self.deps.cancel_flag) |flag| return flag;
+         if (comptime supports_headless_interrupt) {
+             if (self.use_process_interrupt_flag) {
+                 return &headless_interrupt.cancel_requested;
+@@ -1229,6 +1312,7 @@ fn askElicitationCapabilities(
+ }
+ 
+ fn checkHeadlessCancellation(deps: RunDeps) !void {
++    if (deps.cancel_flag) |flag| if (flag.load(.seq_cst)) return error.Cancelled;
+     if (comptime supports_headless_interrupt) {
+         if (deps.install_headless_interrupt and
+             headless_interrupt.cancel_requested.load(.seq_cst))
+@@ -1492,6 +1576,67 @@ pub fn runPromptCapture(alloc: Allocator, prompt: []const u8, agent: agent_run_f
+     return runPromptWithRunFlags(alloc, prompt, agent, cfg, context_registry, tool_set, .json);
+ }
+ 
++pub const EmbeddedCallbacks = struct {
++    context: *anyopaque,
++    text: *const fn (?*anyopaque, []const u8) anyerror!void,
++    diagnostic: *const fn (?*anyopaque, []const u8) anyerror!void,
++    tool: ?EmbeddedToolFn = null,
++    /// Asks the host to approve a tool call. Without it fx keeps its own
++    /// permission mode, and `ask` cannot prompt, so the call is refused.
++    permission: ?EmbeddedPermissionFn = null,
++    /// Delivers a running command's output as it arrives, so a long command
++    /// shows progress rather than only its ending.
++    output: ?EmbeddedOutputFn = null,
++};
++
++/// Full native fx runtime for an in-process host. No CLI process, ACP, or Node.
++///
++/// `permission_override` wins over the saved permission mode when it is set;
++/// null leaves the profile's own mode in charge, which is what a host that
++/// shows the mode in its settings wants.
++pub fn runEmbedded(
++    alloc: Allocator,
++    prompt: []const u8,
++    permission_override: ?PermissionMode,
++    cfg: Config,
++    context_registry: context_contract.Registry,
++    tool_set: tool_set_contract.ToolSet,
++    resume_target: ?ResumeTarget,
++    model_override: ?[]const u8,
++    workspace_root: []const u8,
++    images: []const ImageAttachment,
++    cancel_flag: *std.atomic.Value(bool),
++    callbacks: EmbeddedCallbacks,
++    extra_mcp: ?builtin_mcp.ExtraStdioServer,
++) !PromptRunResult {
++    return runPromptInternal(alloc, prompt, permission_override, cfg, .{
++        .output_mode = .raw,
++        .resume_target = resume_target,
++        .model_override = model_override,
++        .workspace_root = workspace_root,
++        .images = images,
++        .deps = .{
++            .stdout_ctx = callbacks.context,
++            .stderr_ctx = callbacks.context,
++            .write_stdout = callbacks.text,
++            .write_stderr = callbacks.diagnostic,
++            .context_registry = context_registry,
++            .tool_set = tool_set,
++            .load_mcp_host = cfg.load_mcp_host,
++            .cancel_flag = cancel_flag,
++            .embedded_tool_ctx = callbacks.context,
++            .embedded_tool = callbacks.tool,
++            .embedded_tool_rows = callbacks.tool != null,
++            .embedded_permission_ctx = callbacks.context,
++            .embedded_permission = callbacks.permission,
++            .embedded_output_ctx = callbacks.context,
++            .embedded_output = callbacks.output,
++            .embedded_extra_mcp = extra_mcp,
++            .embedded = true,
++        },
++    });
++}
++
+ /// Runs `prompt` with the run flags a caller parsed, such as `fx pr` or
+ /// `fx issue`, so every such caller applies the same set.
+ fn runPromptWithRunFlags(
+@@ -1571,6 +1716,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+             options.settings_overrides,
+         );
+     defer startup.deinit(alloc);
++    if (options.workspace_root) |workspace_root| {
++        alloc.free(startup.workspace_root);
++        startup.workspace_root = try alloc.dupe(u8, workspace_root);
++    }
+     applyAskThemeChoice(startup.theme);
+     cfg.provider_set.definitions = startup.configured_providers.definitions;
+     // Bind gateway chat traffic to a per-process connection pool and warm one
+@@ -1871,7 +2020,10 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override:
+     }
+ 
+     try ctx.checkCancellation();
+-    if (options.deps.load_mcp_host) |load_host| {
++    if (options.deps.embedded_extra_mcp) |extra| {
++        ctx.mcp_host = try builtin_mcp.loadHostWithExtra(alloc, startup.workspace_root, ctx.toolRegistry(), .{ .questions = ctx.mcp_elicitation_capabilities }, extra);
++        if (ctx.mcp_host) |h| try reportUnapprovedMcpServers(&ctx, h);
++    } else if (options.deps.load_mcp_host) |load_host| {
+         ctx.mcp_host = try load_host(alloc, startup.workspace_root, ctx.toolRegistry(), .{ .questions = ctx.mcp_elicitation_capabilities });
+         if (ctx.mcp_host) |h| try reportUnapprovedMcpServers(&ctx, h);
+     }
+@@ -2663,6 +2815,29 @@ fn requestCliPermission(
+     _: ?[]const PermissionGrant,
+ ) anyerror!permission_request.OwnedPermissionResponse {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    // An in-process host draws the question and answers it; the terminal prompt
++    // below is for a reader that has a stdin to type into.
++    if (ctx.deps.embedded_permission) |ask| {
++        const answer = ask(ctx.deps.embedded_permission_ctx, .{
++            .id = request.id,
++            .label = request.label,
++            .command = request.command orelse "",
++            .explanation = request.explanation orelse "",
++            .arguments_preview = request.tool_arguments_preview orelse "",
++        }) catch |err| switch (err) {
++            error.Cancelled => return error.Cancelled,
++            else => return error.PermissionPromptUnavailable,
++        };
++        return permission_request.OwnedPermissionResponse.init(
++            alloc,
++            switch (answer) {
++                .once => .once,
++                .always => .always,
++                .deny => .deny,
++            },
++            null,
++        );
++    }
+     return switch (try promptCliPermissionApproval(ctx, request.label)) {
+         .approve => permission_request.OwnedPermissionResponse.init(alloc, .once, null),
+         .deny => permission_request.OwnedPermissionResponse.init(alloc, .deny, null),
+@@ -2702,6 +2877,9 @@ fn cliPermissionPromptAllowed(
+ }
+ 
+ fn cliContextPermissionPromptAllowed(ctx: *const AskContext) bool {
++    // An in-process host answers the question itself, so it needs no terminal
++    // to prompt on: its card is the prompt.
++    if (ctx.deps.embedded_permission != null) return true;
+     return cliPermissionPromptAllowed(
+         ctx.output_mode,
+         ctx.prompt_permissions,
+@@ -2788,6 +2966,7 @@ fn executeToolCallAuthorized(
+     request: agent_runtime.ToolExecutionRequest,
+ ) !ToolExecutionResult {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    notifyEmbeddedToolStart(ctx, request.call);
+     var tool_ctx = ctx.toolContext();
+     tool_ctx.root_user_intent_context = request.root_user_intent_context;
+     tool_ctx.root_user_messages = request.root_user_messages;
+@@ -2806,11 +2985,130 @@ fn executeToolCallAuthorized(
+     return result;
+ }
+ 
++/// The ACP-facing kind for `name`, as fx maps it for its own ACP clients, so an
++/// in-process host draws the same icon and groups a step the same way.
++fn embeddedToolKind(name: []const u8) []const u8 {
++    return acp_tool_presentation.mapToolKind(name).jsonString();
++}
++
++/// What an in-process host calls this call, in fx's own words: the same action
++/// line fx shows its ACP clients and its TUI. Never fails the turn it describes:
++/// a call whose arguments cannot be read still gets a row.
++fn embeddedToolLabel(ctx: *AskContext, arena: Allocator, call: ToolCall, display_target: ?[]const u8) []const u8 {
++    return tool_presentation.formatPlainAction(arena, .{
++        .tool_registry = ctx.toolRegistry(),
++        .call = call,
++        .workspace_root = ctx.workspace_root,
++        .display_target = display_target,
++    }) catch call.name;
++}
++
++/// The command a `shell` call runs, read from its arguments: a row for one says
++/// what it ran, not just "Ran a command". Empty for every other tool.
++fn embeddedToolCommand(arena: Allocator, call: ToolCall) []const u8 {
++    if (!std.mem.eql(u8, call.name, "shell")) return "";
++    const args = tool_args.parseToolArgsObject(arena, call.arguments_json) catch return "";
++    const value = args.get("command") orelse return "";
++    return if (value == .string) value.string else "";
++}
++
++fn embeddedToolEvent(ctx: *AskContext, arena: Allocator, call: ToolCall, status: []const u8, result: ?ToolExecutionResult) EmbeddedToolEvent {
++    const command = embeddedToolCommand(arena, call);
++    var event: EmbeddedToolEvent = .{
++        .id = call.id,
++        .name = call.name,
++        .status = status,
++        .kind = embeddedToolKind(call.name),
++        .label = embeddedToolLabel(ctx, arena, call, if (command.len > 0) command else null),
++        .command = command,
++    };
++    if (result) |execution| {
++        const shown = embeddedToolOutput(arena, call.name, execution);
++        event.output = shown.text;
++        event.truncated = shown.truncated;
++        if (execution.command_result_json) |json| {
++            const command_result = std.json.parseFromSlice(EmbeddedCommandResult, arena, json, .{ .ignore_unknown_fields = true }) catch null;
++            if (command_result) |parsed| {
++                event.exit_code = parsed.value.exit_code;
++                event.duration_ms = parsed.value.duration_ms;
++            }
++        }
++    }
++    return event;
++}
++
++/// The fields of fx's command result JSON (`CommandResult.toJson`) a row shows
++/// as the command's ending rather than as its output.
++const EmbeddedCommandResult = struct {
++    exit_code: ?i64 = null,
++    duration_ms: ?u64 = null,
++};
++
++const EmbeddedToolOutput = struct { text: []const u8 = "", truncated: bool = false };
++
++/// What a finished call printed, for a host to show: the command's own output
++/// for `shell` (its result is a JSON envelope the model reads, not a person),
++/// and the tool's text for everything else. Cut to the same preview a host's
++/// row can show; `truncated` says more was dropped.
++fn embeddedToolOutput(arena: Allocator, name: []const u8, execution: ToolExecutionResult) EmbeddedToolOutput {
++    if (std.mem.eql(u8, name, "shell")) {
++        const view = std.json.parseFromSlice(EmbeddedShellResult, arena, execution.model_output, .{ .ignore_unknown_fields = true }) catch
++            return .{ .text = previewToolOutput(execution.model_output) };
++        const preview = previewToolOutput(view.value.output_delta);
++        const notice = view.value.notice orelse "";
++        const text = if (notice.len > 0)
++            std.mem.concat(arena, u8, &.{ notice, "\n", preview }) catch preview
++        else
++            preview;
++        return .{ .text = text, .truncated = view.value.output_truncated or preview.len < view.value.output_delta.len };
++    }
++    return .{ .text = previewToolOutput(execution.model_output) };
++}
++
++/// The fields of a `shell` result (`formatSnapshotRaw`) a row shows.
++const EmbeddedShellResult = struct {
++    output_delta: []const u8 = "",
++    output_truncated: bool = false,
++    notice: ?[]const u8 = null,
++};
++
++/// The host draws tool text as plain text, so unsafe bytes are replaced rather
++/// than escaped into the row, and a row is cut where a person stops reading.
++/// The cut matches what fx keeps for the model, so the host shows the same
++/// output a terminal reader would see instead of a shorter preview of it.
++fn previewToolOutput(output: []const u8) []const u8 {
++    if (!text_utils.isModelSafeText(output)) return "binary or non-utf8 tool output omitted";
++    return text_utils.utf8PrefixByBytes(output, embedded_tool_output_bytes);
++}
++
++/// The same ceiling fx keeps for a command's own output, so a host's row is not
++/// the narrowest view of what ran.
++const embedded_tool_output_bytes = 64 * 1024;
++
++fn notifyEmbeddedTool(ctx: *AskContext, call: ToolCall, status: []const u8, result: ?ToolExecutionResult) void {
++    const callback = ctx.deps.embedded_tool orelse return;
++    // The label and the shell envelope are parsed per event, so an arena keeps
++    // one call's strings together and frees them before the next.
++    var arena_state = std.heap.ArenaAllocator.init(ctx.alloc);
++    defer arena_state.deinit();
++    const event = embeddedToolEvent(ctx, arena_state.allocator(), call, status, result);
++    callback(ctx.deps.embedded_tool_ctx, event) catch |err| {
++        debug_trace.logf("cli_ask", "embedded tool event dropped name={s} err={s}", .{ call.name, @errorName(err) });
++    };
++}
++
++/// A call as it starts, before it runs: its row appears while it works rather
++/// than only once it ends.
++fn notifyEmbeddedToolStart(ctx: *AskContext, call: ToolCall) void {
++    notifyEmbeddedTool(ctx, call, "start", null);
++}
++
+ fn captureToolExecutionError(
+     ctx: *AskContext,
+     request: agent_runtime.ToolExecutionRequest,
+     err: anyerror,
+ ) void {
++    notifyEmbeddedTool(ctx, request.call, "failed", null);
+     if (ctx.output_mode.capturesJson()) {
+         appendToolCallRecordBestEffort(
+             ctx,
+@@ -2828,6 +3126,7 @@ fn captureToolExecutionResult(
+     request: agent_runtime.ToolExecutionRequest,
+     result: ToolExecutionResult,
+ ) void {
++    notifyEmbeddedTool(ctx, request.call, if (result.status == .failure) "failed" else "completed", result);
+     if (ctx.output_mode.capturesJson()) {
+         appendToolCallRecordBestEffort(
+             ctx,
+@@ -2862,6 +3161,7 @@ fn recordToolCallRejected(
+     command_result_json: ?[]const u8,
+ ) !void {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    notifyEmbeddedTool(ctx, call, "failed", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
+     if (!ctx.output_mode.capturesJson()) return;
+     appendToolCallRecordBestEffort(
+         ctx,
+@@ -2885,6 +3185,7 @@ fn recordToolCallFailed(
+     command_result_json: ?[]const u8,
+ ) !void {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
++    notifyEmbeddedTool(ctx, call, "failed", .{ .status = .failure, .model_output = model_output, .command_result_json = command_result_json });
+     if (!ctx.output_mode.capturesJson()) return;
+     appendToolCallRecordBestEffort(
+         ctx,
+@@ -3446,6 +3747,12 @@ fn publishPendingToolProgress(ctx: *AskContext, call_id: []const u8, text: []con
+         pending.visible = true;
+         return;
+     }
++    // A host that draws rows says this itself; a plain stderr reader has only
++    // this line to go on.
++    if (ctx.deps.embedded_tool_rows) {
++        pending.visible = true;
++        return;
++    }
+     try ctx.writeStderr(text);
+     try ctx.writeStderr("\n");
+     pending.visible = true;
+@@ -3644,9 +3951,20 @@ fn formatToolExecutionError(_: *anyopaque, arena: Allocator, tool_name: []const
+     return tool_result_errors.formatToolExecutionErrorJson(arena, tool_name, err);
+ }
+ 
+-fn onCommandOutputChunk(raw_ctx: *anyopaque, _: ?types.ToolLifecycleId, _: command_output_content.Stream, chunk: []const u8) !void {
++fn onCommandOutputChunk(raw_ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId, stream: command_output_content.Stream, chunk: []const u8) !void {
+     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
+     if (ctx.output_mode.isTerminal()) return;
++    // An in-process host that takes the stream draws it as it arrives, so it
++    // gets the bytes rather than a copy on stderr.
++    if (ctx.deps.embedded_output) |sink| {
++        const call_id = if (lifecycle_id) |id| id.call_id else "";
++        sink(ctx.deps.embedded_output_ctx, call_id, stream, chunk) catch |err| {
++            debug_trace.logf("cli_ask", "embedded output chunk dropped err={s}", .{@errorName(err)});
++        };
++        return;
++    }
++    // A host that draws rows already has this output in the call's event.
++    if (ctx.deps.embedded_tool_rows) return;
+     try ctx.writeStderr(chunk);
+     if (chunk.len > 0) ctx.command_output_line_open = chunk[chunk.len - 1] != '\n';
+ }
+diff --git a/src/core/config/config_runtime.zig b/src/core/config/config_runtime.zig
+index 45a1cae04..b918bd7cf 100644
+--- a/src/core/config/config_runtime.zig
++++ b/src/core/config/config_runtime.zig
+@@ -1165,6 +1165,7 @@ pub const PermissionMutation = settings_store.PermissionMutation;
+ pub const PermissionScope = settings_store.PermissionScope;
+ pub const StatuslineItem = settings_store.StatuslineItem;
+ pub const UserSettingsPatch = settings_store.UserSettingsPatch;
++pub const ProviderDefinitionPatch = settings_store.ProviderDefinitionPatch;
+ pub const WorkspaceDirectoryMutation = settings_store.WorkspaceDirectoryMutation;
+ pub const CommitOutcome = settings_store.CommitOutcome;
+ pub const LegacyCleanup = settings_store.LegacyCleanup;
+@@ -1244,6 +1245,15 @@ pub fn setUserPreferences(
+     patch: UserSettingsPatch,
+ ) !CommitOutcome {
+     const home = io_mod.homeDir() orelse return error.HomeNotSet;
++    return setUserPreferencesAtHome(alloc, home, patch);
++}
++
++/// Embedding hosts with an explicit profile home use the same atomic store.
++pub fn setUserPreferencesAtHome(
++    alloc: Allocator,
++    home: []const u8,
++    patch: UserSettingsPatch,
++) !CommitOutcome {
+     var store = try settings_store.Store.initFromHome(alloc, home, .writable);
+     defer store.deinit(alloc);
+     return store.applyUserPatch(alloc, patch);
+diff --git a/src/core/config/settings_store.zig b/src/core/config/settings_store.zig
+index 3d0ad4316..24b576e8b 100644
+--- a/src/core/config/settings_store.zig
++++ b/src/core/config/settings_store.zig
+@@ -9,6 +9,7 @@ const compactor = @import("../compactor/compactor.zig");
+ const context_limits = @import("context_limits.zig");
+ const project_config = @import("../mcp/project_config.zig");
+ const model_provider = @import("model_provider.zig");
++const configured_provider = @import("configured_provider.zig");
+ const workspace_access = @import("../workspace/workspace_access.zig");
+ const sort_utils = @import("../shared/sort_utils.zig");
+ const update_target = @import("../upgrade/update_target.zig");
+@@ -95,9 +96,19 @@ pub const ProjectMcpMutation = struct {
+     action: project_config.ProjectMcpAction,
+ };
+ 
++pub const ProviderDefinitionPatch = union(enum) {
++    upsert: struct {
++        id: []const u8,
++        base_url: []const u8,
++        bearer_env: ?[]const u8 = null,
++    },
++    remove: []const u8,
++};
++
+ pub const UserSettingsPatch = struct {
+     model_preference: ?ModelPreferencePatch = null,
+     provider: ?model_provider.ProviderId = null,
++    provider_definition: ?ProviderDefinitionPatch = null,
+     permission_mode: ?types.PermissionMode = null,
+     credential_source: ?types.CredentialSource = null,
+     /// Removes the key entirely so resolution returns to plain precedence.
+@@ -136,6 +147,7 @@ pub const UserSettingsPatch = struct {
+     fn isEmpty(self: UserSettingsPatch) bool {
+         return self.model_preference == null and
+             self.provider == null and
++            self.provider_definition == null and
+             self.permission_mode == null and
+             self.credential_source == null and
+             !self.clear_credential_source and
+@@ -994,6 +1006,14 @@ pub fn validateProviderSlug(slug: []const u8) bool {
+ 
+ fn validateUserPatch(patch: UserSettingsPatch) !void {
+     if (patch.model_preference) |preference| try validateModel(preference.model);
++    if (patch.provider_definition) |definition| switch (definition) {
++        .upsert => |value| {
++            if (value.id.len == 0 or value.id.len > configured_provider.max_id_bytes) return error.InvalidProviderId;
++            if (value.base_url.len == 0 or value.base_url.len > 2048) return error.InvalidBaseUrl;
++            if (value.bearer_env) |name| if (name.len == 0 or name.len > 128) return error.InvalidEnvironmentName;
++        },
++        .remove => |id| if (id.len == 0 or id.len > configured_provider.max_id_bytes) return error.InvalidProviderId,
++    };
+     if (patch.theme) |theme| {
+         if (theme_mod.classifyValue(theme)) |choice| switch (choice) {
+             .pin_light, .pin_dark => {},
+@@ -1247,6 +1267,38 @@ fn applyUserPatchToRoot(
+         application.changed = try putModelPreference(arena, &root.object, preference) or application.changed;
+     }
+     if (patch.provider) |value| application.changed = try putString(arena, &root.object, "provider", value.label()) or application.changed;
++    if (patch.provider_definition) |definition| {
++        const providers_ptr = if (root.object.getPtr("providers")) |ptr| blk: {
++            if (ptr.* != .object) return error.InvalidSettingsFormat;
++            break :blk &ptr.object;
++        } else blk: {
++            try root.object.put(arena, "providers", .{ .object = .empty });
++            break :blk &root.object.getPtr("providers").?.object;
++        };
++        switch (definition) {
++            .upsert => |value| {
++                var entry: std.json.ObjectMap = .empty;
++                // The schema `configured_provider.parse_definition` reads:
++                // without `protocol` and `auth` the whole providers map fails
++                // to parse, taking every other provider down with it.
++                try entry.put(arena, "protocol", .{ .string = "openai-chat-completions" });
++                try entry.put(arena, "base_url", .{ .string = try arena.dupe(u8, value.base_url) });
++                var auth: std.json.ObjectMap = .empty;
++                if (value.bearer_env) |env| {
++                    try auth.put(arena, "type", .{ .string = "bearer" });
++                    try auth.put(arena, "env", .{ .string = try arena.dupe(u8, env) });
++                } else {
++                    try auth.put(arena, "type", .{ .string = "none" });
++                }
++                try entry.put(arena, "auth", .{ .object = auth });
++                try providers_ptr.put(arena, try arena.dupe(u8, value.id), .{ .object = entry });
++                application.changed = true;
++            },
++            .remove => |id| {
++                if (providers_ptr.swapRemove(id)) application.changed = true;
++            },
++        }
++    }
+     if (patch.permission_mode) |value| application.changed = try putString(arena, &root.object, "permission_mode", value.label()) or application.changed;
+     if (patch.credential_source) |value| application.changed = try putString(arena, &root.object, "credential_source", @tagName(value)) or application.changed;
+     if (patch.clear_credential_source and root.object.contains("credential_source")) {
+diff --git a/src/core/terminal/native_session.zig b/src/core/terminal/native_session.zig
+index c33a8e37c..f1e8ac41e 100644
+--- a/src/core/terminal/native_session.zig
++++ b/src/core/terminal/native_session.zig
+@@ -299,17 +299,35 @@ pub fn isLauncherModeRaw(raw_args: []const [*:0]const u8) bool {
+         std.mem.eql(u8, std.mem.sliceTo(raw_args[1], 0), launcher_mode);
+ }
+ 
++pub fn isLauncherMode(args: []const [:0]const u8) bool {
++    return args.len == 1 and std.mem.eql(u8, args[0], launcher_mode);
++}
++
+ pub fn isControlModeRaw(raw_args: []const [*:0]const u8) bool {
+     return raw_args.len == 5 and
+         std.mem.eql(u8, std.mem.sliceTo(raw_args[1], 0), control_mode);
+ }
+ 
++pub fn isControlMode(args: []const [:0]const u8) bool {
++    return args.len == 4 and std.mem.eql(u8, args[0], control_mode);
++}
++
+ pub fn runControlMarker(raw_args: []const [*:0]const u8) !void {
+-    if (comptime !isSupported()) return error.TerminalHostUnsupported;
+     if (!isControlModeRaw(raw_args)) return error.InvalidControlMarker;
+-    const control_path = std.mem.sliceTo(raw_args[2], 0);
+-    const nonce = std.mem.sliceTo(raw_args[3], 0);
+-    const event = std.mem.sliceTo(raw_args[4], 0);
++    return writeControlMarker(
++        std.mem.sliceTo(raw_args[2], 0),
++        std.mem.sliceTo(raw_args[3], 0),
++        std.mem.sliceTo(raw_args[4], 0),
++    );
++}
++
++pub fn runControl(args: []const [:0]const u8) !void {
++    if (!isControlMode(args)) return error.InvalidControlMarker;
++    return writeControlMarker(args[1], args[2], args[3]);
++}
++
++fn writeControlMarker(control_path: []const u8, nonce: []const u8, event: []const u8) !void {
++    if (comptime !isSupported()) return error.TerminalHostUnsupported;
+     if (nonce.len != control_nonce_len) return error.InvalidControlMarker;
+     const kind: MarkerKind =
+         if (std.mem.eql(u8, event, "shell-ready"))
+diff --git a/src/embedded.zig b/src/embedded.zig
+new file mode 100644
+index 000000000..d9ff434a0
+--- /dev/null
++++ b/src/embedded.zig
+@@ -0,0 +1,290 @@
++//! nanoterm's in-process fx entry point.
++//!
++//! This is the native Zig agent runtime: provider streaming, tools, MCP,
++//! skills, sessions, and compaction all execute in this address space.
++
++const std = @import("std");
++const cli_ask = @import("core/cli/cli_ask.zig");
++const builtin_gateway = @import("builtins/gateway.zig");
++const auth_runtime = @import("core/auth/auth_runtime.zig");
++const credentials = @import("core/auth/credentials.zig");
++const model_catalog = @import("core/gateway/model_catalog.zig");
++const io_mod = @import("core/shared/io.zig");
++const builtin_providers = @import("builtins/providers.zig");
++const builtin_context = @import("builtins/context.zig");
++const builtin_skills = @import("builtins/skills.zig");
++const builtin_modes = @import("builtins/modes.zig");
++const builtin_tools = @import("builtins/tools.zig");
++const builtin_mcp = @import("builtins/mcp.zig");
++const native_host = @import("core/hosts/native.zig");
++const shell_process_provider = @import("tools/shell/process_provider.zig");
++const command_runner = @import("core/execution/command_runner.zig");
++const terminal_native_session = @import("core/terminal/native_session.zig");
++const context_contract = @import("core/workspace/context_contract.zig");
++const agent_steps = @import("core/config/agent_steps.zig");
++const tool_result_limits = @import("core/tooling/tool_result_limits.zig");
++
++pub const Result = cli_ask.PromptRunResult;
++pub const Callbacks = cli_ask.EmbeddedCallbacks;
++pub const ToolEvent = cli_ask.EmbeddedToolEvent;
++pub const PermissionRequest = cli_ask.EmbeddedPermissionRequest;
++pub const PermissionAnswer = cli_ask.EmbeddedPermissionAnswer;
++pub const OutputStream = @import("core/tooling/command_output_content.zig").Stream;
++pub const Config = cli_ask.Config;
++pub const ImageAttachment = cli_ask.ImageAttachment;
++pub const mcp_config = @import("core/mcp_host/config_file.zig");
++pub const skills = builtin_skills;
++pub const provider_settings = @import("core/config/config_runtime.zig");
++pub const model_provider = @import("core/config/model_provider.zig");
++pub const shared_io = @import("core/shared/io.zig");
++pub const ExtraStdioServer = builtin_mcp.ExtraStdioServer;
++
++/// The MCP host a session loads, for the host's tests: they check that it
++/// keeps every server in the session (`Runtime.shared == null`), as this
++/// binary has no MCP owner mode to share servers through.
++pub const mcp_host = struct {
++    pub const load = builtin_mcp.loadHostWithExtra;
++};
++
++/// The tool names one configured MCP server offers, for hosts that list them
++/// outside a model turn. `deinit` frees everything.
++pub const McpToolList = struct {
++    names: [][]u8 = &.{},
++    /// Why there are no names, when the server could not be asked.
++    note: ?[]u8 = null,
++
++    pub fn deinit(self: *McpToolList, alloc: std.mem.Allocator) void {
++        for (self.names) |name| alloc.free(name);
++        if (self.names.len > 0) alloc.free(self.names);
++        if (self.note) |text| alloc.free(text);
++        self.* = .{};
++    }
++};
++
++/// Lists `server`'s tools from the profile config at `config_path`. This runs
++/// the server over MCP and blocks; call it off the UI thread and hand it a
++/// cancel flag.
++pub fn listMcpTools(
++    alloc: std.mem.Allocator,
++    home: []const u8,
++    config_path: []const u8,
++    workspace_root: []const u8,
++    server: []const u8,
++    cancel: ?*const std.atomic.Value(bool),
++) !McpToolList {
++    var configs = try builtin_mcp.readProfile(alloc, config_path, null);
++    defer {
++        for (configs.items) |*entry| entry.deinit(alloc);
++        configs.deinit(alloc);
++    }
++
++    var environ = try shared_io.cloneEnvironMap(alloc);
++    defer environ.deinit();
++
++    var runtime: @import("core/mcp_host/runtime.zig").Runtime = undefined;
++    try runtime.start(alloc, shared_io.getIo(), configs.items, &environ, .{
++        .client_version = "nanoterm",
++        .credentials = .{ .detect = home },
++        .workspace_root = workspace_root,
++    });
++    defer runtime.deinit();
++
++    const result = runtime.tools(alloc, server, cancel) catch |err| {
++        return .{ .note = try alloc.dupe(u8, @errorName(err)) };
++    };
++    switch (result) {
++        .tools => |tools| {
++            var list: McpToolList = .{};
++            errdefer list.deinit(alloc);
++            list.names = try alloc.alloc([]u8, tools.len);
++            @memset(list.names, &.{});
++            for (tools, 0..) |tool, i| list.names[i] = try alloc.dupe(u8, tool.name);
++            for (tools) |tool| {
++                alloc.free(tool.name);
++                alloc.free(tool.raw);
++            }
++            alloc.free(tools);
++            return list;
++        },
++        .needs_login => return .{ .note = try alloc.dupe(u8, "the server needs sign-in") },
++        .failed => |text| {
++            defer alloc.free(text);
++            return .{ .note = try alloc.dupe(u8, text) };
++        },
++        .unknown_server => return .{ .note = try alloc.dupe(u8, "server not found") },
++    }
++}
++
++/// The model ids one provider offers. `deinit` frees everything.
++pub const ProviderModelList = struct {
++    ids: [][]u8 = &.{},
++    /// Why there are no ids, when the provider's catalog could not be read.
++    note: ?[]u8 = null,
++    /// That note is the provider asking to be signed in to: a state to show,
++    /// not a failure.
++    needs_sign_in: bool = false,
++
++    pub fn deinit(self: *ProviderModelList, alloc: std.mem.Allocator) void {
++        for (self.ids) |id| alloc.free(id);
++        if (self.ids.len > 0) alloc.free(self.ids);
++        if (self.note) |text| alloc.free(text);
++        self.* = .{};
++    }
++};
++
++/// Lists the models `provider` offers, as fx resolves them for itself: the
++/// Gateway's catalog (public, or private when a key is signed in), or a
++/// subscription's own list (Codex, Grok), whose credential fx reads from the
++/// profile. This blocks on the network and on the profile's credentials; call
++/// it off the UI thread and hand it a cancel flag.
++pub fn listProviderModels(
++    alloc: std.mem.Allocator,
++    provider: model_provider.ProviderId,
++    cancel: ?*std.atomic.Value(bool),
++) !ProviderModelList {
++    const cfg = config();
++    const catalog_provider = cfg.provider_set.select(provider).model_catalog orelse
++        return .{ .note = try alloc.dupe(u8, "this provider has no model list") };
++    // The Gateway answers without a credential; Codex and Grok do not, so a
++    // profile without one asks anyway and hears what fx says about it.
++    var credential = auth_runtime.prepareCredential(
++        alloc,
++        cfg.gateway_provider.oauth_transport,
++        cfg.secret_store,
++        provider,
++        null,
++    ) catch |err| switch (err) {
++        error.OutOfMemory => return error.OutOfMemory,
++        else => null,
++    };
++    defer if (credential) |*value| value.deinit(alloc);
++    const access = if (credential) |*value|
++        credentials.catalogAccessAt(value.*, io_mod.milliTimestamp())
++    else
++        credentials.CatalogAccess{ .public_only = .no_credential };
++    var fallback_cancel = std.atomic.Value(bool).init(false);
++    const result = model_catalog.fetchWithPublicFallback(catalog_provider, alloc, .{
++        .access = access,
++        .endpoint = if (provider == .gateway) cfg.gateway_models_path else "",
++        .cancel_flag = cancel orelse &fallback_cancel,
++        .view = .picker,
++    });
++    switch (result) {
++        .loaded => |loaded| {
++            var catalog = loaded.catalog;
++            defer model_catalog.freeModelCatalog(alloc, &catalog);
++            var ids = model_catalog.projectModelIds(alloc, catalog.items) catch |err| switch (err) {
++                error.OutOfMemory => return error.OutOfMemory,
++            };
++            return .{ .ids = try ids.toOwnedSlice(alloc) };
++        },
++        .failed => |failed| return .{
++            .note = try alloc.dupe(u8, catalogFailurePhrase(failed.failure.category)),
++            .needs_sign_in = failed.failure.category == .authentication,
++        },
++    }
++}
++
++/// Why a provider's catalog could not be read, in fx's own words: what the
++/// host shows about that provider, rather than an internal error name.
++fn catalogFailurePhrase(category: model_catalog.FailureCategory) []const u8 {
++    return switch (category) {
++        .authentication => "not signed in",
++        .rate_limited => "rate limited by the provider",
++        .gateway_unavailable => "the gateway is unavailable",
++        .cancellation => "the listing was cancelled",
++        .transport => "the network could not reach it",
++        .malformed_response => "its answer could not be read",
++        .http_status => "it answered with an error",
++        .resource_exhausted => "out of memory",
++        .runtime => "fx could not read it",
++    };
++}
++
++/// Handles fx's private re-execution entrypoints inside the host executable.
++/// Returns false for nanoterm's ordinary UI and CLI arguments.
++pub fn runInternal(init: std.process.Init) !bool {
++    const args = try init.minimal.args.toSlice(init.arena.allocator());
++    const cli_args = if (args.len > 0) args[1..] else args;
++    const terminal_mode = if (comptime terminal_native_session.isSupported())
++        terminal_native_session.isControlMode(cli_args) or terminal_native_session.isLauncherMode(cli_args)
++    else
++        false;
++    if (!terminal_mode and !command_runner.isForegroundSessionInvocation(cli_args)) return false;
++
++    shared_io.setIo(init.io);
++    shared_io.setEnvironMap(init.environ_map);
++    if (comptime terminal_native_session.isSupported()) {
++        if (terminal_native_session.isControlMode(cli_args)) {
++            try terminal_native_session.runControl(cli_args);
++            return true;
++        }
++        if (terminal_native_session.isLauncherMode(cli_args)) {
++            try terminal_native_session.runLauncher(init.gpa);
++            return true;
++        }
++    }
++    try command_runner.runForegroundSessionBootstrap(cli_args);
++    return true;
++}
++
++const ignored_list_entries = [_][]const u8{
++    ".git", ".zig-cache", "zig-out", "node_modules", ".next", "dist", "build", "coverage",
++};
++
++pub fn config() Config {
++    return .{
++        .command_usage = "nanoterm fx",
++        .default_model = builtin_gateway.default_model,
++        .default_agent_step_limit = agent_steps.default_max_agent_steps,
++        .gateway_retry_count = builtin_gateway.retry_count,
++        .gateway_chat_url = builtin_gateway.default_chat_url,
++        .gateway_models_path = builtin_gateway.models_path,
++        .gateway_provider = builtin_gateway.provider,
++        .provider_set = builtin_providers.native,
++        .process_provider = shell_process_provider.provider,
++        .secret_store = native_host.secret_store,
++        .prompt_policy = builtin_context.prompt_policy,
++        .skill_root_policy = builtin_skills.root_policy,
++        .ignored_list_entries = &ignored_list_entries,
++        .max_list_entries = 100,
++        .max_read_file_bytes = 50 * 1024,
++        .max_read_file_lines = 400,
++        .max_read_file_line_len = 2000,
++        .max_command_output_bytes = 64 * 1024,
++        .max_tool_result_bytes = tool_result_limits.default_max_tool_result_bytes,
++        .max_history_turns = 8,
++        .mode_registry = builtin_modes.registry,
++        .load_mcp_host = builtin_mcp.loadHost,
++    };
++}
++
++pub fn run(
++    alloc: std.mem.Allocator,
++    prompt: []const u8,
++    workspace_root: []const u8,
++    session_id: ?[]const u8,
++    model: ?[]const u8,
++    images: []const ImageAttachment,
++    cancel_flag: *std.atomic.Value(bool),
++    callbacks: Callbacks,
++    extra_mcp: ?ExtraStdioServer,
++) !Result {
++    return cli_ask.runEmbedded(
++        alloc,
++        prompt,
++        // Null leaves the profile's own permission mode in charge: the host
++        // shows that mode in its settings, so the run has to follow it.
++        null,
++        config(),
++        .{ .default_provider = builtin_context.provider },
++        builtin_tools.advertisement_set,
++        if (session_id) |id| .{ .id = id } else null,
++        model,
++        workspace_root,
++        images,
++        cancel_flag,
++        callbacks,
++        extra_mcp,
++    );
++}
+diff --git a/src/gateway/chat_completions_protocol.zig b/src/gateway/chat_completions_protocol.zig
+index df41b8787..bf21e97f1 100644
+--- a/src/gateway/chat_completions_protocol.zig
++++ b/src/gateway/chat_completions_protocol.zig
+@@ -691,7 +691,26 @@ pub const Reducer = struct {
+         }
+         if (non_null(delta, "role")) |role| if (!std.mem.eql(u8, try string(role), "assistant")) return error.InvalidChunk;
+         // These fields carry semantics outside this codec's text/function subset.
+-        for ([_][]const u8{ "function_call", "audio" }) |key| if (non_null(delta, key) != null) return error.InvalidChunk;
++        // Allow them if they're present but empty (some providers send them in the final chunk).
++        for ([_][]const u8{ "function_call", "audio" }) |key| {
++            if (non_null(delta, key)) |value| {
++                // Allow empty objects or null values, reject non-empty ones
++                if (value == .object and value.object.count() > 0) {
++                    // Check if all values in the object are empty strings or null
++                    var all_empty = true;
++                    var it = value.object.iterator();
++                    while (it.next()) |entry| {
++                        if (entry.value_ptr.* != .string or entry.value_ptr.*.string.len != 0) {
++                            if (entry.value_ptr.* != .null) {
++                                all_empty = false;
++                                break;
++                            }
++                        }
++                    }
++                    if (!all_empty) return error.InvalidChunk;
++                }
++            }
++        }
+         const reasoning_delta = try self.accept_reasoning(delta);
+         const content_start = self.content.items.len;
+         if (non_null(delta, "content")) |value| try append_bounded(self.alloc, &self.content, try string(value), self.limits.content_bytes, error.ContentTooLarge);
+@@ -1032,7 +1051,25 @@ pub fn consume_stream(alloc: Allocator, source: *std.Io.Reader, request: stream_
+             else => return err,
+         };
+         const chunk = data orelse return error.IncompleteStream;
+-        const deltas = try reducer.accept(chunk, cancel_flag.load(.seq_cst));
++        const deltas = reducer.accept(chunk, cancel_flag.load(.seq_cst)) catch |err| {
++            // If we already have content and hit an InvalidChunk error,
++            // return what we have instead of failing completely
++            if (reducer.content.items.len > 0 and err == error.InvalidChunk) {
++                // Return a completed result with the content we have
++                return .{
++                    .completed = .{
++                        .completion = .{
++                            .content = try alloc.dupe(u8, reducer.content.items),
++                            .finish_reason = reducer.finish_reason orelse .stop,
++                            .tool_calls = &.{},
++                            .usage = reducer.usage,
++                        },
++                        .ownership = .owned,
++                    },
++                };
++            }
++            return err;
++        };
+         if (events) |sink| {
+             for (deltas.reasoning) |delta| if (delta) |text| {
+                 if (cancel_flag.load(.seq_cst)) return error.Cancelled;

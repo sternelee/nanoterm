@@ -83,10 +83,10 @@ pub fn payload(gpa: std.mem.Allocator, version: []const u8, install_id: []const 
 
 test "an event is what it says and no more; nothing without consent" {
     const gpa = std.testing.allocator;
-    const body = try payload(gpa, "0.1.14", "abc", "agent_prompt", .{ .agent = "graff" });
+    const body = try payload(gpa, "0.1.14", "abc", "agent_prompt", .{ .agent = "agent" });
     defer gpa.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"event\":\"agent_prompt\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"props\":{\"agent\":\"graff\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"props\":{\"agent\":\"agent\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"install_id\":\"abc\"") != null);
 
     var arena: std.heap.ArenaAllocator = .init(gpa);

@@ -14,11 +14,10 @@ const complete = @import("complete.zig");
 const attach = @import("attach.zig");
 pub const Commands = @import("commands.zig").Commands;
 pub const History = @import("history.zig").History;
-pub const Jev = @import("jev.zig").Jev;
-pub const Catalog = @import("catalog.zig").Catalog;
 const visual_host = @import("visual_host.zig");
 const ssh = @import("ssh.zig");
 const helpers = @import("session_agent.zig");
+const theme = @import("theme.zig");
 pub const Log = @import("session_log.zig").Log;
 
 pub const Appearance = enum { system, dark, light };
@@ -49,14 +48,16 @@ pub const Shared = struct {
     commands: Commands,
     /// The commands run, in every pane.
     history: History,
-    jev: Jev,
-    /// graff's models, read when the picker first opens.
-    catalog: Catalog,
-    /// graff's saved model ("provider\nmodel"), shown until a session says.
-    graff_model: []const u8 = "",
+    /// Native agent provider, MCP and Skills management for Settings.
+    agent_store: ?*@import("agent_settings.zig").Store = null,
     /// Where agents' visuals come in (show_visual), and this program, which
     /// is their MCP server too.
     visuals: ?*visual_host.Host = null,
+    /// The phone's relay (--relay), when one was started: what it shows,
+    /// and the commands it sends back.
+    relay: ?*@import("relay.zig").Hub = null,
+    /// Every session made, so a relay started later finds them all.
+    sessions: std.ArrayList(*Session) = .empty,
     exe: []const u8 = "",
     /// The conversations had, this run and before (the palette's history).
     log: Log,
@@ -67,8 +68,11 @@ pub const Shared = struct {
     appearance_path: []const u8 = "",
     /// The hosts of ~/.ssh/config, for the palette.
     ssh_hosts: []const []const u8 = &.{},
-    /// Settings (⌘,): the default agent, text size, Codegraff account.
+    /// Settings (⌘,): the default agent, text size, built-in Agent configuration.
     prefs: @import("settings.zig").Prefs,
+    /// The font families Settings offers for the terminal, loaded when it
+    /// opens; the system's and the installed terminal and Nerd families.
+    fonts: @import("fonts.zig").Registry = .{},
 
     /// Call `wire` once the value is at its final address.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, env: *std.process.Environ.Map) !Shared {
@@ -87,8 +91,6 @@ pub const Shared = struct {
             .zdotdir = try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "zsh" }),
             .commands = .init(gpa),
             .history = .{ .gpa = gpa },
-            .jev = .init(gpa, io, env),
-            .catalog = .{ .gpa = gpa },
             .log = .{ .gpa = gpa },
             .pictures = .{ .gpa = gpa, .io = io, .home = home, .fetch = true },
             .prefs = .init(gpa, io, arena, home, env),
@@ -100,40 +102,78 @@ pub const Shared = struct {
         } else |_| {}
         s.commands.scan(io, env.get("PATH") orelse "");
         s.history.load(io, try std.fs.path.join(arena, &.{ home, ".zsh_history" }), try std.fs.path.join(arena, &.{ home, "Library", "Application Support", "nanoterm", "history" }));
-        s.graff_model = graffModel(arena, io, home);
+        s.agent_store = gpa.create(@import("agent_settings.zig").Store) catch null;
+        if (s.agent_store) |store| store.* = @import("agent_settings.zig").Store.init(gpa, io, home, env) catch {
+            gpa.destroy(store);
+            s.agent_store = null;
+            return s;
+        };
         s.exe = std.process.executablePathAlloc(io, arena) catch "";
         s.ssh_hosts = ssh.hosts(arena, io, home);
         s.visuals = visual_host.Host.create(gpa, io, env.get("TMPDIR") orelse "/tmp") catch null;
+        theme.mono_font = if (s.prefs.terminal_font.len == 0) null else s.prefs.terminal_font;
         return s;
     }
 
     /// Points callbacks at the Shared where it now lives.
     pub fn wire(s: *Shared) void {
         @import("view_markdown.zig").pictures = &s.pictures;
-        s.jev.changed = .{ .ctx = s, .func = redrawCtx };
-        s.catalog.changed = .{ .ctx = s, .func = redrawCtx };
         s.pictures.changed = .{ .ctx = s, .func = redrawCtx };
-        s.prefs.account.changed = .{ .ctx = s, .func = redrawCtx };
-        s.prefs.graff.changed = .{ .ctx = s, .func = redrawCtx };
-        s.prefs.account.key_changed = .{ .ctx = &s.jev, .func = @import("jev.zig").Jev.setKey };
-        s.prefs.account.load();
+        // Sign-in state and model lists land off the frame; repaint then.
+        if (s.agent_store) |store| store.changed = .{ .ctx = s, .func = redrawCtx };
     }
 
     pub fn deinit(s: *Shared) void {
+        if (s.relay) |h| h.destroy();
+        s.sessions.deinit(s.gpa);
         if (s.visuals) |h| h.destroy();
         s.log.deinit();
         s.pictures.deinit();
         if (@import("view_markdown.zig").pictures == &s.pictures) @import("view_markdown.zig").pictures = null;
         s.commands.deinit();
         s.history.deinit();
-        s.jev.deinit();
-        s.catalog.deinit();
+        if (s.agent_store) |store| {
+            store.deinit();
+            s.gpa.destroy(store);
+        }
+        s.fonts.deinit(s.gpa);
         s.prefs.deinit();
     }
 
     fn redrawCtx(ctx: *anyopaque) void {
         const s: *Shared = @ptrCast(@alignCast(ctx));
         s.redraw();
+    }
+
+    /// Turns the relay on for a phone — over the LAN or over Tailscale —
+    /// or off. A relay already running keeps its sessions and its token,
+    /// and only listens somewhere else.
+    pub fn setRelay(s: *Shared, mode: @import("settings.zig").Relay, port: u16) !void {
+        const hub = @import("relay.zig");
+        if (mode == .off) {
+            if (s.relay) |h| h.destroy();
+            s.relay = null;
+            return;
+        }
+        const token_path = hub.Hub.tokenPath(s.gpa, s.home);
+        defer s.gpa.free(token_path);
+        const options: hub.Options = .{
+            .port = port,
+            .mode = if (mode == .lan) .lan else .tailscale,
+            .token = s.env.get("NANOTERM_RELAY_TOKEN") orelse "",
+            .token_path = token_path,
+        };
+        if (s.relay) |h| {
+            h.rebind(s.io, options) catch |err| {
+                std.log.err("nanoterm: the relay cannot listen on port {d}: {s}", .{ port, @errorName(err) });
+                return error.ListenFailed;
+            };
+        } else {
+            const h = try hub.Hub.create(s.gpa, s.io, options);
+            for (s.sessions.items) |sess| h.attach(sess);
+            s.relay = h;
+        }
+        std.log.info("nanoterm: relay on port {d}, token {s}", .{ port, hub.Hub.tokenHex(s.relay.?) });
     }
 
     pub fn redraw(s: *Shared) void {
@@ -148,25 +188,7 @@ pub const Shared = struct {
         std.Io.Dir.cwd().writeFile(s.io, .{ .sub_path = s.appearance_path, .data = @tagName(a) }) catch {};
         s.redraw();
     }
-
-    /// Starts reading graff's catalog, for the model picker.
-    pub fn loadCatalog(s: *Shared) void {
-        const graff = proc.which(s.arena, s.io, s.env.get("PATH") orelse "", "graff") orelse {
-            s.catalog.state = .failed;
-            return;
-        };
-        s.catalog.load(s.arena, graff, proc.cStrings(s.arena, s.env_list) catch return);
-    }
 };
-
-/// graff's saved model, read (never written): "model" of "provider\nmodel".
-fn graffModel(arena: std.mem.Allocator, io: std.Io, home: []const u8) []const u8 {
-    const path = std.fs.path.join(arena, &.{ home, ".simple-harness-model" }) catch return "";
-    const data = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4096)) catch return "";
-    var lines = std.mem.tokenizeAny(u8, data, "\r\n");
-    _ = lines.next();
-    return std.mem.trim(u8, lines.next() orelse "", " ");
-}
 
 pub const Session = struct {
     id: u64,
@@ -177,7 +199,7 @@ pub const Session = struct {
     home: []const u8,
     shell: shell_mod.Shell,
     agent: ?*agent_mod.Agent = null,
-    which: agent_mod.Which = .graff,
+    which: agent_mod.Which = .agent,
     /// Every block made, owned here; the timeline and turns point to them.
     all_blocks: std.ArrayList(*blocks.Block) = .empty,
     timeline: std.ArrayList(Entry) = .empty,
@@ -193,11 +215,18 @@ pub const Session = struct {
     history_pos: ?usize = null,
     /// The completion menu of the input.
     menu: complete.Menu,
-    /// graff's model for its next start (`--model`).
+    /// The mention's index of the working folder's files (complete.zig).
+    files: complete.Files,
+    /// agent's model for its next start (`--model`).
     model_choice: ?[]u8 = null,
+    /// A /compact asked for a handoff; the next finished turn carries it
+    /// into a fresh session (agent_fx.carry).
+    compact_pending: bool = false,
     selected: ?u64 = null,
     next_id: u64 = 1,
     shell_exited: bool = false,
+    /// An fx login or logout is running: its exit re-checks the state.
+    sign_in_pending: bool = false,
     branch: [128]u8 = undefined,
     branch_len: usize = 0,
     branch_for: std.ArrayList(u8) = .empty,
@@ -244,17 +273,31 @@ pub const Session = struct {
             .io = shared.io,
             .arena = shared.arena,
             .home = shared.home,
-            .shell = .init(gpa, .{ .ctx = a, .changed = changed, .exited = shellExited }),
+            .shell = .init(gpa, .{ .ctx = a, .changed = changed, .exited = shellExited, .command_finished = commandFinished }),
             .menu = .init(gpa),
+            .files = .init(gpa),
             .attachments = .{ .gpa = gpa, .uploads = std.fs.path.join(shared.arena, &.{ shared.home, "Library", "Application Support", "nanoterm", "uploads" }) catch "" },
             .which = shared.prefs.agent,
+            .model_choice = if (shared.prefs.model.len > 0) gpa.dupe(u8, shared.prefs.model) catch null else null,
         };
         shared.next_session += 1;
+        shared.sessions.append(gpa, a) catch {};
         a.startShell(cwd_) catch |err| {
             std.log.err("nanoterm: the shell did not start: {s}", .{@errorName(err)});
             a.shell_exited = true;
         };
+        if (shared.relay) |h| h.attach(a);
         return a;
+    }
+
+    fn removeSession(shared: *Shared, s: *Session) void {
+        var i: usize = 0;
+        while (i < shared.sessions.items.len) : (i += 1) {
+            if (shared.sessions.items[i] == s) {
+                _ = shared.sessions.swapRemove(i);
+                return;
+            }
+        }
     }
 
     pub fn destroy(a: *Session) void {
@@ -263,14 +306,19 @@ pub const Session = struct {
     }
 
     fn deinit(a: *Session) void {
+        // Before the blocks and turns it holds go: the relay forgets them.
+        if (a.shared.relay) |h| h.detach(a);
+        removeSession(a.shared, a);
         if (a.agent) |ag| ag.destroy();
         for (a.retired.items) |ag| ag.destroy();
         a.retired.deinit(a.gpa);
+        a.input.deinit();
         a.shell.deinit();
         for (a.all_blocks.items) |b| b.destroy(a.gpa);
         a.all_blocks.deinit(a.gpa);
         a.timeline.deinit(a.gpa);
         a.menu.deinit();
+        a.files.deinit();
         a.attachments.deinit();
         if (a.model_choice) |m| a.gpa.free(m);
         a.branch_for.deinit(a.gpa);
@@ -302,6 +350,8 @@ pub const Session = struct {
     pub fn changed(ctx: *anyopaque) void {
         const a: *Session = @ptrCast(@alignCast(ctx));
         a.pump();
+        // A phone watching this tab hears of it, at most once a frame.
+        if (a.shared.relay) |h| h.touched(a);
         a.shared.redraw();
     }
 
@@ -321,7 +371,29 @@ pub const Session = struct {
     fn shellExited(ctx: *anyopaque, _: i32) void {
         const a: *Session = @ptrCast(@alignCast(ctx));
         a.shell_exited = true;
+        a.checkSignIn();
         changed(a);
+    }
+
+    /// A command block ended while the shell lives on: if it was an fx
+    /// sign-in, the state is checked again with it.
+    fn commandFinished(ctx: *anyopaque, _: i32) void {
+        checkSignIn(@ptrCast(@alignCast(ctx)));
+    }
+
+    /// A command that changes what fx is signed in to: the next exit checks
+    /// the state again, and with it the providers' model lists.
+    pub fn watchSignIn(a: *Session, command: []const u8) void {
+        if (std.mem.startsWith(u8, command, "fx login") or std.mem.startsWith(u8, command, "fx logout") or std.mem.startsWith(u8, command, "fx setup")) a.sign_in_pending = true;
+    }
+
+    fn checkSignIn(a: *Session) void {
+        if (!a.sign_in_pending) return;
+        a.sign_in_pending = false;
+        const store = a.shared.agent_store orelse return;
+        for (store.providers.items) |*provider| provider.models_tried = false;
+        store.signed_checked = false;
+        store.refreshSignIn(a.shared.env.get("PATH") orelse "/usr/bin:/bin");
     }
 
     pub fn cwd(a: *Session) []const u8 {
@@ -361,7 +433,7 @@ pub const Session = struct {
     }
 
     /// Where what is typed goes: the program running, else the mode chosen,
-    /// else what the classifier (or Jev) made of it.
+    /// else what the classifier made of it.
     pub fn mode(a: *const Session) Mode {
         if (!a.shared.prefs.agents) return .terminal;
         // On an SSH host, commands unless clearly a request (its programs
@@ -377,14 +449,7 @@ pub const Session = struct {
         if (a.lock) |m| return m;
         // Pictures are for the agent.
         if (a.attachments.items.items.len > 0) return .agent;
-        // A reply to the agent stays with it; Jev reads the text alone.
-        if (!(a.followUp() and a.guess.kind == .agent)) if (a.shared.jev.answer(a.input.text())) |k| return if (k == .agent) .agent else .terminal;
         return if (a.guess.kind == .agent) .agent else .terminal;
-    }
-
-    /// Whether Jev decided the mode of what is typed.
-    pub fn decidedByJev(a: *const Session) bool {
-        return a.lock == null and !a.shell.busy() and !(a.followUp() and a.guess.kind == .agent) and a.shared.jev.answer(a.input.text()) != null;
     }
 
     /// The agent answered last: a reply is likelier a follow-up.
@@ -393,8 +458,8 @@ pub const Session = struct {
         return items.len > 0 and items[items.len - 1] == .turn;
     }
 
-    /// Classifies the input when it changed; asks Jev when the rules are
-    /// not sure, and starts the agent early when it is wanted.
+    /// Classifies the input when it changed with local rules, and starts
+    /// the agent early when it is wanted.
     pub fn observe(a: *Session) void {
         const text = a.input.text();
         const h = std.hash.Wyhash.hash(0, text);
@@ -402,7 +467,6 @@ pub const Session = struct {
         a.guessed = h;
         a.guess = classify.guess(text, &a.shared.commands, a.followUp());
         if (a.lock != null or a.shell.busy()) return;
-        if (a.shared.prefs.agents and !a.guess.sure and std.mem.indexOfScalar(u8, std.mem.trim(u8, text, " "), ' ') != null) a.shared.jev.ask(text, .{ .installed = a.shared.commands.has(classify.firstWord(text)), .follow_up = a.followUp() });
         // Ready before Return is pressed.
         if (a.mode() == .agent and a.guess.sure and a.agent == null) _ = a.ensureAgent();
     }
@@ -450,6 +514,7 @@ pub const Session = struct {
             return;
         }
         if (std.mem.eql(u8, command, "clear")) return a.clear();
+        a.watchSignIn(command);
         const b = a.newBlock(.shell, command, a.cwd()) orelse return;
         a.timeline.append(a.gpa, .{ .block = b }) catch return;
         a.pinLast();
@@ -473,6 +538,7 @@ pub const Session = struct {
 
     /// A prompt whose turn shows `title` (a short line) instead of `text`.
     pub fn askAs(a: *Session, heading: ?[]const u8, text: []const u8) void {
+        a.retireStopped();
         const ag = a.ensureAgent() orelse return;
         // On an SSH host: the agent works there, and is told so.
         a.syncRemote(ag);
@@ -498,7 +564,7 @@ pub const Session = struct {
     pub const offerVisuals = helpers.offerVisuals;
     const syncRemote = helpers.syncRemote;
 
-    fn pinLast(a: *Session) void {
+    pub fn pinLast(a: *Session) void {
         a.pin = a.timeline.items.len - 1;
         a.pin_jump = 2;
     }
@@ -553,18 +619,38 @@ pub const Session = struct {
         }
     }
 
+    /// A prompt is a reason to start again: one that stopped or never began
+    /// cannot answer, so it is retired and the prompt opens a fresh one.
+    fn retireStopped(a: *Session) void {
+        const ag = a.agent orelse return;
+        if (ag.status != .failed and ag.status != .off) return;
+        a.retired.append(a.gpa, ag) catch ag.destroy();
+        a.agent = null;
+    }
+
     pub fn ensureAgent(a: *Session) ?*agent_mod.Agent {
         if (a.agent) |ag| return ag;
         const ag = agent_mod.Agent.create(a.gpa, a.io, .{ .ctx = a, .changed = changed, .newBlock = agentBlock, .finished = finished }, a.which, a.cwd()) catch return null;
         ag.env = a.shared.env_list;
         a.agent = ag;
         a.offerVisuals(ag);
-        const argv = @import("agent_launch.zig").argv(a.arena, a.io, a.shared.env, a.which, a.model_choice) catch {
-            ag.status = .failed;
-            ag.error_text = std.fmt.allocPrint(a.gpa, "{s} is not installed", .{a.which.label()}) catch null;
-            return ag;
-        };
-        ag.start(argv, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
+        if (a.model_choice) |m| {
+            if (a.which != .agent and a.which != .pi) ag.setPendingModel(m);
+        }
+        if (a.which == .agent) {
+            ag.startNative(a.cwd(), a.model_choice) catch |err| {
+                ag.status = .failed;
+                ag.error_text = std.fmt.allocPrint(a.gpa, "could not start built-in Agent: {s}", .{@errorName(err)}) catch null;
+                return ag;
+            };
+        } else {
+            const argv = @import("agent_launch.zig").argv(a.arena, a.io, a.shared.env, a.which, a.model_choice) catch {
+                ag.status = .failed;
+                ag.error_text = std.fmt.allocPrint(a.gpa, "{s} is not installed", .{a.which.label()}) catch null;
+                return ag;
+            };
+            ag.start(argv, proc.cStrings(a.arena, a.shared.env_list) catch return ag) catch {};
+        }
         return ag;
     }
 };

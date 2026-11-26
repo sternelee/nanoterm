@@ -12,7 +12,6 @@ const proc = @import("proc.zig");
 const view = @import("view.zig");
 const theme = @import("theme.zig");
 
-
 const fake_agent =
     \\import json, sys, time
     \\def send(m): sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
@@ -67,7 +66,7 @@ test "an answer streaming in, drawn after every chunk" {
         fn f(_: *anyopaque, _: []const u8, _: []const u8) ?*@import("blocks.zig").Block {
             return null;
         }
-    }.f }, .graff, home);
+    }.f }, .claude, home);
     s.agent = ag;
     try ag.start(try proc.cStrings(arena, &.{ "/usr/bin/python3", "-I", home ++ "/agent.py" }), try proc.cStrings(arena, &.{"PATH=/usr/bin:/bin"}));
 

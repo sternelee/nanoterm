@@ -1,5 +1,5 @@
 //! The first launch: three choices before anything else. How to start
-//! (sign in with Codegraff; connect your own agents; or just the
+//! (built-in Agent; connect your own ACP agents; or just the
 //! terminal), the input's keys (standard,
 //! Emacs, Vim), and whether to share anonymous usage analytics, under
 //! Standard Harness's privacy policy. Each can be changed in Settings.
@@ -68,22 +68,11 @@ fn footer(c: *ui.Context) ui.Div {
 
 fn start(c: *ui.Context, w: *Workspace) void {
     title(c, "Welcome to nanoterm", "Commands and questions in one input: it runs commands in blocks, and hands questions to a coding agent. How would you like to start?");
-    const a = &w.shared.prefs.account;
-    switch (a.state) {
-        .signed_out => if (choice(c, "ob-signin", "sparkles", "Sign in with Codegraff", "New Google sign-ups get $1 of free credit. One sign-in for graff's models, Codegraff's credits, and Jev telling commands from questions.", true, false)) a.signIn(),
-        .starting, .waiting => {
-            const b = ui.div(c).column().wFull().gap(8).p(14).rounded(12).bg(theme.accent.alpha(0.08)).border(theme.accent);
-            defer b.end();
-            ui.text(c, "Approve the sign-in in your browser", .{ .size = 14, .weight = .semibold });
-            if (a.code) |code| ui.text(c, c.print("Your code: {s}", .{code}), .{ .size = 13, .mono = true, .color = theme.muted });
-            const r = ui.div(c).row().gap(8);
-            defer r.end();
-            if (ui.button(c, "Open again", .{ .size = 12 }).clicked) if (a.url) |u| a.open(u);
-            if (ui.button(c, "Cancel", .{ .variant = .ghost, .size = 12 }).clicked) a.cancel();
-        },
-        .signed_in => _ = choice(c, "ob-signed", "person.crop.circle.fill.badge.checkmark", c.print("Signed in{s}{s}", .{ if (a.email != null) " as " else "", a.email orelse "" }), "graff and Jev use this sign-in too.", false, true),
+    if (choice(c, "ob-agent", "sparkles", "Use built-in Agent", "Agent is ready. Configure providers, MCP servers and Skills in Settings.", true, false)) {
+        w.shared.prefs.setAgents(true);
+        w.shared.prefs.setAgent(.agent);
+        w.onboarding = .keys;
     }
-    if (a.failure) |why| ui.text(c, why, .{ .size = 12, .color = theme.failure, .wrap = true });
     if (choice(c, "ob-agents", "cpu", "Connect your own agents", "Claude Code, Codex, opencode, Grok and others, with your own subscriptions.", false, false)) {
         w.shared.prefs.refresh(w.shared.env);
         w.shared.prefs.setAgents(true);
@@ -92,11 +81,6 @@ fn start(c: *ui.Context, w: *Workspace) void {
     if (choice(c, "ob-plain", "terminal", "Just the terminal", if (@import("binds.zig").mac) "Agents off: everything typed runs, nothing is sent anywhere. Turn them on any time in Settings (⌘,)." else "Agents off: everything typed runs, nothing is sent anywhere. Turn them on any time in Settings (Ctrl+,).", false, false)) {
         w.shared.prefs.setAgents(false);
         w.onboarding = .keys;
-    }
-    if (a.state == .signed_in) {
-        const f = footer(c);
-        defer f.end();
-        if (ui.button(c, "Continue", .{ .variant = .primary, .size = 13 }).clicked) w.onboarding = .keys;
     }
 }
 
@@ -176,7 +160,7 @@ fn finish(w: *Workspace, share: @import("settings.zig").Analytics) void {
     const p = &w.shared.prefs;
     p.setAnalytics(share, w.shared.io);
     p.finishOnboarding();
-    p.track("onboarding_done", .{ .signed_in = p.account.state == .signed_in, .keys = @tagName(p.keys), .agent = @tagName(p.agent) });
+    p.track("onboarding_done", .{ .keys = @tagName(p.keys), .agent = @tagName(p.agent) });
     w.onboarding = .start;
     w.closeOverlay();
 }
