@@ -39,6 +39,8 @@ test {
     _ = @import("agents.zig");
     _ = @import("agent_launch.zig");
     _ = @import("pi.zig");
+    _ = @import("file_icons.zig");
+    _ = @import("tests_file_icons.zig");
     _ = @import("tests_settings.zig");
     _ = @import("tests_onboarding.zig");
     _ = @import("tests_followup.zig");
