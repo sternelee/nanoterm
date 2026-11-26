@@ -13,11 +13,24 @@ const view_turn = @import("view_turn.zig");
 const App = @import("session.zig").Session;
 const Item = agent_mod.Item;
 
-/// Where the reply starts: the text items after the last other item.
+/// A working step: a thought, a tool call, or a command the agent ran.
+fn isStep(it: Item) bool {
+    return switch (it) {
+        .thought, .tool, .command => true,
+        else => false,
+    };
+}
+
+/// Where the reply starts: just after the last working step. Text, notes,
+/// visuals, plans and questions after it stay in view; only text before it
+/// is narration that folds with the steps. An error note at the end of a
+/// turn (fx's `error: …`) must not pull the answer before it into the fold.
 pub fn replyStart(items: []const Item) usize {
-    var i = items.len;
-    while (i > 0 and items[i - 1] == .text) i -= 1;
-    return i;
+    var last_step: ?usize = null;
+    for (items, 0..) |it, i| {
+        if (isStep(it)) last_step = i;
+    }
+    return if (last_step) |s| s + 1 else 0;
 }
 
 /// Whether item `i` folds into a group.
@@ -125,4 +138,22 @@ pub fn group(c: *ui.Context, app: *App, t: *agent_mod.Turn, from: usize, to: usi
     const steps = ui.div(c).column().grow().gap(10);
     defer steps.end();
     for (items) |*it| if (shown(t, it)) view_turn.item(c, app, t, it);
+}
+
+test "a trailing error note does not fold the answer before it" {
+    const items = [_]Item{
+        .{ .thought = .empty },
+        .{ .text = .empty }, // the answer
+        .{ .note = @constCast("error: ConflictingIdentity") },
+    };
+    // The reply starts after the thought; the answer and the note stay in view.
+    try std.testing.expectEqual(@as(usize, 1), replyStart(&items));
+    try std.testing.expect(folds(&items, 0, 1)); // thought folds
+    try std.testing.expect(!folds(&items, 1, 1)); // answer stays
+    try std.testing.expect(!folds(&items, 2, 1)); // error stays
+}
+
+test "without a step the whole turn is the reply" {
+    const items = [_]Item{.{ .text = .empty }};
+    try std.testing.expectEqual(@as(usize, 0), replyStart(&items));
 }
